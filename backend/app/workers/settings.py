@@ -10,6 +10,11 @@ async def ping(ctx: dict[str, Any]) -> str:
     return "pong"
 
 
+HEALTH_CHECK_INTERVAL_SECONDS = 30
+
+
 class WorkerSettings:
     functions: ClassVar[list[Any]] = [ping]
     redis_settings = RedisSettings.from_dsn(str(get_settings().redis_url))
+    # Lets `arq --check` (the container healthcheck) see a recent heartbeat.
+    health_check_interval = HEALTH_CHECK_INTERVAL_SECONDS

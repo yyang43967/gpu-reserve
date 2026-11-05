@@ -1,0 +1,17 @@
+# Local-only conveniences, loaded automatically by `docker compose`.
+# CI and production run the built images without this file.
+
+services:
+  api:
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    volumes:
+      - ./backend/app:/app/app:ro
+
+  worker:
+    volumes:
+      - ./backend/app:/app/app:ro
+
+  frontend:
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
