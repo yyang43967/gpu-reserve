@@ -1,0 +1,128 @@
+# Local development stack.
+#
+#   docker compose --profile core up -d    # postgres, redis, api
+#   docker compose --profile full up -d    # + worker, mailpit, frontend
+#
+# docker-compose.override.yml (loaded automatically) adds hot reload and source
+# bind mounts. Use `-f docker-compose.yml` to run the built images as-is.
+
+name: gpu-reserve
+
+x-backend-env: &backend-env
+  ENVIRONMENT: local
+  DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-gpureserve}:${POSTGRES_PASSWORD:-gpureserve}@postgres:5432/${POSTGRES_DB:-gpureserve}
+  REDIS_URL: redis://redis:6379/0
+  CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173}
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    profiles: [core, full]
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-gpureserve}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-gpureserve}
+      POSTGRES_DB: ${POSTGRES_DB:-gpureserve}
+    command: postgres -c shared_buffers=128MB -c max_connections=50
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    mem_limit: 512m
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    profiles: [core, full]
+    command: redis-server --maxmemory 64mb --maxmemory-policy noeviction --save "" --appendonly no
+    ports:
+      - "127.0.0.1:6379:6379"
+    mem_limit: 128m
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build:
+      context: ./backend
+    image: gpu-reserve-api:local
+    profiles: [core, full]
+    environment: *backend-env
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    mem_limit: 384m
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/ready', timeout=3)"
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+
+  worker:
+    image: gpu-reserve-api:local
+    profiles: [full]
+    command: arq app.workers.settings.WorkerSettings
+    environment: *backend-env
+    depends_on:
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_started
+    mem_limit: 256m
+    healthcheck:
+      test: ["CMD", "arq", "--check", "app.workers.settings.WorkerSettings"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  mailpit:
+    image: axllent/mailpit:v1.33
+    profiles: [full]
+    ports:
+      - "127.0.0.1:8025:8025"
+      - "127.0.0.1:1025:1025"
+    mem_limit: 64m
+    healthcheck:
+      test: ["CMD", "/mailpit", "readyz"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.dev
+    profiles: [full]
+    environment:
+      VITE_API_PROXY_TARGET: http://api:8000
+    ports:
+      - "127.0.0.1:5173:5173"
+    depends_on:
+      api:
+        condition: service_healthy
+    # The Vite dev server settles around 440 MiB of heap.
+    mem_limit: 768m
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:5173/"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 15s
+
+volumes:
+  postgres-data:
