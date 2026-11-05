@@ -5,6 +5,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from redis.asyncio import Redis
 
+from app.api import health
 from app.core.config import Settings, get_settings
 from app.db.session import create_engine, create_session_factory
 
@@ -37,6 +38,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    app.include_router(health.router, prefix=API_PREFIX)
 
     return app
 
