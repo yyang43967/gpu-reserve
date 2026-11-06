@@ -29,6 +29,25 @@ cd frontend && pnpm install && pnpm dev
 cd backend && uv sync && uv run pytest
 ```
 
+### Database migrations and the first admin
+
+Apply migrations, then create an admin account. The password is read from `ADMIN_PASSWORD` or prompted for. If the email already exists, that account is made an active admin and its password is reset.
+
+```bash
+cd backend
+uv run alembic upgrade head
+uv run python -m app.cli create-admin --email admin@example.edu --name "Lab Admin"
+```
+
+Against the Compose stack instead:
+
+```bash
+docker compose run --rm api alembic upgrade head
+docker compose run --rm api python -m app.cli create-admin --email admin@example.edu --name "Lab Admin"
+```
+
+Admins manage other accounts at `/admin/users` in the web app.
+
 ## Repository layout
 
 | Path | Contents |
