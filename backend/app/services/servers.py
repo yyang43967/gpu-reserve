@@ -12,6 +12,8 @@ from app.core.unset import UNSET, Unset
 from app.models import Gpu, GpuModel, Lab, Server, ServerStatus, User
 from app.models.server import DEFAULT_MAX_BOOKING_HOURS, GPU_MEMORY_GB
 from app.services.labs import can_see_inactive
+from app.services.storage import ObjectStorage
+from app.services.uploads import UploadPurpose, verify_upload
 
 HOSTNAME_UNIQUE_CONSTRAINT = "uq_servers_hostname"
 
@@ -297,9 +299,39 @@ async def update_server(
     return await get_server_with_lab(session, server.id)
 
 
-async def delete_server(session: AsyncSession, server_id: uuid.UUID) -> None:
-    """Delete a server. Its GPU rows go with it (ON DELETE CASCADE)."""
+async def set_image(
+    session: AsyncSession,
+    storage: ObjectStorage,
+    actor: User,
+    server_id: uuid.UUID,
+    image_key: str | None,
+) -> str | None:
+    """Point the server at an uploaded image, or remove it with None.
+
+    The upload is verified before the key is saved. Returns the key this replaced, which
+    the caller deletes from storage once the transaction has committed, or None when
+    nothing was replaced (including when the key did not change).
+    """
+    server = await _lock_server(session, server_id)
+    if image_key == server.image_key:
+        return None
+    if image_key is not None:
+        await verify_upload(storage, image_key, purpose=UploadPurpose.SERVER_IMAGE, owner=actor)
+    replaced = server.image_key
+    server.image_key = image_key
+    await session.flush()
+    return replaced
+
+
+async def delete_server(session: AsyncSession, server_id: uuid.UUID) -> str | None:
+    """Delete a server. Its GPU rows go with it (ON DELETE CASCADE).
+
+    Returns the server's image key, which the caller deletes from storage once the
+    transaction has committed.
+    """
     server = await _lock_server(session, server_id)
     await _ensure_server_deletable(session, server.id)
+    image_key = server.image_key
     await session.delete(server)
     await session.flush()
+    return image_key

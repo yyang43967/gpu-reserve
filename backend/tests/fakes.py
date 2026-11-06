@@ -1,8 +1,9 @@
 """In-memory stand-ins for external services."""
 
 from dataclasses import dataclass, field
+from datetime import datetime
 
-from app.services.storage import ObjectInfo, PresignedPost
+from app.services.storage import ObjectInfo, PresignedPost, signing_window_start
 
 
 @dataclass
@@ -27,6 +28,11 @@ class FakeStorage:
         return PresignedPost(
             url="http://storage.test/uploads",
             fields={"key": key, "Content-Type": content_type, "policy": "signed"},
+        )
+
+    def download_url(self, key: str, *, now: datetime) -> str:
+        return (
+            f"http://storage.test/uploads/{key}?signed={signing_window_start(now):%Y%m%dT%H%M%SZ}"
         )
 
     async def head(self, key: str) -> ObjectInfo | None:

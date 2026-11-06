@@ -196,3 +196,27 @@ def test_cors_preflight_allows_only_the_frontend(seaweedfs_url: str) -> None:
 
     assert preflight(FRONTEND_ORIGIN).headers.get("access-control-allow-origin") == FRONTEND_ORIGIN
     assert "access-control-allow-origin" not in preflight("http://evil.example").headers
+
+
+def test_download_url_serves_the_object(storage: S3Storage) -> None:
+    key = f"servers/{uuid.uuid4().hex}.png"
+    storage._internal.put_object(Bucket=BUCKET, Key=key, Body=b"png-bytes", ContentType="image/png")
+    now = datetime.now(UTC)
+
+    url = storage.download_url(key, now=now)
+    response = httpx.get(url)
+
+    assert response.status_code == 200, response.text
+    assert response.content == b"png-bytes"
+    assert url == storage.download_url(key, now=now)
+
+
+def test_download_url_is_bound_to_its_key(storage: S3Storage) -> None:
+    key = f"servers/{uuid.uuid4().hex}.png"
+    other = f"servers/{uuid.uuid4().hex}.png"
+    for name in (key, other):
+        storage._internal.put_object(Bucket=BUCKET, Key=name, Body=b"png", ContentType="image/png")
+
+    url = storage.download_url(key, now=datetime.now(UTC))
+
+    assert httpx.get(url.replace(key, other)).status_code == 403

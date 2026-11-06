@@ -126,3 +126,15 @@ async def verify_upload(
         logger.warning("Rejected upload %s: %s", key, problem)
         await storage.delete(key)
         raise InvalidUpload(problem)
+
+
+async def delete_quietly(storage: ObjectStorage, key: str) -> None:
+    """Delete an object that a committed change no longer refers to.
+
+    Runs after the response, so a failure is logged and the object is left behind
+    rather than failing a change that already succeeded.
+    """
+    try:
+        await storage.delete(key)
+    except Exception:
+        logger.exception("Could not delete replaced upload %s", key)

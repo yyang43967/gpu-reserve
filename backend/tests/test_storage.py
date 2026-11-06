@@ -1,9 +1,15 @@
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
+from zoneinfo import ZoneInfo
 
+import botocore.auth
 import pytest
 
 from app.core.config import Settings
-from app.services.storage import S3Storage
+from app.services.storage import S3Storage, signing_window_start
+
+WINDOW_START = datetime(2026, 11, 6, 14, 0, tzinfo=UTC)
 
 
 def _settings(**values: object) -> Settings:
@@ -16,6 +22,10 @@ def _settings(**values: object) -> Settings:
     }
     base.update(values)
     return Settings.model_validate(base)
+
+
+def _query(url: str) -> dict[str, str]:
+    return {name: values[0] for name, values in parse_qs(urlsplit(url).query).items()}
 
 
 # --- credentials ---
@@ -68,3 +78,70 @@ def test_configured_keys_are_used(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
     assert post.fields["x-amz-credential"].startswith("test-access-key/")
+
+
+# --- windowed download URLs ---
+
+
+@pytest.mark.parametrize(
+    ("now", "start"),
+    [
+        (datetime(2026, 11, 6, 14, 0, tzinfo=UTC), WINDOW_START),
+        (datetime(2026, 11, 6, 14, 59, 59, 999999, tzinfo=UTC), WINDOW_START),
+        # 06:15 in Los Angeles (UTC-8 in November) is 14:15 UTC.
+        (datetime(2026, 11, 6, 6, 15, tzinfo=ZoneInfo("America/Los_Angeles")), WINDOW_START),
+    ],
+)
+def test_window_start(now: datetime, start: datetime) -> None:
+    assert signing_window_start(now) == start
+
+
+def test_same_url_within_a_window() -> None:
+    storage = S3Storage(_settings())
+
+    first = storage.download_url("servers/a.png", now=WINDOW_START + timedelta(minutes=1))
+    last = storage.download_url("servers/a.png", now=WINDOW_START + timedelta(minutes=59))
+
+    assert first == last
+    query = _query(first)
+    assert query["X-Amz-Date"] == "20261106T140000Z"
+    assert query["X-Amz-Expires"] == "7200"
+
+
+def test_new_url_in_the_next_window() -> None:
+    storage = S3Storage(_settings())
+
+    this_hour = storage.download_url("servers/a.png", now=WINDOW_START)
+    next_hour = storage.download_url("servers/a.png", now=WINDOW_START + timedelta(hours=1))
+
+    assert this_hour != next_hour
+    assert _query(next_hour)["X-Amz-Date"] == "20261106T150000Z"
+
+
+def test_url_uses_the_public_endpoint() -> None:
+    storage = S3Storage(
+        _settings(
+            s3_endpoint_url="http://seaweedfs:8333",
+            s3_public_endpoint_url="http://localhost:8333",
+        )
+    )
+
+    url = storage.download_url("servers/a.png", now=WINDOW_START)
+
+    assert url.startswith("http://localhost:8333/uploads/servers/a.png?")
+
+
+@pytest.mark.parametrize("key", ["servers/a.png", "avatars/1234/name with spaces+plus.png"])
+def test_signature_matches_botocore_at_the_same_time(
+    monkeypatch: pytest.MonkeyPatch, key: str
+) -> None:
+    """Cross-check against botocore's own presigner, with its clock pinned only here."""
+    storage = S3Storage(_settings())
+    monkeypatch.setattr(botocore.auth, "get_current_datetime", lambda: WINDOW_START)
+
+    expected = storage._public.generate_presigned_url(
+        "get_object", Params={"Bucket": "uploads", "Key": key}, ExpiresIn=7200
+    )
+    actual = storage.download_url(key, now=WINDOW_START + timedelta(minutes=17))
+
+    assert actual == expected

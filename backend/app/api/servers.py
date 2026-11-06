@@ -1,16 +1,18 @@
 import uuid
+from datetime import UTC, datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Query, Response, status
+from fastapi import APIRouter, BackgroundTasks, Query, Response, status
 
 from app.api import problem_responses
-from app.api.deps import AdminUser, CurrentUser, SessionDep
+from app.api.deps import AdminUser, CurrentUser, SessionDep, StorageDep
 from app.core.unset import UNSET
-from app.models import GpuModel, ServerStatus
+from app.models import GpuModel, Server, ServerStatus
 from app.models.server import MAX_GPUS_PER_SERVER
 from app.schemas.pagination import Page, PageParamsDep
 from app.schemas.server import ServerCreate, ServerRead, ServerUpdate
-from app.services import servers
+from app.services import servers, uploads
+from app.services.storage import ObjectStorage
 
 router = APIRouter(
     prefix="/servers",
@@ -24,10 +26,26 @@ _CONFLICT = problem_responses(status.HTTP_409_CONFLICT)
 _INVALID = problem_responses(status.HTTP_422_UNPROCESSABLE_CONTENT)
 
 
+def _read(server: Server, storage: ObjectStorage, now: datetime) -> ServerRead:
+    image_url = storage.download_url(server.image_key, now=now) if server.image_key else None
+    return ServerRead.build(server, image_url)
+
+
+def _delete_after_commit(
+    background: BackgroundTasks, storage: ObjectStorage, key: str | None
+) -> None:
+    """Background tasks run after the response, and the request's transaction commits
+    before the response is sent. A request that fails, including at commit, returns an
+    error response without this task, so the object is kept."""
+    if key is not None:
+        background.add_task(uploads.delete_quietly, storage, key)
+
+
 @router.get("")
 async def list_servers(
     user: CurrentUser,
     session: SessionDep,
+    storage: StorageDep,
     paging: PageParamsDep,
     lab_id: uuid.UUID | None = None,
     gpu_model: GpuModel | None = None,
@@ -48,8 +66,9 @@ async def list_servers(
     listing = await servers.list_servers(
         session, user, filters, offset=paging.offset, limit=paging.page_size
     )
+    now = datetime.now(UTC)
     return Page[ServerRead](
-        items=[ServerRead.model_validate(server) for server in listing.items],
+        items=[_read(server, storage, now) for server in listing.items],
         total=listing.total,
         page=paging.page,
         page_size=paging.page_size,
@@ -57,23 +76,38 @@ async def list_servers(
 
 
 @router.get("/{server_id}", responses=_NOT_FOUND)
-async def get_server(server_id: uuid.UUID, user: CurrentUser, session: SessionDep) -> ServerRead:
-    return ServerRead.model_validate(await servers.get_server(session, user, server_id))
+async def get_server(
+    server_id: uuid.UUID, user: CurrentUser, session: SessionDep, storage: StorageDep
+) -> ServerRead:
+    server = await servers.get_server(session, user, server_id)
+    return _read(server, storage, datetime.now(UTC))
 
 
 @router.post("", status_code=status.HTTP_201_CREATED, responses={**_ADMIN, **_CONFLICT, **_INVALID})
-async def create_server(body: ServerCreate, admin: AdminUser, session: SessionDep) -> ServerRead:
-    """Create a server and its GPUs. GPU memory follows from the GPU model."""
-    server = await servers.create_server(session, **body.model_dump())
-    return ServerRead.model_validate(server)
+async def create_server(
+    body: ServerCreate, admin: AdminUser, session: SessionDep, storage: StorageDep
+) -> ServerRead:
+    """Create a server and its GPUs. GPU memory follows from the GPU model. `image_key`
+    is a key from POST /uploads/presign whose upload has finished."""
+    server = await servers.create_server(session, **body.model_dump(exclude={"image_key"}))
+    if body.image_key is not None:
+        await servers.set_image(session, storage, admin, server.id, body.image_key)
+        server = await servers.get_server_with_lab(session, server.id)
+    return _read(server, storage, datetime.now(UTC))
 
 
 @router.patch("/{server_id}", responses={**_ADMIN, **_NOT_FOUND, **_CONFLICT, **_INVALID})
 async def update_server(
-    server_id: uuid.UUID, body: ServerUpdate, admin: AdminUser, session: SessionDep
+    server_id: uuid.UUID,
+    body: ServerUpdate,
+    admin: AdminUser,
+    session: SessionDep,
+    storage: StorageDep,
+    background: BackgroundTasks,
 ) -> ServerRead:
-    """Change any field. Omitted fields stay as they are; `interconnect: null` and
-    `notes: null` clear them. Lowering `gpu_count` removes the highest-numbered GPUs."""
+    """Change any field. Omitted fields stay as they are; `interconnect`, `notes`, and
+    `image_key` set to null clear them. Lowering `gpu_count` removes the
+    highest-numbered GPUs. A replaced image is deleted after the change is saved."""
     sent = body.model_fields_set
     server = await servers.update_server(
         session,
@@ -90,7 +124,11 @@ async def update_server(
         max_booking_hours=body.max_booking_hours,
         notes=body.notes if "notes" in sent else UNSET,
     )
-    return ServerRead.model_validate(server)
+    if "image_key" in sent:
+        replaced = await servers.set_image(session, storage, admin, server_id, body.image_key)
+        _delete_after_commit(background, storage, replaced)
+        server = await servers.get_server_with_lab(session, server_id)
+    return _read(server, storage, datetime.now(UTC))
 
 
 @router.delete(
@@ -98,6 +136,14 @@ async def update_server(
     status_code=status.HTTP_204_NO_CONTENT,
     responses={**_ADMIN, **_NOT_FOUND, **_CONFLICT},
 )
-async def delete_server(server_id: uuid.UUID, admin: AdminUser, session: SessionDep) -> Response:
-    await servers.delete_server(session, server_id)
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
+async def delete_server(
+    server_id: uuid.UUID,
+    admin: AdminUser,
+    session: SessionDep,
+    storage: StorageDep,
+    background: BackgroundTasks,
+) -> Response:
+    """Delete a server and its GPUs. Its image is deleted after the change is saved."""
+    image_key = await servers.delete_server(session, server_id)
+    _delete_after_commit(background, storage, image_key)
+    return Response(status_code=status.HTTP_204_NO_CONTENT, background=background)
