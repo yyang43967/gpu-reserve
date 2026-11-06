@@ -85,3 +85,20 @@ async def db_session(engine: AsyncEngine) -> AsyncIterator[AsyncSession]:
     async with create_session_factory(engine)() as session:
         yield session
     await truncate_all(engine)
+
+
+@pytest.fixture
+async def api_client(
+    make_settings: Callable[..., Settings], engine: AsyncEngine
+) -> AsyncIterator[AsyncClient]:
+    """A client for a running app on the migrated database, emptied after the test.
+
+    HTTPS, so the client's cookie jar honors the Secure flag like a browser would.
+    """
+    app: FastAPI = create_app(make_settings())
+    async with (
+        app.router.lifespan_context(app),
+        AsyncClient(transport=ASGITransport(app=app), base_url="https://test") as client,
+    ):
+        yield client
+    await truncate_all(engine)

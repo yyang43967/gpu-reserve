@@ -5,12 +5,10 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from redis.asyncio import Redis
 
-from app.api import health
+from app.api import API_PREFIX, auth, health
 from app.core.config import Settings, get_settings
 from app.core.errors import register_error_handlers
 from app.db.session import create_engine, create_session_factory
-
-API_PREFIX = "/api/v1"
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -43,6 +41,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
 
     app.include_router(health.router, prefix=API_PREFIX)
+    app.include_router(auth.router, prefix=API_PREFIX)
 
     return app
 

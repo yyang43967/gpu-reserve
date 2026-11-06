@@ -71,6 +71,18 @@ def build_problem(
     )
 
 
+def domain_error_response(exc: DomainError, *, base_url: str, instance: str) -> ProblemResponse:
+    """Render a domain error. Routes use it when they must add headers or cookies."""
+    return build_problem(
+        base_url=base_url,
+        status_code=STATUS_BY_KIND[exc.kind],
+        slug=exc.type_slug,
+        title=exc.title,
+        detail=exc.detail,
+        instance=instance,
+    )
+
+
 def _field_errors(errors: Sequence[Any]) -> list[FieldError]:
     result: list[FieldError] = []
     for error in errors:
@@ -129,14 +141,7 @@ def register_error_handlers(app: FastAPI, base_url: str) -> None:
 
     async def handle_domain_error(request: Request, exc: Exception) -> ProblemResponse:
         assert isinstance(exc, DomainError)  # noqa: S101 - narrowed by registration
-        return build_problem(
-            base_url=base_url,
-            status_code=STATUS_BY_KIND[exc.kind],
-            slug=exc.type_slug,
-            title=exc.title,
-            detail=exc.detail,
-            instance=request.url.path,
-        )
+        return domain_error_response(exc, base_url=base_url, instance=request.url.path)
 
     async def handle_validation_error(request: Request, exc: Exception) -> ProblemResponse:
         assert isinstance(exc, RequestValidationError)  # noqa: S101 - narrowed by registration

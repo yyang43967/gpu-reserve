@@ -37,3 +37,27 @@ class InvalidToken(DomainError):
     kind = ErrorKind.UNAUTHENTICATED
     type_slug = "invalid-token"
     title = "Invalid token"
+
+
+class NotAuthenticated(DomainError):
+    kind = ErrorKind.UNAUTHENTICATED
+    type_slug = "not-authenticated"
+    title = "Authentication required"
+
+
+class InvalidCredentials(DomainError):
+    kind = ErrorKind.UNAUTHENTICATED
+    type_slug = "invalid-credentials"
+    title = "Invalid email or password"
+
+
+class RefreshTokenReused(DomainError):
+    kind = ErrorKind.UNAUTHENTICATED
+    type_slug = "refresh-token-reused"
+    title = "Refresh token reused"
+
+
+class EmailAlreadyRegistered(DomainError):
+    kind = ErrorKind.CONFLICT
+    type_slug = "email-taken"
+    title = "Email already registered"
