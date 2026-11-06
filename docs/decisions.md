@@ -185,7 +185,7 @@ Each entry records the context, the decision, and why. Newest phases at the bott
 
 ### Scope moved to later phases
 - **`GET /me/quota` moves to Phase 4.** Quota usage needs reservations, and a stub returning zero would be misleading.
-- **Avatar upload moves to Phase 3.** The `avatar_key` column exists now, but `PATCH /me` accepts only `full_name` until presigned uploads are built.
+- **Avatar upload moves to Phase 3.** The `avatar_key` column exists now, but `PATCH /me` accepts only `full_name` until presigned uploads are built. Done in Phase 3; see "Uploads".
 
 ### Real migrations in tests
 - **Decision:** Integration tests run `alembic upgrade head` once per session against the test container, then truncate tables between tests. A dedicated test upgrades to head, downgrades to base, and checks that autogenerate finds no drift between the models and the migrations.
@@ -224,3 +224,58 @@ Each entry records the context, the decision, and why. Newest phases at the bott
   - The allowed CORS origins follow `CORS_ORIGINS`, the same list the API uses.
   - Only the S3 port (8333) is published, on `127.0.0.1`. Data and filer metadata share the `seaweedfs-data` volume.
 - **Local only:** this setup is for development. Production uses AWS S3, with bucket CORS for the frontend origin and an IAM policy on the instance role scoped to the uploads bucket. Both are set in Terraform.
+
+### Lab names are unique regardless of case
+- **Decision:** A unique index on `lower(name)`. The stored name keeps the case the admin typed. The service checks first for a clear 409 `lab-name-taken`, and maps a violation of the index to the same error when two requests race past the check.
+- **Why:** "Vision Lab" and "vision lab" are the same lab to a person. A plain unique constraint would allow both. The `citext` extension would also work, but a single expression index is enough and keeps the column an ordinary `varchar`.
+
+### GPU memory follows from the GPU model
+- **Decision:** `servers.gpu_memory_gb` is stored, but set by the service from a fixed table keyed by `GpuModel`. The API does not accept it, and changing the model updates it.
+- **Why:** Every supported model has exactly one memory size, so an admin-entered value could only be wrong. Storing it keeps the `min_gpu_memory_gb` filter a plain indexed comparison.
+
+### GPU rows: soft removal and numbering
+- **Context:** A server's `gpu_count` can change. GPU rows must follow it, and later phases point reservations' allocations at individual GPU rows.
+- **Options considered:**
+  1. Delete the rows of removed GPUs. Simple, but rows that past allocations refer to would have to go too (cascade, losing history) or block the change forever (restrict).
+  2. Soft removal with a `removed_at` timestamp (chosen).
+- **Decision:**
+  - GPUs are numbered 0 to `gpu_count - 1`. A partial unique index on `(server_id, index) WHERE removed_at IS NULL` allows one active GPU per number, and a plain index on `server_id` covers removed rows for cascades and history lookups.
+  - Lowering the count sets `removed_at` on the highest numbers. Low numbers stay stable, which fits allocation picking the lowest free numbers.
+  - Raising it reactivates the most recently removed row for each missing number before inserting new rows, so a GPU that comes back keeps its row and history. In practice there is at most one row per number.
+  - `servers.gpu_count` always equals the number of active rows. Tests check this after every path.
+- **Concurrency:** Updating or deleting a server first takes `SELECT … FOR UPDATE` on the server row. Two concurrent `gpu_count` changes are applied one after the other, each seeing the other's result. A test sends twelve concurrent changes and checks the invariant; with the lock removed, it fails.
+- **Allocations (Phase 4):** Reducing `gpu_count` must be refused when the GPUs being removed have future active allocations, and deleting a server when it has future active reservations. Allocations do not exist yet, so for now every reduction and deletion is allowed. Both checks have a single home, `_ensure_gpus_removable` and `_ensure_server_deletable`, which are called on every path and currently do nothing.
+- **Phase 4 locking note:** With hard deletes, the foreign key from allocations to GPUs would have serialized an allocation against a concurrent removal, since an FK check takes a `KEY SHARE` lock that conflicts with `DELETE`. Soft removal is an `UPDATE` of a non-key column, which does not conflict with `KEY SHARE`. So allocation has to lock the server row `FOR SHARE` (which conflicts with the `FOR UPDATE` taken here) and select only GPUs with `removed_at IS NULL`.
+
+### Who sees which labs and servers
+- **Decision:** Admins see everything. Students see active labs, and servers that are not `retired` in active labs. The rule lives in the service, so it applies to the list, to every filter, and to the detail endpoints. A hidden lab or server returns 404 to a student, not 403.
+- **Why:** Retired hardware and closed labs are noise when choosing where to book. A 404 avoids confirming that a hidden record exists. Servers in `maintenance` stay visible, because students should see that the machine exists and is temporarily unavailable.
+- **Filters:** `lab_id`, `gpu_model`, `min_gpu_memory_gb` (memory per GPU), `min_gpus` (compared with the server's GPU count), and `status`. The page total counts only matching servers.
+
+### Request bodies that name a missing lab
+- **Decision:** Creating or moving a server to a lab that does not exist returns 422 `unknown-lab`. A missing lab in the URL path returns 404 `lab-not-found`.
+- **Why:** In the body, the lab ID is an invalid input value, not a missing resource at the requested URL.
+
+### Uploads
+- **Context:** Avatars and server images are uploaded by the browser directly to storage, so the API never handles the bytes. A presigned URL is a credential handed to the client, so the rules have to hold even if the client misbehaves.
+- **Who may upload what:** `POST /uploads/presign` takes a `purpose`. `avatar` is open to every signed-in user, and `server_image` is admin-only (403 otherwise). One endpoint with authorization per purpose keeps the signing and checking code in one place.
+- **Keys:** The server generates every key: `avatars/{user_id}/{random}.{ext}` and `servers/{random}.{ext}`. Clients never choose keys, so they cannot overwrite each other's objects.
+- **Limits:** PNG, JPEG, or WebP only. Avatars up to 2 MiB, server images up to 5 MiB.
+- **Presigned POST over presigned PUT:** A presigned POST carries a signed policy with an exact key, an exact `Content-Type`, and `content-length-range [1, limit]`, and storage enforces it. A presigned PUT can fix the length too (the local storage server rejected a mismatched signed `Content-Length`), but only to one exact size declared in advance. The POST policy expresses the actual rule, a range. The size the client declares when asking for a URL is checked only to fail fast.
+- **Checked before saving:** Nothing trusts the upload having gone through the policy. Before a key is saved on a profile or server, `verify_upload`:
+  - rejects keys outside the caller's own prefix for that purpose (another user's avatar, nested paths), with 422 `invalid-upload`;
+  - HEADs the object and returns 422 `upload-not-found` if nothing is there;
+  - deletes the object and returns 422 `invalid-upload` if it is too large, empty, or not an allowed type.
+  The checks run in the same transaction as the change, so a failed check leaves the record untouched.
+- **Replacing and removing:** Saving the same key again does nothing. When a key is replaced or removed, or its server or user is deleted, the old object is deleted only after the change has committed. The service returns the superseded key, and the router queues the delete as a background task. The request's transaction commits before the response is sent and background tasks run after it, while a request that fails (including at commit) returns an error response without the task. A failed delete is logged and does not fail the request.
+- **Blank storage settings:** An env file line such as `S3_ACCESS_KEY_ID=` is treated as unset. Passing an empty string to boto3 would count as an explicit empty key and skip the default credential chain, which is how production gets the instance role's credentials. A test checks that blank keys fall through to the chain.
+
+### Download URLs that browsers can cache
+- **Context:** The uploads bucket is private, so images are served through presigned GET URLs. A URL signed at the current time is different on every request, so the browser downloads the same image again on every page load.
+- **Decision:** Sign as of the start of the current hour, with a two-hour expiry. Every request within an hour gets the same URL for the same object, and every URL stays valid for at least an hour after it is handed out.
+- **How the time is fixed:** botocore's presigner reads the clock inside `add_auth`. Patching that clock is global state, and HEAD and DELETE calls run in worker threads at the same time. Instead, a small subclass of botocore's `S3SigV4QueryAuth` takes the signing time as a constructor argument and sets it on the request before running the same signing steps. The request is built as an `AWSRequest` for the public endpoint, so no shared state is touched. A unit test checks that the result equals botocore's own `generate_presigned_url` at the same time, including keys with spaces and `+`. An integration test downloads through such a URL from the local storage server.
+- **Caveat:** With temporary credentials (the instance role), a URL also stops working when the credentials it was signed with expire. Rotated credentials also change the URL within the hour. Both only cost a reload or a cache miss.
+
+### Known gaps for Phase 5
+- **Orphaned uploads:** Uploads that are never saved on a record, and objects whose delete failed, stay in the bucket. Options: an S3 lifecycle rule on a pending prefix, with keys moved on save, or an ARQ job that lists objects and removes those no record refers to and that are older than the upload URL lifetime.
+- **Presign rate limiting:** `POST /uploads/presign` has no rate limit. Any signed-in user can request many upload URLs and fill the bucket within the per-file limit. The fix is a per-user fixed-window counter in Redis, like the login limits, plus a cap on stored bytes per user if abuse shows up.
