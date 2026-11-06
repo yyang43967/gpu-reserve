@@ -9,6 +9,7 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { ApiError } from "@/lib/api";
 import type { Server } from "@/lib/api-types";
+import { isUuid } from "@/lib/validation";
 import { GPU_MODELS, SERVER_STATUS_LABELS, getServer, serverKey } from "@/servers/servers-api";
 
 const STATUS_VARIANTS = {
@@ -17,9 +18,8 @@ const STATUS_VARIANTS = {
   retired: "destructive",
 } as const;
 
-/** A missing server, or an id that is not even well formed. */
 function isNotFound(error: Error): boolean {
-  return error instanceof ApiError && (error.status === 404 || error.status === 422);
+  return error instanceof ApiError && error.status === 404;
 }
 
 function BackLink() {
@@ -149,35 +149,52 @@ function ServerDetails({ server }: { server: Server }) {
   );
 }
 
+function NotFound() {
+  return (
+    <EmptyState
+      title="Server not found"
+      description="It may have been removed, or the link is wrong."
+      action={
+        <Link to="/servers" className="text-sm underline underline-offset-4">
+          Browse servers
+        </Link>
+      }
+    />
+  );
+}
+
 export function ServerDetailPage() {
   const { serverId = "" } = useParams();
+  // A malformed id cannot match a server; skip the request.
+  const validId = isUuid(serverId);
   const server = useQuery({
     queryKey: serverKey(serverId),
     queryFn: ({ signal }) => getServer(serverId, signal),
+    enabled: validId,
   });
 
+  const header = <PageHeader title="Server details" description="Specs and availability." />;
   let body;
-  if (server.isPending) {
+  if (!validId) {
     body = (
       <>
-        <PageHeader title="Server details" description="Specs and availability." />
+        {header}
+        <NotFound />
+      </>
+    );
+  } else if (server.isPending) {
+    body = (
+      <>
+        {header}
         <LoadingState label="Loading server" />
       </>
     );
   } else if (server.isError) {
     body = (
       <>
-        <PageHeader title="Server details" description="Specs and availability." />
+        {header}
         {isNotFound(server.error) ? (
-          <EmptyState
-            title="Server not found"
-            description="It may have been removed, or the link is wrong."
-            action={
-              <Link to="/servers" className="text-sm underline underline-offset-4">
-                Browse servers
-              </Link>
-            }
-          />
+          <NotFound />
         ) : (
           <ErrorState
             title="Could not load this server"

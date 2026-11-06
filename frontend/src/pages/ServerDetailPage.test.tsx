@@ -4,8 +4,11 @@ import { describe, expect, it } from "vitest";
 import { fakeApi, healthy, makeServer, on, page, problem, signedInAs } from "@/test/fake-api";
 import { renderRoute } from "@/test/render";
 
+const SERVER_ID = "6f1c2a7e-3b9d-4c55-9a0e-2d8f1b7c4e10";
+const MISSING_ID = "0b8e9f4a-1c2d-4e3f-8a5b-6c7d8e9f0a1b";
+
 const server = makeServer({
-  id: "server-1",
+  id: SERVER_ID,
   hostname: "vision-a100-01",
   lab: { id: "lab-1", name: "Vision Lab", timezone: "America/Los_Angeles", is_active: true },
   gpu_model: "A100_80GB",
@@ -28,9 +31,9 @@ describe("server detail page", () => {
     fakeApi(
       ...signedInAs("student"),
       healthy,
-      on("GET", "/servers/server-1", () => Response.json(server)),
+      on("GET", `/servers/${SERVER_ID}`, () => Response.json(server)),
     );
-    renderRoute("/servers/server-1");
+    renderRoute(`/servers/${SERVER_ID}`);
 
     expect(await screen.findByRole("heading", { name: "vision-a100-01" })).toBeInTheDocument();
     expect(screen.getByText("Vision Lab · America/Los_Angeles")).toBeInTheDocument();
@@ -55,11 +58,11 @@ describe("server detail page", () => {
     fakeApi(
       ...signedInAs("student"),
       healthy,
-      on("GET", "/servers/server-1", () =>
+      on("GET", `/servers/${SERVER_ID}`, () =>
         Response.json({ ...server, gpu_memory_gb: 81, gpu_count: 2 }),
       ),
     );
-    renderRoute("/servers/server-1");
+    renderRoute(`/servers/${SERVER_ID}`);
 
     await screen.findByRole("heading", { name: "vision-a100-01" });
     expect(spec("Memory per GPU")).toBe("81 GB");
@@ -70,7 +73,7 @@ describe("server detail page", () => {
     fakeApi(
       ...signedInAs("student"),
       healthy,
-      on("GET", "/servers/server-1", () =>
+      on("GET", `/servers/${SERVER_ID}`, () =>
         Response.json({
           ...server,
           requires_approval: true,
@@ -82,7 +85,7 @@ describe("server detail page", () => {
         }),
       ),
     );
-    renderRoute("/servers/server-1");
+    renderRoute(`/servers/${SERVER_ID}`);
 
     await screen.findByRole("heading", { name: "vision-a100-01" });
     expect(screen.getByText("Requires approval")).toBeInTheDocument();
@@ -101,11 +104,11 @@ describe("server detail page", () => {
     fakeApi(
       ...signedInAs("admin"),
       healthy,
-      on("GET", "/servers/server-1", () =>
+      on("GET", `/servers/${SERVER_ID}`, () =>
         Response.json({ ...server, lab: { ...server.lab, is_active: false } }),
       ),
     );
-    renderRoute("/servers/server-1");
+    renderRoute(`/servers/${SERVER_ID}`);
 
     expect(await screen.findByText("Lab inactive")).toBeInTheDocument();
   });
@@ -114,9 +117,9 @@ describe("server detail page", () => {
     fakeApi(
       ...signedInAs("student"),
       healthy,
-      on("GET", "/servers/server-1", () => Response.json(server)),
+      on("GET", `/servers/${SERVER_ID}`, () => Response.json(server)),
     );
-    renderRoute("/servers/server-1");
+    renderRoute(`/servers/${SERVER_ID}`);
 
     const heading = await screen.findByRole("heading", { name: "Availability" });
     const card = heading.closest("[data-slot=card]");
@@ -128,24 +131,21 @@ describe("server detail page", () => {
     fakeApi(
       ...signedInAs("student"),
       healthy,
-      on("GET", "/servers/server-1", () => Response.json(server)),
+      on("GET", `/servers/${SERVER_ID}`, () => Response.json(server)),
     );
-    renderRoute("/servers/server-1");
+    renderRoute(`/servers/${SERVER_ID}`);
 
     expect(await screen.findByText("Loading server")).toBeInTheDocument();
     expect(await screen.findByRole("heading", { name: "vision-a100-01" })).toBeInTheDocument();
   });
 
-  it.each([
-    [404, "server-not-found"],
-    [422, "validation-error"],
-  ])("says the server was not found on a %i", async (status, slug) => {
+  it("says the server was not found on a 404", async () => {
     fakeApi(
       ...signedInAs("student"),
       healthy,
-      on("GET", "/servers/missing", () => problem(status, slug)),
+      on("GET", `/servers/${MISSING_ID}`, () => problem(404, "server-not-found")),
     );
-    renderRoute("/servers/missing");
+    renderRoute(`/servers/${MISSING_ID}`);
 
     expect(await screen.findByText("Server not found")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Browse servers" })).toHaveAttribute(
@@ -155,18 +155,26 @@ describe("server detail page", () => {
     expect(screen.queryByRole("button", { name: "Try again" })).not.toBeInTheDocument();
   });
 
+  it("goes straight to not found for a malformed id, without a request", async () => {
+    const requests = fakeApi(...signedInAs("student"), healthy);
+    renderRoute("/servers/not-a-uuid");
+
+    expect(await screen.findByText("Server not found")).toBeInTheDocument();
+    expect(requests.filter((request) => request.path.startsWith("/servers"))).toHaveLength(0);
+  });
+
   it("shows other errors with a retry", async () => {
     let fail = true;
     fakeApi(
       ...signedInAs("student"),
       healthy,
-      on("GET", "/servers/server-1", () =>
+      on("GET", `/servers/${SERVER_ID}`, () =>
         fail
           ? problem(500, "internal-error", { detail: "The server failed." })
           : Response.json(server),
       ),
     );
-    renderRoute("/servers/server-1");
+    renderRoute(`/servers/${SERVER_ID}`);
 
     expect(await screen.findByText("Could not load this server")).toBeInTheDocument();
     expect(screen.getByText("The server failed.")).toBeInTheDocument();
@@ -182,13 +190,13 @@ describe("server detail page", () => {
       healthy,
       on("GET", "/labs", () => Response.json(page([]))),
       on("GET", "/servers", () => Response.json(page([server]))),
-      on("GET", "/servers/server-1", () => Response.json(server)),
+      on("GET", `/servers/${SERVER_ID}`, () => Response.json(server)),
     );
     const { router } = renderRoute("/servers");
 
     fireEvent.click(await screen.findByRole("link", { name: /vision-a100-01/ }));
 
     expect(await screen.findByText("Total GPU memory")).toBeInTheDocument();
-    expect(router.state.location.pathname).toBe("/servers/server-1");
+    expect(router.state.location.pathname).toBe(`/servers/${SERVER_ID}`);
   });
 });
