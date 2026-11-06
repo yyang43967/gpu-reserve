@@ -6,8 +6,8 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
-from app.core.exceptions import NotAuthenticated
-from app.models import User
+from app.core.exceptions import NotAuthenticated, PermissionDenied
+from app.models import User, UserRole
 from app.services import auth
 from app.services.rate_limit import RateLimiter
 
@@ -59,3 +59,12 @@ async def get_current_user(
 
 
 CurrentUser = Annotated[User, Depends(get_current_user)]
+
+
+async def require_admin(user: CurrentUser) -> User:
+    if user.role is not UserRole.ADMIN:
+        raise PermissionDenied("This action requires an administrator.")
+    return user
+
+
+AdminUser = Annotated[User, Depends(require_admin)]

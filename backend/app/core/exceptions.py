@@ -89,3 +89,23 @@ class IncorrectPassword(DomainError):
     kind = ErrorKind.INVALID
     type_slug = "incorrect-password"
     title = "Incorrect password"
+
+
+class PermissionDenied(DomainError):
+    kind = ErrorKind.FORBIDDEN
+    type_slug = "forbidden"
+    title = "Permission denied"
+
+
+class UserNotFound(DomainError):
+    kind = ErrorKind.NOT_FOUND
+    type_slug = "user-not-found"
+    title = "User not found"
+
+
+class SelfModificationForbidden(DomainError):
+    """An admin tried to delete, deactivate, or demote their own account."""
+
+    kind = ErrorKind.CONFLICT
+    type_slug = "cannot-modify-self"
+    title = "Cannot modify own account"
