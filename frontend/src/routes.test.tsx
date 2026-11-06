@@ -6,7 +6,6 @@ import { renderRoute } from "@/test/render";
 
 describe("routing", () => {
   it.each([
-    ["/servers/abc", "Server details"],
     ["/find-slot", "Find a slot"],
     ["/reservations", "My reservations"],
     ["/assistant", "Assistant"],

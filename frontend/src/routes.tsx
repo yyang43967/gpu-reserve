@@ -12,10 +12,10 @@ import {
   FindSlotPage,
   MyReservationsPage,
   NotFoundPage,
-  ServerDetailPage,
 } from "@/pages/placeholders";
 import { RegisterPage } from "@/pages/RegisterPage";
 import { RouteErrorPage } from "@/pages/RouteErrorPage";
+import { ServerDetailPage } from "@/pages/ServerDetailPage";
 import { ServersPage } from "@/pages/ServersPage";
 
 export const routes: RouteObject[] = [
