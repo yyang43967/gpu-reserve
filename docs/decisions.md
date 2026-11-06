@@ -90,7 +90,7 @@ Each entry records the context, the decision, and why. Newest phases at the bott
 - **Decision:** The access token (HS256, 15 minutes) lives only in a module variable. The refresh token lives in an `HttpOnly` cookie. A page load gets a fresh access token from the cookie.
 - **Why:**
   - Anything in `localStorage` can be read by any script that runs on the page, so one XSS bug would leak long-lived credentials.
-  - An `HttpOnly` cookie cannot be read by scripts. An XSS bug could still make requests while the page is open, but it cannot carry the session away.
+  - An `HttpOnly` cookie cannot be read by scripts. An injected script running on the page can still call the refresh endpoint (the browser attaches the cookie) and send itself the short-lived access tokens it gets back, for as long as the page stays open. It can never read the long-lived refresh token itself, so the attack ends when the page closes and the stolen access tokens expire within 15 minutes.
   - Keeping the access token out of cookies means ordinary API requests carry it in the `Authorization` header and are not exposed to CSRF.
 - **Signing key:** `JWT_SECRET` has no default in the settings class and must be at least 32 bytes in every environment. The development value lives only in the Compose file and the test configuration, so a deployment that forgets to set it fails at startup instead of signing tokens with a published key.
 
@@ -143,6 +143,7 @@ Each entry records the context, the decision, and why. Newest phases at the bott
 ### Login responses do not reveal accounts
 - **Decision:** An unknown email, a wrong password, and an inactive account all return the same 401 `invalid-credentials`. For an unknown email the service still verifies against a dummy hash, and the active check happens only after the password is verified.
 - **Why:** Equal responses and similar timing keep the login form from being used to discover which emails have accounts, or which accounts are disabled.
+- **Known gap: registration.** Registering an email that already has an account returns 409 `email-taken`, so the registration form does reveal whether an email exists. This is an accepted usability trade-off: the user learns immediately to sign in instead. Enumeration through it is slowed by the per-IP registration limit (20 per hour). The full fix is email verification: registration always answers "check your inbox", and the email sent to an existing user tells them their account already exists.
 
 ### Error kinds and RFC 7807 responses
 - **Options considered:** raise FastAPI `HTTPException` from services; return result objects; raise domain exceptions mapped in one place (chosen).
