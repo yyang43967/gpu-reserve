@@ -175,6 +175,14 @@ MATRIX = [
         path_params=_server,
     ),
     RouteCase("DELETE", "/servers/{server_id}", Access.ADMIN, path_params=_server),
+    # Open to every signed-in user for avatars. Server images are admin-only; that rule
+    # lives in the uploads service and is tested in test_uploads_api.
+    RouteCase(
+        "POST",
+        "/uploads/presign",
+        Access.AUTHENTICATED,
+        body=lambda ctx: {"purpose": "avatar", "content_type": "image/png", "size_bytes": 1000},
+    ),
 ]
 
 PROTECTED = [case for case in MATRIX if case.access in {Access.AUTHENTICATED, Access.ADMIN}]

@@ -58,6 +58,19 @@ class Settings(BaseSettings):
     password_change_failure_limit: int = Field(default=5, gt=0)
     password_change_window_seconds: int = Field(default=15 * 60, gt=0)
 
+    # Object storage. Without an endpoint URL, boto3 talks to AWS S3 and takes
+    # credentials from the environment or the instance role.
+    s3_endpoint_url: str | None = None
+    # The endpoint browsers use. Presigned URLs are signed for this host, so it must be
+    # the address the browser sends the upload to. Defaults to s3_endpoint_url.
+    s3_public_endpoint_url: str | None = None
+    s3_region: str | None = None
+    s3_access_key_id: str | None = None
+    s3_secret_access_key: SecretStr | None = None
+    s3_bucket_uploads: str = "gpu-reserve-uploads"
+    # How long a presigned upload stays usable.
+    upload_url_ttl_seconds: int = Field(default=300, gt=0)
+
     @field_validator("cors_origins", mode="before")
     @classmethod
     def split_origins(cls, value: object) -> object:

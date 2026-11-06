@@ -164,3 +164,17 @@ class GpusInUse(DomainError):
     kind = ErrorKind.CONFLICT
     type_slug = "gpus-in-use"
     title = "GPUs in use"
+
+
+class InvalidUpload(DomainError):
+    """An upload request or an uploaded object breaks the upload rules."""
+
+    kind = ErrorKind.INVALID
+    type_slug = "invalid-upload"
+    title = "Invalid upload"
+
+
+class UploadNotFound(DomainError):
+    kind = ErrorKind.INVALID
+    type_slug = "upload-not-found"
+    title = "Upload not found"

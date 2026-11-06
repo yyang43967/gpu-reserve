@@ -10,6 +10,7 @@ from app.core.exceptions import NotAuthenticated, PermissionDenied
 from app.models import User, UserRole
 from app.services import auth
 from app.services.rate_limit import RateLimiter
+from app.services.storage import ObjectStorage
 
 _bearer = HTTPBearer(auto_error=False)
 
@@ -34,6 +35,11 @@ def get_rate_limiter(request: Request) -> RateLimiter:
     return RateLimiter(request.app.state.redis, request.app.state.settings)
 
 
+def get_storage(request: Request) -> ObjectStorage:
+    storage: ObjectStorage = request.app.state.storage
+    return storage
+
+
 def get_client_ip(request: Request) -> str:
     """The peer address. Behind the reverse proxy, uvicorn's --proxy-headers sets it from
     X-Forwarded-For, trusting only the addresses in FORWARDED_ALLOW_IPS."""
@@ -42,6 +48,7 @@ def get_client_ip(request: Request) -> str:
 
 SettingsDep = Annotated[Settings, Depends(get_settings)]
 RateLimiterDep = Annotated[RateLimiter, Depends(get_rate_limiter)]
+StorageDep = Annotated[ObjectStorage, Depends(get_storage)]
 ClientIp = Annotated[str, Depends(get_client_ip)]
 # scope="function" commits before the response is sent, so a client never sees success
 # for a change that then fails to commit.
