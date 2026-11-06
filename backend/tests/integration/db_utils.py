@@ -37,4 +37,6 @@ async def create_database(admin_url: str, name: str) -> str:
 async def truncate_all(engine: AsyncEngine) -> None:
     tables = ", ".join(f'"{table.name}"' for table in Base.metadata.sorted_tables)
     async with engine.begin() as conn:
+        # Fail fast instead of hanging if a test left a transaction open.
+        await conn.execute(text("SET LOCAL lock_timeout = '5s'"))
         await conn.execute(text(f"TRUNCATE {tables} RESTART IDENTITY CASCADE"))

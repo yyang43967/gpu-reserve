@@ -81,22 +81,31 @@ async def engine(make_settings: Callable[..., Settings]) -> AsyncIterator[AsyncE
 
 
 @pytest.fixture
-async def db_session(engine: AsyncEngine) -> AsyncIterator[AsyncSession]:
-    """A session on the migrated database. Every table is emptied after the test."""
-    async with create_session_factory(engine)() as session:
-        yield session
+async def clean_database(engine: AsyncEngine) -> AsyncIterator[None]:
+    """Empty every table after the test.
+
+    Fixtures that touch the database depend on this one, so it is torn down after all
+    of them: no open session can hold a lock that the TRUNCATE would wait on.
+    """
+    yield
     await truncate_all(engine)
 
 
 @pytest.fixture
+async def db_session(engine: AsyncEngine, clean_database: None) -> AsyncIterator[AsyncSession]:
+    """A session on the migrated database."""
+    async with create_session_factory(engine)() as session:
+        yield session
+
+
+@pytest.fixture
 async def running_app(
-    make_settings: Callable[..., Settings], engine: AsyncEngine, redis_url: str
+    make_settings: Callable[..., Settings], clean_database: None, redis_url: str
 ) -> AsyncIterator[FastAPI]:
     """An app with its lifespan started. Postgres and Redis are emptied afterwards."""
     app: FastAPI = create_app(make_settings())
     async with app.router.lifespan_context(app):
         yield app
-    await truncate_all(engine)
     redis = Redis.from_url(redis_url)
     await redis.flushdb()
     await redis.aclose()

@@ -109,3 +109,9 @@ class SelfModificationForbidden(DomainError):
     kind = ErrorKind.CONFLICT
     type_slug = "cannot-modify-self"
     title = "Cannot modify own account"
+
+
+class FullNameRequired(DomainError):
+    kind = ErrorKind.INVALID
+    type_slug = "full-name-required"
+    title = "Full name required"

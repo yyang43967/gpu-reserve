@@ -5,7 +5,12 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.exceptions import EmailAlreadyRegistered, SelfModificationForbidden, UserNotFound
+from app.core.exceptions import (
+    EmailAlreadyRegistered,
+    FullNameRequired,
+    SelfModificationForbidden,
+    UserNotFound,
+)
 from app.models import User, UserRole
 from app.models.user import DEFAULT_WEEKLY_GPU_HOUR_QUOTA
 from app.services import passwords, sessions
@@ -167,3 +172,36 @@ async def delete_user(session: AsyncSession, actor: User, user_id: uuid.UUID) ->
     user = await get_user_or_raise(session, user_id)
     await session.delete(user)
     await session.flush()
+
+
+@dataclass(frozen=True)
+class AdminProvisioning:
+    user: User
+    created: bool
+
+
+async def provision_admin(
+    session: AsyncSession, *, email: str, password: str, full_name: str | None
+) -> AdminProvisioning:
+    """Create an admin, or make an existing account an active admin with a new password.
+
+    Used to bootstrap the first admin and to recover a locked-out one. Resetting the
+    password signs the account out everywhere, like a normal password change.
+    """
+    existing = await get_user_by_email(session, email)
+    if existing is None:
+        if not full_name or not full_name.strip():
+            raise FullNameRequired("A full name is required to create a new account.")
+        user = await create_user(
+            session, email=email, password=password, full_name=full_name, role=UserRole.ADMIN
+        )
+        return AdminProvisioning(user=user, created=True)
+
+    existing.role = UserRole.ADMIN
+    existing.is_active = True
+    existing.password_hash = await passwords.hash_password(password)
+    if full_name and full_name.strip():
+        existing.full_name = full_name.strip()
+    await sessions.revoke_all_sessions(session, existing.id)
+    await session.flush()
+    return AdminProvisioning(user=existing, created=False)
