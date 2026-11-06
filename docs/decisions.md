@@ -164,10 +164,11 @@ Each entry records the context, the decision, and why. Newest phases at the bott
 
 ### CORS for credentialed requests from the frontend origin
 - **Context:** In production the frontend is served from Vercel at `app.<domain>` and the API from `api.<domain>`. The refresh cookie must reach the API from browser code.
-- **Production requirements:**
+- **Decision:**
   - `CORS_ORIGINS` lists the exact origin, `https://app.<domain>`. Browsers reject a wildcard origin on credentialed responses, and reflecting any origin would let any site make credentialed calls.
   - `allow_credentials=True`, and the frontend sends `credentials: "include"`.
-  - Methods and headers are listed explicitly in production: `GET`, `POST`, `PUT`, `PATCH`, `DELETE`, and the `Authorization` and `Content-Type` headers. Locally the middleware allows any method and header for convenience; narrowing it is part of the deployment work.
+  - Methods and headers are listed explicitly, the same in every environment: `GET`, `POST`, `PATCH`, `PUT`, `DELETE`, and `OPTIONS`, and the `Authorization` and `Content-Type` headers. CORS-safelisted headers such as `Accept` are always allowed. A preflight asking for any other method or header gets a 400, so the browser never sends the request. Tests cover the allowed set and the rejections.
+  - Why explicit lists instead of `*`: for `allow_headers=["*"]`, Starlette echoes back whatever headers the preflight asks for, and `allow_methods=["*"]` expands to every method it knows, including `HEAD` and `QUERY`. A page on an allowed origin could then send any custom header or method. The lists document the API's real surface and fail loudly if the frontend starts sending something new.
   - The cookie works because `app.<domain>` and `api.<domain>` are the same site, so `SameSite=Lax` allows it on these requests.
 - **Accepted limitation:** Vercel preview deployments on `*.vercel.app` are cross-site to the API. The browser will not send a `SameSite=Lax` cookie there, so previews cannot keep a session. Previews are for checking layout, so this is accepted.
 

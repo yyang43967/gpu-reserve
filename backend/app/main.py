@@ -1,5 +1,6 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import Final
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -9,6 +10,11 @@ from app.api import API_PREFIX, auth, health, me, users
 from app.core.config import Settings, get_settings
 from app.core.errors import register_error_handlers
 from app.db.session import create_engine, create_session_factory
+
+# Exactly what the frontend sends, so a page on an allowed origin cannot use any other
+# method or custom header. CORS-safelisted headers such as Accept are always allowed.
+CORS_ALLOWED_METHODS: Final = ("GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS")
+CORS_ALLOWED_HEADERS: Final = ("Authorization", "Content-Type")
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -36,8 +42,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         CORSMiddleware,
         allow_origins=settings.cors_origins,
         allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+        allow_methods=CORS_ALLOWED_METHODS,
+        allow_headers=CORS_ALLOWED_HEADERS,
     )
 
     app.include_router(health.router, prefix=API_PREFIX)
