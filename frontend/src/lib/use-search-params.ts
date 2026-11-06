@@ -4,10 +4,11 @@ import { useSearchParams, type NavigateOptions } from "react-router";
 /**
  * Like useSearchParams, but updates always build on the newest params.
  *
- * React Router passes the params from the last render to a functional
- * setSearchParams, so two updates before a re-render both start from the same
- * stale params and the second drops the first. Here each update builds on the
- * last params this hook navigated to, until the router has rendered them.
+ * The functional form, setSearchParams((prev) => ...), is not enough in React
+ * Router 7: `prev` is a copy of the params captured at render time, not the
+ * current location. Two updates before the next render both start from that
+ * snapshot, and the second drops the first. Here each update builds on the last
+ * params this hook navigated to, until the router has rendered them.
  */
 export function useLatestSearchParams() {
   const [searchParams, setSearchParams] = useSearchParams();
