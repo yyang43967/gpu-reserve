@@ -10,6 +10,8 @@ COPY pyproject.toml uv.lock .python-version ./
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev --no-install-project
 COPY app ./app
+COPY alembic.ini ./
+COPY alembic ./alembic
 
 FROM python:3.12-slim AS runtime
 ENV PATH="/app/.venv/bin:$PATH" \

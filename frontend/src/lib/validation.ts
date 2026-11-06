@@ -1,0 +1,3 @@
+// Mirrors the API's limits so forms can reject bad input before a round trip.
+export const PASSWORD_MIN_LENGTH = 8;
+export const PASSWORD_MAX_LENGTH = 128;
