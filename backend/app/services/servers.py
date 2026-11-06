@@ -1,15 +1,17 @@
 import uuid
+from dataclasses import dataclass
 
-from sqlalchemy import func, select, update
+from sqlalchemy import ColumnElement, func, select, update
 from sqlalchemy.dialects.postgresql import distinct_on
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import contains_eager, selectinload
 
 from app.core.exceptions import HostnameTaken, ServerNotFound, UnknownLab
 from app.core.unset import UNSET, Unset
-from app.models import Gpu, GpuModel, Lab, Server, ServerStatus
+from app.models import Gpu, GpuModel, Lab, Server, ServerStatus, User
 from app.models.server import DEFAULT_MAX_BOOKING_HOURS, GPU_MEMORY_GB
+from app.services.labs import can_see_inactive
 
 HOSTNAME_UNIQUE_CONSTRAINT = "uq_servers_hostname"
 
@@ -62,6 +64,76 @@ async def get_server_with_lab(session: AsyncSession, server_id: uuid.UUID) -> Se
         .where(Server.id == server_id)
         .options(selectinload(Server.lab))
         .execution_options(populate_existing=True)
+    )
+    if server is None:
+        raise ServerNotFound(f"No server with id {server_id}.")
+    return server
+
+
+# --- browsing ---
+
+
+@dataclass(frozen=True)
+class ServerFilters:
+    lab_id: uuid.UUID | None = None
+    gpu_model: GpuModel | None = None
+    min_gpu_memory_gb: int | None = None
+    min_gpus: int | None = None
+    status: ServerStatus | None = None
+
+
+@dataclass(frozen=True)
+class ServerListing:
+    items: list[Server]
+    total: int
+
+
+def _visibility(viewer: User) -> list[ColumnElement[bool]]:
+    """Students see servers that are not retired, in active labs. Admins see all."""
+    if can_see_inactive(viewer):
+        return []
+    return [Lab.is_active.is_(True), Server.status != ServerStatus.RETIRED]
+
+
+async def list_servers(
+    session: AsyncSession,
+    viewer: User,
+    filters: ServerFilters,
+    *,
+    offset: int,
+    limit: int,
+) -> ServerListing:
+    """Servers the viewer may see, ordered by lab name and hostname."""
+    conditions = _visibility(viewer)
+    if filters.lab_id is not None:
+        conditions.append(Server.lab_id == filters.lab_id)
+    if filters.gpu_model is not None:
+        conditions.append(Server.gpu_model == filters.gpu_model)
+    if filters.min_gpu_memory_gb is not None:
+        conditions.append(Server.gpu_memory_gb >= filters.min_gpu_memory_gb)
+    if filters.min_gpus is not None:
+        conditions.append(Server.gpu_count >= filters.min_gpus)
+    if filters.status is not None:
+        conditions.append(Server.status == filters.status)
+
+    base = select(Server).join(Server.lab).where(*conditions)
+    total = await session.scalar(select(func.count()).select_from(base.subquery()))
+    rows = await session.scalars(
+        base.options(contains_eager(Server.lab))
+        .order_by(func.lower(Lab.name), Server.hostname)
+        .offset(offset)
+        .limit(limit)
+    )
+    return ServerListing(items=list(rows), total=total or 0)
+
+
+async def get_server(session: AsyncSession, viewer: User, server_id: uuid.UUID) -> Server:
+    """A server the viewer may see. Hidden servers look missing to students."""
+    server = await session.scalar(
+        select(Server)
+        .join(Server.lab)
+        .where(Server.id == server_id, *_visibility(viewer))
+        .options(contains_eager(Server.lab))
     )
     if server is None:
         raise ServerNotFound(f"No server with id {server_id}.")

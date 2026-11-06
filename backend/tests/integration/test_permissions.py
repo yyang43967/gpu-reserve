@@ -152,6 +152,8 @@ MATRIX = [
         path_params=_lab,
     ),
     RouteCase("DELETE", "/labs/{lab_id}", Access.ADMIN, path_params=_empty_lab),
+    RouteCase("GET", "/servers", Access.AUTHENTICATED),
+    RouteCase("GET", "/servers/{server_id}", Access.AUTHENTICATED, path_params=_server),
     RouteCase(
         "POST",
         "/servers",

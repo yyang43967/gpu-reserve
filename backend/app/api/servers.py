@@ -1,10 +1,14 @@
 import uuid
+from typing import Annotated
 
-from fastapi import APIRouter, Response, status
+from fastapi import APIRouter, Query, Response, status
 
 from app.api import problem_responses
-from app.api.deps import AdminUser, SessionDep
+from app.api.deps import AdminUser, CurrentUser, SessionDep
 from app.core.unset import UNSET
+from app.models import GpuModel, ServerStatus
+from app.models.server import MAX_GPUS_PER_SERVER
+from app.schemas.pagination import Page, PageParamsDep
 from app.schemas.server import ServerCreate, ServerRead, ServerUpdate
 from app.services import servers
 
@@ -18,6 +22,43 @@ _ADMIN = problem_responses(status.HTTP_403_FORBIDDEN)
 _NOT_FOUND = problem_responses(status.HTTP_404_NOT_FOUND)
 _CONFLICT = problem_responses(status.HTTP_409_CONFLICT)
 _INVALID = problem_responses(status.HTTP_422_UNPROCESSABLE_CONTENT)
+
+
+@router.get("")
+async def list_servers(
+    user: CurrentUser,
+    session: SessionDep,
+    paging: PageParamsDep,
+    lab_id: uuid.UUID | None = None,
+    gpu_model: GpuModel | None = None,
+    min_gpu_memory_gb: Annotated[int | None, Query(ge=1)] = None,
+    min_gpus: Annotated[int | None, Query(ge=1, le=MAX_GPUS_PER_SERVER)] = None,
+    status: ServerStatus | None = None,
+) -> Page[ServerRead]:
+    """Servers ordered by lab and hostname. `min_gpu_memory_gb` is per GPU; `min_gpus`
+    compares with the server's GPU count. Students do not see retired servers or
+    servers in inactive labs."""
+    filters = servers.ServerFilters(
+        lab_id=lab_id,
+        gpu_model=gpu_model,
+        min_gpu_memory_gb=min_gpu_memory_gb,
+        min_gpus=min_gpus,
+        status=status,
+    )
+    listing = await servers.list_servers(
+        session, user, filters, offset=paging.offset, limit=paging.page_size
+    )
+    return Page[ServerRead](
+        items=[ServerRead.model_validate(server) for server in listing.items],
+        total=listing.total,
+        page=paging.page,
+        page_size=paging.page_size,
+    )
+
+
+@router.get("/{server_id}", responses=_NOT_FOUND)
+async def get_server(server_id: uuid.UUID, user: CurrentUser, session: SessionDep) -> ServerRead:
+    return ServerRead.model_validate(await servers.get_server(session, user, server_id))
 
 
 @router.post("", status_code=status.HTTP_201_CREATED, responses={**_ADMIN, **_CONFLICT, **_INVALID})
