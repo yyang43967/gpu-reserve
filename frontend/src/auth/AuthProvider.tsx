@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useCallback, useEffect, useMemo, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 
 import * as authApi from "@/auth/auth-api";
 import {
@@ -26,6 +26,7 @@ async function loadCurrentUser(signal: AbortSignal): Promise<User | null> {
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const queryClient = useQueryClient();
+  const [signedOut, setSignedOut] = useState(false);
   const me = useQuery({
     queryKey: meQueryKey,
     queryFn: ({ signal }) => loadCurrentUser(signal),
@@ -58,6 +59,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const login = useCallback(
     async (input: authApi.LoginInput) => {
       const user = await authApi.login(input);
+      setSignedOut(false);
       setUser(user);
       return user;
     },
@@ -67,6 +69,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const register = useCallback(
     async (input: authApi.RegisterInput) => {
       const user = await authApi.register(input);
+      setSignedOut(false);
       setUser(user);
       return user;
     },
@@ -74,6 +77,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   );
 
   const logout = useCallback(async () => {
+    // Callers do not navigate after this resolves: the query cache tells observers about
+    // the cleared user asynchronously, so an immediate navigation would still see the
+    // old session. RequireAuth redirects once the state really is anonymous.
+    setSignedOut(true);
     try {
       await authApi.logout();
     } finally {
@@ -96,8 +103,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
     return me.data
       ? { status: "authenticated", user: me.data }
-      : { status: "anonymous", user: null };
-  }, [me.isPending, me.isError, me.error, me.data, refetch]);
+      : { status: "anonymous", user: null, signedOut };
+  }, [me.isPending, me.isError, me.error, me.data, refetch, signedOut]);
 
   const value: AuthContextValue = useMemo(
     () => ({ ...state, login, register, logout }),

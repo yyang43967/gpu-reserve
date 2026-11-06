@@ -227,6 +227,8 @@ describe("sign out and expiry", () => {
 
     await screen.findByRole("heading", { name: "Sign in" });
     expect(router.state.location.pathname).toBe("/login");
+    // A deliberate sign-out does not carry the page over to the next person's sign-in.
+    expect(router.state.location.search).toBe("");
     expect(requests.some((r) => r.method === "POST" && r.path === "/auth/logout")).toBe(true);
     expect(getAccessToken()).toBeNull();
     // Only the refresh at page load: signing out must not try the cookie again.

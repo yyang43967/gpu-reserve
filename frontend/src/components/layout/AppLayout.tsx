@@ -1,6 +1,6 @@
 import { LogOut, Menu, X } from "lucide-react";
 import { useState } from "react";
-import { NavLink, Outlet, useNavigate } from "react-router";
+import { NavLink, Outlet } from "react-router";
 
 import { useAuth } from "@/auth/auth-context";
 import { Button } from "@/components/ui/button";
@@ -44,16 +44,13 @@ function NavLinks({ onNavigate }: { onNavigate?: () => void }) {
 
 function UserMenu() {
   const { user, logout } = useAuth();
-  const navigate = useNavigate();
   const [signingOut, setSigningOut] = useState(false);
 
-  const signOut = async () => {
+  const signOut = () => {
     setSigningOut(true);
-    try {
-      await logout();
-    } finally {
-      void navigate("/login", { replace: true });
-    }
+    // The session ends locally even if the request fails, and RequireAuth then
+    // redirects to the login page, so there is nothing to handle here.
+    logout().catch(() => undefined);
   };
 
   return (
@@ -70,14 +67,7 @@ function UserMenu() {
       >
         {user?.full_name}
       </NavLink>
-      <Button
-        variant="ghost"
-        size="sm"
-        disabled={signingOut}
-        onClick={() => {
-          void signOut();
-        }}
-      >
+      <Button variant="ghost" size="sm" disabled={signingOut} onClick={signOut}>
         <LogOut aria-hidden="true" />
         Sign out
       </Button>

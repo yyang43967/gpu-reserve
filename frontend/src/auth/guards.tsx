@@ -42,7 +42,8 @@ function RequireAuthInner() {
   const auth = useAuth();
   const location = useLocation();
   if (auth.status !== "authenticated") {
-    return <Navigate to={loginPathFor(location)} replace />;
+    const to = auth.status === "anonymous" && auth.signedOut ? "/login" : loginPathFor(location);
+    return <Navigate to={to} replace />;
   }
   return <Outlet />;
 }
