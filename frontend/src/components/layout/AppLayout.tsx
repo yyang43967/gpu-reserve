@@ -4,6 +4,7 @@ import { NavLink, Outlet } from "react-router";
 
 import { useAuth } from "@/auth/auth-context";
 import { Button } from "@/components/ui/button";
+import { UserAvatar } from "@/components/user-avatar";
 import { cn } from "@/lib/utils";
 
 const NAV_ITEMS = [
@@ -60,12 +61,14 @@ function UserMenu() {
         aria-label="Account settings"
         className={({ isActive }) =>
           cn(
-            "hidden max-w-40 truncate rounded-md px-2 py-1 text-sm hover:text-foreground sm:inline",
+            "flex items-center gap-2 rounded-md px-1 py-1 text-sm hover:text-foreground sm:px-2",
             isActive ? "text-foreground" : "text-muted-foreground",
           )
         }
       >
-        {user?.full_name}
+        {user && <UserAvatar user={user} />}
+        {/* On phones the photo alone links to the account page. */}
+        <span className="hidden max-w-40 truncate sm:inline">{user?.full_name}</span>
       </NavLink>
       <Button variant="ghost" size="sm" disabled={signingOut} onClick={signOut}>
         <LogOut aria-hidden="true" />

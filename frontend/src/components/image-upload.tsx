@@ -29,6 +29,7 @@ export function ImageUploadField({
   choice,
   onChoiceChange,
   onUploadingChange,
+  shape = "wide",
   className,
 }: {
   label: string;
@@ -39,6 +40,8 @@ export function ImageUploadField({
   choice: ImageChoice;
   onChoiceChange: (choice: ImageChoice) => void;
   onUploadingChange: (uploading: boolean) => void;
+  /** "wide" for photos of hardware, "round" for profile photos. */
+  shape?: "wide" | "round";
   className?: string;
 }) {
   const inputId = useId();
@@ -126,7 +129,12 @@ export function ImageUploadField({
     <div className={cn("grid gap-2", className)}>
       <Label htmlFor={inputId}>{label}</Label>
       <div className="flex flex-wrap items-center gap-3">
-        <div className="relative flex aspect-[2/1] w-40 items-center justify-center overflow-hidden rounded-md border bg-muted">
+        <div
+          className={cn(
+            "relative flex items-center justify-center overflow-hidden border bg-muted",
+            shape === "round" ? "size-20 rounded-full" : "aspect-[2/1] w-40 rounded-md",
+          )}
+        >
           {shown ? (
             <img src={shown} alt={alt} className="size-full object-cover" />
           ) : (
