@@ -25,6 +25,7 @@ from app.core.security import (
 )
 from app.models import RefreshToken, User
 from app.services import passwords, users
+from app.services.rate_limit import RateLimiter
 
 logger = logging.getLogger(__name__)
 
@@ -90,15 +91,45 @@ async def revoke_family(session: AsyncSession, family_id: uuid.UUID) -> None:
 
 
 async def register(
-    session: AsyncSession, settings: Settings, *, email: str, password: str, full_name: str
+    session: AsyncSession,
+    settings: Settings,
+    limiter: RateLimiter,
+    *,
+    client_ip: str,
+    email: str,
+    password: str,
+    full_name: str,
 ) -> AuthResult:
+    await limiter.check_register(client_ip=client_ip)
     user = await users.create_user(session, email=email, password=password, full_name=full_name)
     return await _start_session(session, settings, user)
 
 
 async def login(
-    session: AsyncSession, settings: Settings, *, email: str, password: str
+    session: AsyncSession,
+    settings: Settings,
+    limiter: RateLimiter,
+    *,
+    client_ip: str,
+    email: str,
+    password: str,
 ) -> AuthResult:
+    email = users.normalize_email(email)
+    # Before any hashing, so throttled requests cost no argon2 work.
+    await limiter.check_login(client_ip=client_ip, email=email)
+    try:
+        user = await _verify_credentials(session, email, password)
+    except InvalidCredentials:
+        await limiter.record_login_failure(email)
+        raise
+    await limiter.clear_login_failures(email)
+
+    if password_needs_rehash(user.password_hash):
+        user.password_hash = await passwords.hash_password(password)
+    return await _start_session(session, settings, user)
+
+
+async def _verify_credentials(session: AsyncSession, email: str, password: str) -> User:
     user = await users.get_user_by_email(session, email)
     if user is None:
         await passwords.verify_dummy_password(password)
@@ -109,10 +140,7 @@ async def login(
     # password and its existence is not revealed.
     if not user.is_active:
         raise InvalidCredentials()
-
-    if password_needs_rehash(user.password_hash):
-        user.password_hash = await passwords.hash_password(password)
-    return await _start_session(session, settings, user)
+    return user
 
 
 async def refresh(session: AsyncSession, settings: Settings, refresh_token: str) -> AuthResult:

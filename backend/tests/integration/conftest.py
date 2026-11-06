@@ -5,6 +5,7 @@ import pytest
 from alembic import command
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 from testcontainers.postgres import PostgresContainer
 from testcontainers.redis import RedisContainer
@@ -88,17 +89,39 @@ async def db_session(engine: AsyncEngine) -> AsyncIterator[AsyncSession]:
 
 
 @pytest.fixture
-async def api_client(
-    make_settings: Callable[..., Settings], engine: AsyncEngine
-) -> AsyncIterator[AsyncClient]:
-    """A client for a running app on the migrated database, emptied after the test.
+async def running_app(
+    make_settings: Callable[..., Settings], engine: AsyncEngine, redis_url: str
+) -> AsyncIterator[FastAPI]:
+    """An app with its lifespan started. Postgres and Redis are emptied afterwards."""
+    app: FastAPI = create_app(make_settings())
+    async with app.router.lifespan_context(app):
+        yield app
+    await truncate_all(engine)
+    redis = Redis.from_url(redis_url)
+    await redis.flushdb()
+    await redis.aclose()
+
+
+ClientFactory = Callable[[str], AbstractAsyncContextManager[AsyncClient]]
+
+
+@pytest.fixture
+def client_from(running_app: FastAPI) -> ClientFactory:
+    """Make a client whose requests come from the given IP address.
 
     HTTPS, so the client's cookie jar honors the Secure flag like a browser would.
     """
-    app: FastAPI = create_app(make_settings())
-    async with (
-        app.router.lifespan_context(app),
-        AsyncClient(transport=ASGITransport(app=app), base_url="https://test") as client,
-    ):
+
+    @asynccontextmanager
+    async def factory(client_ip: str) -> AsyncIterator[AsyncClient]:
+        transport = ASGITransport(app=running_app, client=(client_ip, 50000))
+        async with AsyncClient(transport=transport, base_url="https://test") as client:
+            yield client
+
+    return factory
+
+
+@pytest.fixture
+async def api_client(client_from: ClientFactory) -> AsyncIterator[AsyncClient]:
+    async with client_from("192.0.2.1") as client:
         yield client
-    await truncate_all(engine)

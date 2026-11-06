@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from app.core.config import Settings
 from app.core.errors import PROBLEM_CONTENT_TYPE, STATUS_BY_KIND
-from app.core.exceptions import DomainError, ErrorKind
+from app.core.exceptions import DomainError, ErrorKind, RateLimited
 from app.main import create_app
 
 BASE_URL = "https://errors.example.test"
@@ -41,6 +41,10 @@ def _build_app() -> FastAPI:
     @app.get("/test/domain/{kind}")
     async def raise_domain(kind: ErrorKind) -> None:
         raise _error_class(kind)(f"Detail for {kind.value}")
+
+    @app.get("/test/rate-limited")
+    async def raise_rate_limited() -> None:
+        raise RateLimited(42, "Slow down.")
 
     @app.get("/test/no-detail")
     async def raise_without_detail() -> None:
@@ -174,3 +178,11 @@ async def test_unhandled_error_keeps_cors_headers(client: AsyncClient) -> None:
 
     assert response.status_code == 500
     assert response.headers["access-control-allow-origin"] == FRONTEND_ORIGIN
+
+
+async def test_rate_limited_sets_retry_after(client: AsyncClient) -> None:
+    response = await client.get("/test/rate-limited")
+
+    assert response.status_code == 429
+    assert response.headers["retry-after"] == "42"
+    assert response.json()["type"] == f"{BASE_URL}/too-many-requests"

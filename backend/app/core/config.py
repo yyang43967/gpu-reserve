@@ -46,6 +46,15 @@ class Settings(BaseSettings):
     # http://localhost). Turned off for plain-HTTP local setups.
     refresh_cookie_secure: bool = True
 
+    # Login and registration throttling (fixed windows in Redis). Every login attempt
+    # counts against the client IP; only failed attempts count against the email.
+    login_ip_limit: int = Field(default=60, gt=0)
+    login_ip_window_seconds: int = Field(default=60, gt=0)
+    login_email_failure_limit: int = Field(default=5, gt=0)
+    login_email_window_seconds: int = Field(default=15 * 60, gt=0)
+    register_ip_limit: int = Field(default=20, gt=0)
+    register_ip_window_seconds: int = Field(default=60 * 60, gt=0)
+
     @field_validator("cors_origins", mode="before")
     @classmethod
     def split_origins(cls, value: object) -> object:

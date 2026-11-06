@@ -61,3 +61,20 @@ class EmailAlreadyRegistered(DomainError):
     kind = ErrorKind.CONFLICT
     type_slug = "email-taken"
     title = "Email already registered"
+
+
+class RateLimited(DomainError):
+    """Base for throttling errors. Carries how long the client should wait."""
+
+    kind = ErrorKind.RATE_LIMITED
+    type_slug = "too-many-requests"
+    title = "Too many requests"
+
+    def __init__(self, retry_after_seconds: int, detail: str | None = None) -> None:
+        super().__init__(detail)
+        self.retry_after_seconds = retry_after_seconds
+
+
+class TooManyLoginAttempts(RateLimited):
+    type_slug = "too-many-login-attempts"
+    title = "Too many login attempts"

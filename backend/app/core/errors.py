@@ -11,7 +11,7 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from app.core.exceptions import DomainError, ErrorKind
+from app.core.exceptions import DomainError, ErrorKind, RateLimited
 from app.schemas.problem import FieldError, Problem, ValidationProblem
 
 logger = logging.getLogger(__name__)
@@ -73,6 +73,9 @@ def build_problem(
 
 def domain_error_response(exc: DomainError, *, base_url: str, instance: str) -> ProblemResponse:
     """Render a domain error. Routes use it when they must add headers or cookies."""
+    headers: dict[str, str] = {}
+    if isinstance(exc, RateLimited):
+        headers["Retry-After"] = str(exc.retry_after_seconds)
     return build_problem(
         base_url=base_url,
         status_code=STATUS_BY_KIND[exc.kind],
@@ -80,6 +83,7 @@ def domain_error_response(exc: DomainError, *, base_url: str, instance: str) -> 
         title=exc.title,
         detail=exc.detail,
         instance=instance,
+        headers=headers,
     )
 
 

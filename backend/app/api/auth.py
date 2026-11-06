@@ -3,7 +3,7 @@ from typing import Annotated, Final
 from fastapi import APIRouter, Cookie, Request, Response, status
 
 from app.api import API_PREFIX, problem_responses
-from app.api.deps import CurrentUser, SessionDep, SettingsDep
+from app.api.deps import ClientIp, CurrentUser, RateLimiterDep, SessionDep, SettingsDep
 from app.core.config import Settings
 from app.core.errors import domain_error_response
 from app.core.exceptions import InvalidToken, RefreshTokenReused
@@ -59,23 +59,44 @@ _UNAUTHORIZED = problem_responses(status.HTTP_401_UNAUTHORIZED)
 @router.post(
     "/register",
     status_code=status.HTTP_201_CREATED,
-    responses=problem_responses(status.HTTP_409_CONFLICT),
+    responses=problem_responses(status.HTTP_409_CONFLICT, status.HTTP_429_TOO_MANY_REQUESTS),
 )
 async def register(
-    body: RegisterRequest, response: Response, session: SessionDep, settings: SettingsDep
+    body: RegisterRequest,
+    response: Response,
+    session: SessionDep,
+    settings: SettingsDep,
+    limiter: RateLimiterDep,
+    client_ip: ClientIp,
 ) -> TokenResponse:
     """Create a student account and sign it in."""
     result = await auth.register(
-        session, settings, email=body.email, password=body.password, full_name=body.full_name
+        session,
+        settings,
+        limiter,
+        client_ip=client_ip,
+        email=body.email,
+        password=body.password,
+        full_name=body.full_name,
     )
     return _token_response(response, settings, result)
 
 
-@router.post("/login", responses=_UNAUTHORIZED)
+@router.post(
+    "/login",
+    responses=problem_responses(status.HTTP_401_UNAUTHORIZED, status.HTTP_429_TOO_MANY_REQUESTS),
+)
 async def login(
-    body: LoginRequest, response: Response, session: SessionDep, settings: SettingsDep
+    body: LoginRequest,
+    response: Response,
+    session: SessionDep,
+    settings: SettingsDep,
+    limiter: RateLimiterDep,
+    client_ip: ClientIp,
 ) -> TokenResponse:
-    result = await auth.login(session, settings, email=body.email, password=body.password)
+    result = await auth.login(
+        session, settings, limiter, client_ip=client_ip, email=body.email, password=body.password
+    )
     return _token_response(response, settings, result)
 
 
