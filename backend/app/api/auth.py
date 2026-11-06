@@ -1,7 +1,14 @@
 from fastapi import APIRouter, Request, Response, status
 
 from app.api import problem_responses
-from app.api.deps import ClientIp, CurrentUser, RateLimiterDep, SessionDep, SettingsDep
+from app.api.deps import (
+    ClientIp,
+    CurrentUser,
+    RateLimiterDep,
+    SessionDep,
+    SettingsDep,
+    StorageDep,
+)
 from app.api.session_cookie import RefreshCookie, clear_refresh_cookie, token_response
 from app.core.errors import domain_error_response
 from app.core.exceptions import InvalidToken, RefreshTokenReused
@@ -23,6 +30,7 @@ async def register(
     response: Response,
     session: SessionDep,
     settings: SettingsDep,
+    storage: StorageDep,
     limiter: RateLimiterDep,
     client_ip: ClientIp,
 ) -> TokenResponse:
@@ -36,7 +44,7 @@ async def register(
         password=body.password,
         full_name=body.full_name,
     )
-    return token_response(response, settings, result)
+    return token_response(response, settings, storage, result)
 
 
 @router.post(
@@ -48,13 +56,14 @@ async def login(
     response: Response,
     session: SessionDep,
     settings: SettingsDep,
+    storage: StorageDep,
     limiter: RateLimiterDep,
     client_ip: ClientIp,
 ) -> TokenResponse:
     result = await auth.login(
         session, settings, limiter, client_ip=client_ip, email=body.email, password=body.password
     )
-    return token_response(response, settings, result)
+    return token_response(response, settings, storage, result)
 
 
 @router.post("/refresh", response_model=TokenResponse, responses=_UNAUTHORIZED)
@@ -63,6 +72,7 @@ async def refresh(
     response: Response,
     session: SessionDep,
     settings: SettingsDep,
+    storage: StorageDep,
     refresh_token: RefreshCookie = None,
 ) -> Response | TokenResponse:
     """Exchange the refresh cookie for a new access token and a rotated cookie."""
@@ -77,7 +87,7 @@ async def refresh(
         )
         clear_refresh_cookie(problem, settings)
         return problem
-    return token_response(response, settings, result)
+    return token_response(response, settings, storage, result)
 
 
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT, responses=_UNAUTHORIZED)

@@ -3,6 +3,7 @@ from typing import Annotated
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
 
 from app.schemas.auth import PASSWORD_MAX_LENGTH, FullName, NewPassword
+from app.schemas.upload import ObjectKey
 
 
 class UpdateProfileRequest(BaseModel):
@@ -10,6 +11,9 @@ class UpdateProfileRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     full_name: FullName | None = None
+    # A key from POST /uploads/presign (purpose `avatar`) whose upload has finished.
+    # null removes the avatar; omitted leaves it unchanged.
+    avatar_key: ObjectKey | None = None
 
 
 class ChangePasswordRequest(BaseModel):

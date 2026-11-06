@@ -5,13 +5,14 @@ from typing import Annotated
 from fastapi import APIRouter, BackgroundTasks, Query, Response, status
 
 from app.api import problem_responses
+from app.api.cleanup import delete_after_commit
 from app.api.deps import AdminUser, CurrentUser, SessionDep, StorageDep
 from app.core.unset import UNSET
 from app.models import GpuModel, Server, ServerStatus
 from app.models.server import MAX_GPUS_PER_SERVER
 from app.schemas.pagination import Page, PageParamsDep
 from app.schemas.server import ServerCreate, ServerRead, ServerUpdate
-from app.services import servers, uploads
+from app.services import servers
 from app.services.storage import ObjectStorage
 
 router = APIRouter(
@@ -29,16 +30,6 @@ _INVALID = problem_responses(status.HTTP_422_UNPROCESSABLE_CONTENT)
 def _read(server: Server, storage: ObjectStorage, now: datetime) -> ServerRead:
     image_url = storage.download_url(server.image_key, now=now) if server.image_key else None
     return ServerRead.build(server, image_url)
-
-
-def _delete_after_commit(
-    background: BackgroundTasks, storage: ObjectStorage, key: str | None
-) -> None:
-    """Background tasks run after the response, and the request's transaction commits
-    before the response is sent. A request that fails, including at commit, returns an
-    error response without this task, so the object is kept."""
-    if key is not None:
-        background.add_task(uploads.delete_quietly, storage, key)
 
 
 @router.get("")
@@ -126,7 +117,7 @@ async def update_server(
     )
     if "image_key" in sent:
         replaced = await servers.set_image(session, storage, admin, server_id, body.image_key)
-        _delete_after_commit(background, storage, replaced)
+        delete_after_commit(background, storage, replaced)
         server = await servers.get_server_with_lab(session, server_id)
     return _read(server, storage, datetime.now(UTC))
 
@@ -145,5 +136,5 @@ async def delete_server(
 ) -> Response:
     """Delete a server and its GPUs. Its image is deleted after the change is saved."""
     image_key = await servers.delete_server(session, server_id)
-    _delete_after_commit(background, storage, image_key)
+    delete_after_commit(background, storage, image_key)
     return Response(status_code=status.HTTP_204_NO_CONTENT, background=background)

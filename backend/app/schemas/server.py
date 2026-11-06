@@ -13,7 +13,7 @@ from app.models.server import (
     MAX_BOOKING_HOURS_LIMIT,
     MAX_GPUS_PER_SERVER,
 )
-from app.models.user import OBJECT_KEY_MAX_LENGTH
+from app.schemas.upload import ObjectKey
 
 # Sanity bounds that keep values far from the integer columns' limits.
 MAX_CPU_CORES: Final = 1024
@@ -44,8 +44,6 @@ Interconnect = Annotated[
     str, StringConstraints(strip_whitespace=True, max_length=INTERCONNECT_MAX_LENGTH)
 ]
 Notes = Annotated[str, StringConstraints(strip_whitespace=True, max_length=NOTES_MAX_LENGTH)]
-# A key returned by POST /uploads/presign for a server image.
-ImageKey = Annotated[str, StringConstraints(min_length=1, max_length=OBJECT_KEY_MAX_LENGTH)]
 
 
 class ServerCreate(BaseModel):
@@ -64,7 +62,7 @@ class ServerCreate(BaseModel):
     requires_approval: bool = False
     max_booking_hours: MaxBookingHours = DEFAULT_MAX_BOOKING_HOURS
     notes: Notes | None = None
-    image_key: ImageKey | None = None
+    image_key: ObjectKey | None = None
 
 
 class ServerUpdate(BaseModel):
@@ -84,7 +82,7 @@ class ServerUpdate(BaseModel):
     requires_approval: bool | None = None
     max_booking_hours: MaxBookingHours | None = None
     notes: Notes | None = None
-    image_key: ImageKey | None = None
+    image_key: ObjectKey | None = None
 
 
 class LabSummary(BaseModel):

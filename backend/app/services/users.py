@@ -14,6 +14,8 @@ from app.core.exceptions import (
 from app.models import User, UserRole
 from app.models.user import DEFAULT_WEEKLY_GPU_HOUR_QUOTA
 from app.services import passwords, sessions
+from app.services.storage import ObjectStorage
+from app.services.uploads import UploadPurpose, verify_upload
 
 EMAIL_UNIQUE_CONSTRAINT = "uq_users_email"
 
@@ -68,6 +70,26 @@ async def update_profile(session: AsyncSession, user: User, *, full_name: str | 
     await session.flush()
     await session.refresh(user)
     return user
+
+
+async def set_avatar(
+    session: AsyncSession, storage: ObjectStorage, user: User, avatar_key: str | None
+) -> str | None:
+    """Point the user's profile at an uploaded avatar, or remove it with None.
+
+    Only keys under the user's own avatar prefix are accepted, and the upload is verified
+    before the key is saved. Returns the key this replaced, which the caller deletes from
+    storage once the transaction has committed, or None when nothing was replaced
+    (including when the key did not change).
+    """
+    if avatar_key == user.avatar_key:
+        return None
+    if avatar_key is not None:
+        await verify_upload(storage, avatar_key, purpose=UploadPurpose.AVATAR, owner=user)
+    replaced = user.avatar_key
+    user.avatar_key = avatar_key
+    await session.flush()
+    return replaced
 
 
 # --- administration ---
@@ -165,13 +187,19 @@ async def update_user(
     return user
 
 
-async def delete_user(session: AsyncSession, actor: User, user_id: uuid.UUID) -> None:
-    """Delete an account. Its refresh tokens go with it (ON DELETE CASCADE)."""
+async def delete_user(session: AsyncSession, actor: User, user_id: uuid.UUID) -> str | None:
+    """Delete an account. Its refresh tokens go with it (ON DELETE CASCADE).
+
+    Returns the avatar key, which the caller deletes from storage once the transaction
+    has committed.
+    """
     if user_id == actor.id:
         raise SelfModificationForbidden("You cannot delete your own account.")
     user = await get_user_or_raise(session, user_id)
+    avatar_key = user.avatar_key
     await session.delete(user)
     await session.flush()
+    return avatar_key
 
 
 @dataclass(frozen=True)

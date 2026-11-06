@@ -1,10 +1,12 @@
 import uuid
+from datetime import UTC, datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Query, Response, status
+from fastapi import APIRouter, BackgroundTasks, Query, Response, status
 
 from app.api import problem_responses
-from app.api.deps import AdminUser, SessionDep
+from app.api.cleanup import delete_after_commit
+from app.api.deps import AdminUser, SessionDep, StorageDep
 from app.models import UserRole
 from app.schemas.admin_users import AdminUserCreate, AdminUserUpdate
 from app.schemas.pagination import Page, PageParamsDep
@@ -25,6 +27,7 @@ _SEARCH_MAX_LENGTH = 100
 async def list_users(
     admin: AdminUser,
     session: SessionDep,
+    storage: StorageDep,
     paging: PageParamsDep,
     q: Annotated[str | None, Query(max_length=_SEARCH_MAX_LENGTH)] = None,
     role: UserRole | None = None,
@@ -39,8 +42,9 @@ async def list_users(
         role=role,
         is_active=is_active,
     )
+    now = datetime.now(UTC)
     return Page[UserRead](
-        items=[UserRead.model_validate(user) for user in listing.items],
+        items=[UserRead.build(user, storage, now) for user in listing.items],
         total=listing.total,
         page=paging.page,
         page_size=paging.page_size,
@@ -52,7 +56,9 @@ async def list_users(
     status_code=status.HTTP_201_CREATED,
     responses=problem_responses(status.HTTP_409_CONFLICT),
 )
-async def create_user(body: AdminUserCreate, admin: AdminUser, session: SessionDep) -> UserRead:
+async def create_user(
+    body: AdminUserCreate, admin: AdminUser, session: SessionDep, storage: StorageDep
+) -> UserRead:
     user = await users.create_user(
         session,
         email=body.email,
@@ -62,12 +68,15 @@ async def create_user(body: AdminUserCreate, admin: AdminUser, session: SessionD
         weekly_gpu_hour_quota=body.weekly_gpu_hour_quota,
     )
     await session.refresh(user)
-    return UserRead.model_validate(user)
+    return UserRead.build(user, storage, datetime.now(UTC))
 
 
 @router.get("/{user_id}", responses=_NOT_FOUND)
-async def get_user(user_id: uuid.UUID, admin: AdminUser, session: SessionDep) -> UserRead:
-    return UserRead.model_validate(await users.get_user_or_raise(session, user_id))
+async def get_user(
+    user_id: uuid.UUID, admin: AdminUser, session: SessionDep, storage: StorageDep
+) -> UserRead:
+    user = await users.get_user_or_raise(session, user_id)
+    return UserRead.build(user, storage, datetime.now(UTC))
 
 
 @router.patch(
@@ -75,7 +84,11 @@ async def get_user(user_id: uuid.UUID, admin: AdminUser, session: SessionDep) ->
     responses={**_NOT_FOUND, **problem_responses(status.HTTP_409_CONFLICT)},
 )
 async def update_user(
-    user_id: uuid.UUID, body: AdminUserUpdate, admin: AdminUser, session: SessionDep
+    user_id: uuid.UUID,
+    body: AdminUserUpdate,
+    admin: AdminUser,
+    session: SessionDep,
+    storage: StorageDep,
 ) -> UserRead:
     """Change role, active status, or quota. Omitted fields stay as they are."""
     user = await users.update_user(
@@ -86,7 +99,7 @@ async def update_user(
         is_active=body.is_active,
         weekly_gpu_hour_quota=body.weekly_gpu_hour_quota,
     )
-    return UserRead.model_validate(user)
+    return UserRead.build(user, storage, datetime.now(UTC))
 
 
 @router.delete(
@@ -94,6 +107,14 @@ async def update_user(
     status_code=status.HTTP_204_NO_CONTENT,
     responses={**_NOT_FOUND, **problem_responses(status.HTTP_409_CONFLICT)},
 )
-async def delete_user(user_id: uuid.UUID, admin: AdminUser, session: SessionDep) -> Response:
-    await users.delete_user(session, admin, user_id)
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
+async def delete_user(
+    user_id: uuid.UUID,
+    admin: AdminUser,
+    session: SessionDep,
+    storage: StorageDep,
+    background: BackgroundTasks,
+) -> Response:
+    """Delete an account. Its avatar is deleted after the change is saved."""
+    avatar_key = await users.delete_user(session, admin, user_id)
+    delete_after_commit(background, storage, avatar_key)
+    return Response(status_code=status.HTTP_204_NO_CONTENT, background=background)

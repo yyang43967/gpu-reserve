@@ -1,9 +1,13 @@
 from datetime import datetime
 from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
+from app.models.user import OBJECT_KEY_MAX_LENGTH
 from app.services.uploads import UploadPurpose
+
+# A key returned by POST /uploads/presign.
+ObjectKey = Annotated[str, StringConstraints(min_length=1, max_length=OBJECT_KEY_MAX_LENGTH)]
 
 
 class PresignRequest(BaseModel):
