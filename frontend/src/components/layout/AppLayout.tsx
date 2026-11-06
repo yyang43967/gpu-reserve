@@ -1,23 +1,26 @@
-import { Menu, X } from "lucide-react";
+import { LogOut, Menu, X } from "lucide-react";
 import { useState } from "react";
-import { NavLink, Outlet } from "react-router";
+import { NavLink, Outlet, useNavigate } from "react-router";
 
+import { useAuth } from "@/auth/auth-context";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
 const NAV_ITEMS = [
-  { to: "/", label: "Dashboard", end: true },
-  { to: "/servers", label: "Servers", end: false },
-  { to: "/find-slot", label: "Find a slot", end: false },
-  { to: "/reservations", label: "My reservations", end: false },
-  { to: "/assistant", label: "Assistant", end: false },
-  { to: "/admin", label: "Admin", end: false },
+  { to: "/", label: "Dashboard", end: true, adminOnly: false },
+  { to: "/servers", label: "Servers", end: false, adminOnly: false },
+  { to: "/find-slot", label: "Find a slot", end: false, adminOnly: false },
+  { to: "/reservations", label: "My reservations", end: false, adminOnly: false },
+  { to: "/assistant", label: "Assistant", end: false, adminOnly: false },
+  { to: "/admin", label: "Admin", end: false, adminOnly: true },
 ] as const;
 
 function NavLinks({ onNavigate }: { onNavigate?: () => void }) {
+  const { user } = useAuth();
+  const items = NAV_ITEMS.filter((item) => !item.adminOnly || user?.role === "admin");
   return (
     <>
-      {NAV_ITEMS.map((item) => (
+      {items.map((item) => (
         <NavLink
           key={item.to}
           to={item.to}
@@ -39,6 +42,40 @@ function NavLinks({ onNavigate }: { onNavigate?: () => void }) {
   );
 }
 
+function UserMenu() {
+  const { user, logout } = useAuth();
+  const navigate = useNavigate();
+  const [signingOut, setSigningOut] = useState(false);
+
+  const signOut = async () => {
+    setSigningOut(true);
+    try {
+      await logout();
+    } finally {
+      void navigate("/login", { replace: true });
+    }
+  };
+
+  return (
+    <div className="flex items-center gap-2">
+      <span className="hidden max-w-40 truncate text-sm text-muted-foreground sm:inline">
+        {user?.full_name}
+      </span>
+      <Button
+        variant="ghost"
+        size="sm"
+        disabled={signingOut}
+        onClick={() => {
+          void signOut();
+        }}
+      >
+        <LogOut aria-hidden="true" />
+        Sign out
+      </Button>
+    </div>
+  );
+}
+
 export function AppLayout() {
   const [menuOpen, setMenuOpen] = useState(false);
 
@@ -52,19 +89,22 @@ export function AppLayout() {
           <nav aria-label="Main" className="hidden items-center gap-1 md:flex">
             <NavLinks />
           </nav>
-          <Button
-            variant="ghost"
-            size="icon"
-            className="md:hidden"
-            aria-label={menuOpen ? "Close menu" : "Open menu"}
-            aria-expanded={menuOpen}
-            aria-controls="mobile-nav"
-            onClick={() => {
-              setMenuOpen((open) => !open);
-            }}
-          >
-            {menuOpen ? <X aria-hidden="true" /> : <Menu aria-hidden="true" />}
-          </Button>
+          <div className="flex items-center gap-1">
+            <UserMenu />
+            <Button
+              variant="ghost"
+              size="icon"
+              className="md:hidden"
+              aria-label={menuOpen ? "Close menu" : "Open menu"}
+              aria-expanded={menuOpen}
+              aria-controls="mobile-nav"
+              onClick={() => {
+                setMenuOpen((open) => !open);
+              }}
+            >
+              {menuOpen ? <X aria-hidden="true" /> : <Menu aria-hidden="true" />}
+            </Button>
+          </div>
         </div>
         {menuOpen && (
           <nav

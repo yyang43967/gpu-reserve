@@ -1,8 +1,6 @@
-import type { ReactNode } from "react";
 import { Link, useParams } from "react-router";
 
 import { EmptyState } from "@/components/states";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 
 function PageHeader({ title, description }: { title: string; description: string }) {
   return (
@@ -53,50 +51,6 @@ export function AdminPage() {
 export function AssistantPage() {
   return (
     <ComingSoon title="Assistant" description="Ask about policies and find hardware for a job." />
-  );
-}
-
-function AuthCard({ title, footer }: { title: string; footer: ReactNode }) {
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle>{title}</CardTitle>
-        <CardDescription>Sign-in is not available yet.</CardDescription>
-      </CardHeader>
-      <CardContent className="text-sm">{footer}</CardContent>
-    </Card>
-  );
-}
-
-export function LoginPage() {
-  return (
-    <AuthCard
-      title="Sign in"
-      footer={
-        <p>
-          No account?{" "}
-          <Link to="/register" className="underline underline-offset-4">
-            Register
-          </Link>
-        </p>
-      }
-    />
-  );
-}
-
-export function RegisterPage() {
-  return (
-    <AuthCard
-      title="Create an account"
-      footer={
-        <p>
-          Already registered?{" "}
-          <Link to="/login" className="underline underline-offset-4">
-            Sign in
-          </Link>
-        </p>
-      }
-    />
   );
 }
 
