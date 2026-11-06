@@ -5,6 +5,7 @@ import { AppLayout, AuthLayout } from "@/components/layout/AppLayout";
 import { AccountPage } from "@/pages/AccountPage";
 import { AdminLabsPage } from "@/pages/admin/AdminLabsPage";
 import { AdminPage } from "@/pages/admin/AdminPage";
+import { AdminServersPage } from "@/pages/admin/AdminServersPage";
 import { AdminUsersPage } from "@/pages/admin/AdminUsersPage";
 import { DashboardPage } from "@/pages/DashboardPage";
 import { LoginPage } from "@/pages/LoginPage";
@@ -53,6 +54,7 @@ export const routes: RouteObject[] = [
               { path: "admin", element: <AdminPage /> },
               { path: "admin/users", element: <AdminUsersPage /> },
               { path: "admin/labs", element: <AdminLabsPage /> },
+              { path: "admin/servers", element: <AdminServersPage /> },
             ],
           },
           { path: "*", element: <NotFoundPage /> },
