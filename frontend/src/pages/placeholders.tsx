@@ -12,10 +12,6 @@ function ComingSoon({ title, description }: { title: string; description: string
   );
 }
 
-export function ServersPage() {
-  return <ComingSoon title="Servers" description="Browse GPU servers across labs." />;
-}
-
 export function ServerDetailPage() {
   const { serverId } = useParams();
   return (

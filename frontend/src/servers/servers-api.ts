@@ -11,7 +11,11 @@ export const HOSTNAME_MAX_LENGTH = 63;
 export const INTERCONNECT_MAX_LENGTH = 50;
 export const NOTES_MAX_LENGTH = 2000;
 
-/** Display name and memory per GPU, in the order GPU pickers show them. */
+/**
+ * Display name and memory per GPU, in the order GPU pickers show them. The memory is only
+ * for filter options and form previews; show a server's own `gpu_memory_gb`.
+ */
+// Keep memory in sync with GPU_MEMORY_GB in backend/app/models/server.py.
 export const GPU_MODELS: Record<GpuModel, { label: string; memoryGb: number }> = {
   RTX_4090: { label: "RTX 4090", memoryGb: 24 },
   RTX_6000_ADA: { label: "RTX 6000 Ada", memoryGb: 48 },

@@ -12,6 +12,7 @@ import {
 } from "@/admin/users-api";
 import { meQueryKey, useAuth } from "@/auth/auth-context";
 import { PageHeader } from "@/components/page-header";
+import { Pagination } from "@/components/pagination";
 import { EmptyState, ErrorState, LoadingState } from "@/components/states";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -26,7 +27,8 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import type { Page, User, UserRole } from "@/lib/api-types";
+import type { User, UserRole } from "@/lib/api-types";
+import { pageCount } from "@/lib/pagination";
 import { cn } from "@/lib/utils";
 import { CreateUserDialog, DeleteUserDialog, EditUserDialog } from "@/pages/admin/user-dialogs";
 
@@ -244,49 +246,6 @@ function UsersTable({
         </TableBody>
       </Table>
     </div>
-  );
-}
-
-function pageCount(data: Page<unknown>): number {
-  return Math.max(1, Math.ceil(data.total / data.page_size));
-}
-
-function Pagination({ data, onPage }: { data: Page<User>; onPage: (page: number) => void }) {
-  const totalPages = pageCount(data);
-  const first = (data.page - 1) * data.page_size + 1;
-  const last = first + data.items.length - 1;
-
-  return (
-    <nav aria-label="Pagination" className="mt-4 flex flex-wrap items-center justify-between gap-3">
-      <p className="text-sm text-muted-foreground">
-        {first}–{last} of {data.total}
-      </p>
-      <div className="flex items-center gap-2">
-        <Button
-          variant="outline"
-          size="sm"
-          disabled={data.page <= 1}
-          onClick={() => {
-            onPage(data.page - 1);
-          }}
-        >
-          Previous
-        </Button>
-        <span className="text-sm tabular-nums">
-          Page {data.page} of {totalPages}
-        </span>
-        <Button
-          variant="outline"
-          size="sm"
-          disabled={data.page >= totalPages}
-          onClick={() => {
-            onPage(data.page + 1);
-          }}
-        >
-          Next
-        </Button>
-      </div>
-    </nav>
   );
 }
 
