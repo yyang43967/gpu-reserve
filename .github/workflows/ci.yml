@@ -94,6 +94,19 @@ jobs:
       - name: Start core stack
         run: docker compose -f docker-compose.yml --profile core up -d --build --wait --wait-timeout 180
 
+      # Runs inside the built image, which proves it ships the migrations.
+      - name: Apply migrations
+        run: docker compose -f docker-compose.yml --profile core run --rm --no-deps api alembic upgrade head
+
+      - name: Check schema version
+        run: |
+          version="$(docker compose -f docker-compose.yml --profile core exec -T postgres \
+            psql -U gpureserve -d gpureserve -tAc 'SELECT version_num FROM alembic_version')"
+          head="$(docker compose -f docker-compose.yml --profile core run --rm --no-deps api \
+            alembic heads | cut -d' ' -f1)"
+          echo "Schema version: $version, migration head: $head"
+          test -n "$head" && test "$version" = "$head"
+
       - name: Check image architecture
         run: test "$(docker image inspect gpu-reserve-api:local --format '{{.Architecture}}')" = "arm64"
 
