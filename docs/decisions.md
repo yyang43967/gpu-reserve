@@ -18,6 +18,7 @@ Each entry records the context, the decision, and why. Newest phases at the bott
 - **Context:** MinIO no longer publishes community Docker images. `minio/minio` returns 404 and pinned older tags cannot be pulled.
 - **Decision:** No object storage service in Compose yet. Choose an S3-compatible replacement when presigned uploads are built.
 - **Why:** Nothing uses object storage before then. Picking a replacement now would add an untested service and a dependency with no consumer.
+- **Outcome:** SeaweedFS, chosen in Phase 3. See "Local object storage: SeaweedFS".
 
 ### `pgvector/pgvector:pg16` as the Postgres image
 - **Context:** The schema needs `btree_gist` (contrib) and `pgvector`.
@@ -189,3 +190,37 @@ Each entry records the context, the decision, and why. Newest phases at the bott
 ### Real migrations in tests
 - **Decision:** Integration tests run `alembic upgrade head` once per session against the test container, then truncate tables between tests. A dedicated test upgrades to head, downgrades to base, and checks that autogenerate finds no drift between the models and the migrations.
 - **Why:** `create_all` would hide missing or wrong migrations, including extensions, enum types, and constraint names. Running the real chain proves that what ships is what the tests exercised. CI also applies the migrations inside the built image before the smoke test.
+
+## Phase 3 — Labs and servers
+
+### Local object storage: SeaweedFS
+- **Context:** Uploads use presigned URLs, so the browser talks to object storage directly. Development needs an S3-compatible service that runs on arm64, fits the 8 GB laptop, and behaves like S3 on the points the upload design depends on.
+- **Options considered:** SeaweedFS (`chrislusf/seaweedfs`) and RustFS (`rustfs/rustfs`). Both publish arm64 images and are Apache-2.0. SeaweedFS has about ten years of releases. RustFS reached 1.0 recently and ships point releases weekly.
+- **How they were compared:** one script, run against `chrislusf/seaweedfs:4.51` and `rustfs/rustfs:1.0.4`, each in a container limited to 256 MiB, signing with boto3:
+
+  | Check | SeaweedFS | RustFS |
+  |---|---|---|
+  | Unsigned GET, PUT, bucket list, and service list rejected | 403 | 403 |
+  | Presigned POST under the size limit (2 MiB and 5 MiB) | 204 | 204 |
+  | Presigned POST over the limit | 400, nothing stored | 400, nothing stored |
+  | Presigned POST with a content type other than the signed one | 403 | 400 |
+  | Presigned POST with an empty file (`content-length-range` starts at 1) | 400 | 400 |
+  | Presigned PUT with a body length or content type other than the signed one | 403 | 403 |
+  | HEAD reports length and type; DELETE removes the object | yes | yes |
+  | CORS preflight from the frontend origin allowed, other origins refused | yes | yes |
+  | URL signed for one host rejected under another | 403 | 403 |
+  | Bucket-scoped identity cannot create buckets | denied | not tested (see below) |
+  | Memory, idle → after the run | 60 → 65 MiB | 70 → 102 MiB |
+
+- **Decision:** SeaweedFS 4.51, running `weed mini` (master, volume, filer, and S3 gateway in one process) in the `storage` and `full` Compose profiles, with `mem_limit: 256m` and `GOMEMLIMIT=160MiB`. WebDAV, the admin UI, and the Iceberg and Lance endpoints are turned off.
+- **Why:**
+  - Both servers passed every upload check, so the decision came down to setup and footprint.
+  - SeaweedFS reads its identities from a file. The only identity is the application's, with read, write, list, and tagging on the uploads bucket. There is no admin identity and no anonymous identity, so unsigned requests get 403. The server creates the bucket itself at startup (`-bucket`) and answers CORS for the configured origins (`-s3.allowedOrigins`). No admin key exists anywhere in the local stack, not even for setup.
+  - RustFS starts with a root key. A bucket-scoped user would need a separate setup step through its admin API using that root key, so the RustFS run above used the root key and does not show a scoped identity. That setup step and its key are what SeaweedFS avoids.
+  - SeaweedFS used less memory in the same test.
+  - 4.51 is pinned rather than 4.52, which had been out only a few days.
+- **Configuration details:**
+  - `infra/local/seaweedfs/start.sh` writes the identity file from `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, and `S3_BUCKET_UPLOADS` (mode 600, owned by the service user), then hands over to the image's entrypoint, which drops root. Compose supplies development-only defaults, as it does for `JWT_SECRET`.
+  - The allowed CORS origins follow `CORS_ORIGINS`, the same list the API uses.
+  - Only the S3 port (8333) is published, on `127.0.0.1`. Data and filer metadata share the `seaweedfs-data` volume.
+- **Local only:** this setup is for development. Production uses AWS S3, with bucket CORS for the frontend origin and an IAM policy on the instance role scoped to the uploads bucket. Both are set in Terraform.
