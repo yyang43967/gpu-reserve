@@ -2,13 +2,17 @@ from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 
 import pytest
+from alembic import command
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 from testcontainers.postgres import PostgresContainer
 from testcontainers.redis import RedisContainer
 
 from app.core.config import Environment, Settings
+from app.db.session import create_engine, create_session_factory
 from app.main import create_app
+from tests.integration.db_utils import alembic_config, truncate_all
 
 POSTGRES_IMAGE = "pgvector/pgvector:pg16"
 REDIS_IMAGE = "redis:7-alpine"
@@ -32,11 +36,18 @@ def redis_url() -> Iterator[str]:
 
 
 @pytest.fixture(scope="session")
-def make_settings(postgres_url: str, redis_url: str) -> Callable[..., Settings]:
+def migrated_database_url(postgres_url: str) -> str:
+    """The session database, migrated to head once with the real migrations."""
+    command.upgrade(alembic_config(postgres_url), "head")
+    return postgres_url
+
+
+@pytest.fixture(scope="session")
+def make_settings(migrated_database_url: str, redis_url: str) -> Callable[..., Settings]:
     def factory(**overrides: object) -> Settings:
         values: dict[str, object] = {
             "environment": Environment.TEST,
-            "database_url": postgres_url,
+            "database_url": migrated_database_url,
             "redis_url": redis_url,
             "ready_check_timeout_seconds": 1.0,
         }
@@ -59,3 +70,18 @@ async def _running_client(settings: Settings) -> AsyncIterator[AsyncClient]:
 @pytest.fixture
 def client_for() -> Callable[[Settings], AbstractAsyncContextManager[AsyncClient]]:
     return _running_client
+
+
+@pytest.fixture(scope="session")
+async def engine(make_settings: Callable[..., Settings]) -> AsyncIterator[AsyncEngine]:
+    engine = create_engine(make_settings())
+    yield engine
+    await engine.dispose()
+
+
+@pytest.fixture
+async def db_session(engine: AsyncEngine) -> AsyncIterator[AsyncSession]:
+    """A session on the migrated database. Every table is emptied after the test."""
+    async with create_session_factory(engine)() as session:
+        yield session
+    await truncate_all(engine)
