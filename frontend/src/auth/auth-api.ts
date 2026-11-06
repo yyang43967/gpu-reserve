@@ -38,3 +38,17 @@ export async function logout(): Promise<void> {
 export function getMe(signal?: AbortSignal): Promise<User> {
   return apiFetch<User>("/me", { signal });
 }
+
+export function updateProfile(input: { full_name: string }): Promise<User> {
+  return apiFetch<User>("/me", { method: "PATCH", body: input });
+}
+
+/** Change the password. The API signs out every other session and returns a fresh one. */
+export async function changePassword(input: {
+  current_password: string;
+  new_password: string;
+}): Promise<User> {
+  const session = await apiFetch<TokenResponse>("/me/password", { method: "PUT", body: input });
+  setAccessToken(session.access_token);
+  return session.user;
+}

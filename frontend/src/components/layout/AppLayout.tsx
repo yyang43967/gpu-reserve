@@ -58,9 +58,18 @@ function UserMenu() {
 
   return (
     <div className="flex items-center gap-2">
-      <span className="hidden max-w-40 truncate text-sm text-muted-foreground sm:inline">
+      <NavLink
+        to="/account"
+        aria-label="Account settings"
+        className={({ isActive }) =>
+          cn(
+            "hidden max-w-40 truncate rounded-md px-2 py-1 text-sm hover:text-foreground sm:inline",
+            isActive ? "text-foreground" : "text-muted-foreground",
+          )
+        }
+      >
         {user?.full_name}
-      </span>
+      </NavLink>
       <Button
         variant="ghost"
         size="sm"
@@ -117,6 +126,22 @@ export function AppLayout() {
                 setMenuOpen(false);
               }}
             />
+            <NavLink
+              to="/account"
+              onClick={() => {
+                setMenuOpen(false);
+              }}
+              className={({ isActive }) =>
+                cn(
+                  "rounded-md px-3 py-2 text-sm font-medium transition-colors",
+                  isActive
+                    ? "bg-secondary text-secondary-foreground"
+                    : "text-muted-foreground hover:text-foreground",
+                )
+              }
+            >
+              Account
+            </NavLink>
           </nav>
         )}
       </header>

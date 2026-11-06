@@ -2,6 +2,7 @@ import type { RouteObject } from "react-router";
 
 import { RedirectIfAuthenticated, RequireAdmin, RequireAuth } from "@/auth/guards";
 import { AppLayout, AuthLayout } from "@/components/layout/AppLayout";
+import { AccountPage } from "@/pages/AccountPage";
 import { DashboardPage } from "@/pages/DashboardPage";
 import { LoginPage } from "@/pages/LoginPage";
 import {
@@ -43,6 +44,7 @@ export const routes: RouteObject[] = [
           { path: "find-slot", element: <FindSlotPage /> },
           { path: "reservations", element: <MyReservationsPage /> },
           { path: "assistant", element: <AssistantPage /> },
+          { path: "account", element: <AccountPage /> },
           {
             element: <RequireAdmin />,
             children: [{ path: "admin", element: <AdminPage /> }],
