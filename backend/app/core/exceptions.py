@@ -135,3 +135,32 @@ class LabNotEmpty(DomainError):
     kind = ErrorKind.CONFLICT
     type_slug = "lab-not-empty"
     title = "Lab has servers"
+
+
+class UnknownLab(DomainError):
+    """A request body names a lab that does not exist."""
+
+    kind = ErrorKind.INVALID
+    type_slug = "unknown-lab"
+    title = "Unknown lab"
+
+
+class ServerNotFound(DomainError):
+    kind = ErrorKind.NOT_FOUND
+    type_slug = "server-not-found"
+    title = "Server not found"
+
+
+class HostnameTaken(DomainError):
+    kind = ErrorKind.CONFLICT
+    type_slug = "hostname-taken"
+    title = "Hostname already in use"
+
+
+class GpusInUse(DomainError):
+    """GPUs that would be removed, or a server that would be deleted, have future
+    active allocations."""
+
+    kind = ErrorKind.CONFLICT
+    type_slug = "gpus-in-use"
+    title = "GPUs in use"

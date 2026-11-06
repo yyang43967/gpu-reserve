@@ -15,8 +15,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
 from app.main import create_app
-from app.models import Lab, User, UserRole
-from app.services import labs, users
+from app.models import GpuModel, Lab, Server, User, UserRole
+from app.services import labs, servers, users
 
 pytestmark = pytest.mark.integration
 
@@ -40,6 +40,7 @@ class Targets:
     lab: Lab
     # A lab with no servers, so deleting it succeeds.
     empty_lab: Lab
+    server: Server
 
 
 @dataclass(frozen=True)
@@ -48,10 +49,17 @@ class Context:
     target: User
     lab: Lab
     empty_lab: Lab
+    server: Server
 
     @classmethod
     def of(cls, caller: User, targets: Targets) -> "Context":
-        return cls(caller=caller, target=targets.user, lab=targets.lab, empty_lab=targets.empty_lab)
+        return cls(
+            caller=caller,
+            target=targets.user,
+            lab=targets.lab,
+            empty_lab=targets.empty_lab,
+            server=targets.server,
+        )
 
 
 @dataclass(frozen=True)
@@ -81,6 +89,10 @@ def _lab(ctx: Context) -> dict[str, str]:
 
 def _empty_lab(ctx: Context) -> dict[str, str]:
     return {"lab_id": str(ctx.empty_lab.id)}
+
+
+def _server(ctx: Context) -> dict[str, str]:
+    return {"server_id": str(ctx.server.id)}
 
 
 MATRIX = [
@@ -140,6 +152,27 @@ MATRIX = [
         path_params=_lab,
     ),
     RouteCase("DELETE", "/labs/{lab_id}", Access.ADMIN, path_params=_empty_lab),
+    RouteCase(
+        "POST",
+        "/servers",
+        Access.ADMIN,
+        body=lambda ctx: {
+            "lab_id": str(ctx.lab.id),
+            "hostname": "h100-node-09",
+            "gpu_model": "H100_80GB",
+            "gpu_count": 8,
+            "cpu_cores": 96,
+            "ram_gb": 1024,
+        },
+    ),
+    RouteCase(
+        "PATCH",
+        "/servers/{server_id}",
+        Access.ADMIN,
+        body=lambda ctx: {"gpu_count": 2},
+        path_params=_server,
+    ),
+    RouteCase("DELETE", "/servers/{server_id}", Access.ADMIN, path_params=_server),
 ]
 
 PROTECTED = [case for case in MATRIX if case.access in {Access.AUTHENTICATED, Access.ADMIN}]
@@ -219,11 +252,23 @@ async def _lab_named(db: AsyncSession, name: str) -> Lab:
 
 @pytest.fixture
 async def targets(db_session: AsyncSession) -> Targets:
+    lab = await _lab_named(db_session, "Vision Lab")
+    server = await servers.create_server(
+        db_session,
+        lab_id=lab.id,
+        hostname="a100-node-01",
+        gpu_model=GpuModel.A100_80GB,
+        gpu_count=4,
+        cpu_cores=64,
+        ram_gb=512,
+    )
+    await db_session.commit()
     return Targets(
         # Another account that user-management routes act on.
         user=await _create(db_session, "target@example.edu", UserRole.STUDENT),
-        lab=await _lab_named(db_session, "Vision Lab"),
+        lab=lab,
         empty_lab=await _lab_named(db_session, "Empty Lab"),
+        server=server,
     )
 
 
