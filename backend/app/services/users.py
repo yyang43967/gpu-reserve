@@ -54,3 +54,11 @@ async def create_user(
             raise EmailAlreadyRegistered(f"An account with {email} already exists.") from exc
         raise
     return user
+
+
+async def update_profile(session: AsyncSession, user: User, *, full_name: str | None) -> User:
+    if full_name is not None:
+        user.full_name = full_name.strip()
+    await session.flush()
+    await session.refresh(user)
+    return user

@@ -201,3 +201,79 @@ async def test_redis_outage_fails_open(
             assert (await login(client)).status_code == 200
     finally:
         await truncate_all(engine)
+
+
+# --- password change ---
+
+PASSWORD_CHANGE_FAILURE_LIMIT = 5
+
+
+async def change_password(client: AsyncClient, access_token: str, current: str) -> Response:
+    return await client.put(
+        "/api/v1/me/password",
+        json={"current_password": current, "new_password": "brand-new-password"},
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+
+
+async def test_password_change_locks_after_repeated_wrong_passwords(
+    api_client: AsyncClient,
+) -> None:
+    access = (await register(api_client)).json()["access_token"]
+    for _ in range(PASSWORD_CHANGE_FAILURE_LIMIT):
+        assert (await change_password(api_client, access, "wrong-password")).status_code == 422
+
+    # Even the right current password is refused while locked.
+    response = await change_password(api_client, access, PASSWORD)
+
+    assert_throttled(response, "too-many-password-attempts", max_wait=15 * 60)
+    assert (await login(api_client)).status_code == 200  # password unchanged
+
+
+async def test_password_change_lock_survives_new_access_tokens(api_client: AsyncClient) -> None:
+    """Keyed by user, so fresh tokens or another IP do not reset it."""
+    access = (await register(api_client)).json()["access_token"]
+    for _ in range(PASSWORD_CHANGE_FAILURE_LIMIT):
+        await change_password(api_client, access, "wrong-password")
+
+    fresh_access = (await login(api_client)).json()["access_token"]
+
+    response = await change_password(api_client, fresh_access, PASSWORD)
+    assert_throttled(response, "too-many-password-attempts", max_wait=15 * 60)
+
+
+async def test_password_change_lock_is_per_user(client_from: ClientFactory) -> None:
+    async with client_from("192.0.2.70") as client:
+        victim = (await register(client, email="victim@example.edu")).json()["access_token"]
+        other = (await register(client, email="other@example.edu")).json()["access_token"]
+        for _ in range(PASSWORD_CHANGE_FAILURE_LIMIT):
+            await change_password(client, victim, "wrong-password")
+
+        assert (await change_password(client, other, PASSWORD)).status_code == 200
+
+
+async def test_password_change_success_resets_failures(api_client: AsyncClient) -> None:
+    access = (await register(api_client)).json()["access_token"]
+    for _ in range(PASSWORD_CHANGE_FAILURE_LIMIT - 1):
+        await change_password(api_client, access, "wrong-password")
+
+    changed = await change_password(api_client, access, PASSWORD)
+    assert changed.status_code == 200
+
+    new_access = changed.json()["access_token"]
+    for _ in range(PASSWORD_CHANGE_FAILURE_LIMIT - 1):
+        assert (await change_password(api_client, new_access, "wrong-password")).status_code == 422
+
+
+async def test_throttled_password_change_does_no_password_work(
+    api_client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    access = (await register(api_client)).json()["access_token"]
+    for _ in range(PASSWORD_CHANGE_FAILURE_LIMIT):
+        await change_password(api_client, access, "wrong-password")
+    counter = CallCounter(monkeypatch, "verify_password", "hash_password")
+
+    response = await change_password(api_client, access, PASSWORD)
+
+    assert response.status_code == 429
+    assert counter.calls == 0

@@ -54,6 +54,9 @@ class Settings(BaseSettings):
     login_email_window_seconds: int = Field(default=15 * 60, gt=0)
     register_ip_limit: int = Field(default=20, gt=0)
     register_ip_window_seconds: int = Field(default=60 * 60, gt=0)
+    # Wrong current passwords on a password change, per user.
+    password_change_failure_limit: int = Field(default=5, gt=0)
+    password_change_window_seconds: int = Field(default=15 * 60, gt=0)
 
     @field_validator("cors_origins", mode="before")
     @classmethod

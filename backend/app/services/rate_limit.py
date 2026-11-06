@@ -11,6 +11,7 @@ reports the outage.
 import asyncio
 import hashlib
 import logging
+import uuid
 from collections.abc import Awaitable
 from dataclasses import dataclass
 from typing import Final, TypeVar
@@ -19,7 +20,7 @@ from redis.asyncio import Redis
 from redis.exceptions import RedisError
 
 from app.core.config import Settings
-from app.core.exceptions import RateLimited, TooManyLoginAttempts
+from app.core.exceptions import RateLimited, TooManyLoginAttempts, TooManyPasswordAttempts
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +56,9 @@ class RateLimiter:
             settings.login_email_failure_limit, settings.login_email_window_seconds
         )
         self._register_ip = Window(settings.register_ip_limit, settings.register_ip_window_seconds)
+        self._password_change = Window(
+            settings.password_change_failure_limit, settings.password_change_window_seconds
+        )
 
     async def check_login(self, *, client_ip: str, email: str) -> None:
         """Count this attempt against the IP; refuse if the IP or email is over its limit."""
@@ -64,10 +68,10 @@ class RateLimiter:
                 ip_count.ttl, "Too many sign-in attempts from this network. Try again later."
             )
 
-        failures = await self._safely(self._read(self._email_key(email)))
-        if failures is not None and failures.value >= self._login_email.limit:
+        retry_after = await self._failures_exceeded(self._email_key(email), self._login_email)
+        if retry_after is not None:
             raise TooManyLoginAttempts(
-                failures.ttl, "Too many failed sign-in attempts for this account. Try again later."
+                retry_after, "Too many failed sign-in attempts for this account. Try again later."
             )
 
     async def record_login_failure(self, email: str) -> None:
@@ -83,9 +87,40 @@ class RateLimiter:
                 count.ttl, "Too many accounts created from this network. Try again later."
             )
 
+    async def check_password_change(self, user_id: uuid.UUID) -> None:
+        """Refuse when the current password was guessed wrong too often.
+
+        Keyed by user, so a stolen access token cannot be used to brute-force the
+        current password and turn temporary access into a permanent takeover.
+        """
+        key = self._password_change_key(user_id)
+        retry_after = await self._failures_exceeded(key, self._password_change)
+        if retry_after is not None:
+            raise TooManyPasswordAttempts(
+                retry_after, "Too many incorrect current passwords. Try again later."
+            )
+
+    async def record_password_change_failure(self, user_id: uuid.UUID) -> None:
+        key = self._password_change_key(user_id)
+        await self._safely(self._hit(key, self._password_change.seconds))
+
+    async def clear_password_change_failures(self, user_id: uuid.UUID) -> None:
+        await self._safely(self._redis.delete(self._password_change_key(user_id)))
+
     @staticmethod
     def _email_key(email: str) -> str:
         return f"login:email:{_email_digest(email)}"
+
+    @staticmethod
+    def _password_change_key(user_id: uuid.UUID) -> str:
+        return f"password-change:user:{user_id}"
+
+    async def _failures_exceeded(self, key: str, window: Window) -> int | None:
+        """Seconds to wait if the failure count for `key` is at its limit, else None."""
+        failures = await self._safely(self._read(key))
+        if failures is not None and failures.value >= window.limit:
+            return failures.ttl
+        return None
 
     async def _hit(self, key: str, window_seconds: int) -> Count:
         async with self._redis.pipeline(transaction=True) as pipe:

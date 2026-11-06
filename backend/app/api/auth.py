@@ -1,57 +1,14 @@
-from typing import Annotated, Final
+from fastapi import APIRouter, Request, Response, status
 
-from fastapi import APIRouter, Cookie, Request, Response, status
-
-from app.api import API_PREFIX, problem_responses
+from app.api import problem_responses
 from app.api.deps import ClientIp, CurrentUser, RateLimiterDep, SessionDep, SettingsDep
-from app.core.config import Settings
+from app.api.session_cookie import RefreshCookie, clear_refresh_cookie, token_response
 from app.core.errors import domain_error_response
 from app.core.exceptions import InvalidToken, RefreshTokenReused
 from app.schemas.auth import LoginRequest, RegisterRequest, TokenResponse
-from app.schemas.user import UserRead
 from app.services import auth
-from app.services.auth import AuthResult
 
 router = APIRouter(prefix="/auth", tags=["auth"])
-
-REFRESH_COOKIE_NAME: Final = "refresh_token"
-# The cookie is only sent to the auth endpoints, never to the rest of the API.
-REFRESH_COOKIE_PATH: Final = f"{API_PREFIX}/auth"
-
-RefreshCookie = Annotated[str | None, Cookie(alias=REFRESH_COOKIE_NAME)]
-
-
-def _set_refresh_cookie(response: Response, settings: Settings, result: AuthResult) -> None:
-    response.set_cookie(
-        REFRESH_COOKIE_NAME,
-        result.tokens.refresh_token,
-        max_age=settings.refresh_token_ttl_days * 24 * 60 * 60,
-        path=REFRESH_COOKIE_PATH,
-        secure=settings.refresh_cookie_secure,
-        httponly=True,
-        samesite="lax",
-    )
-
-
-def _clear_refresh_cookie(response: Response, settings: Settings) -> None:
-    response.delete_cookie(
-        REFRESH_COOKIE_NAME,
-        path=REFRESH_COOKIE_PATH,
-        secure=settings.refresh_cookie_secure,
-        httponly=True,
-        samesite="lax",
-    )
-
-
-def _token_response(response: Response, settings: Settings, result: AuthResult) -> TokenResponse:
-    _set_refresh_cookie(response, settings, result)
-    expires_in = settings.access_token_ttl_minutes * 60
-    return TokenResponse(
-        access_token=result.tokens.access_token,
-        expires_in=expires_in,
-        user=UserRead.model_validate(result.user),
-    )
-
 
 _UNAUTHORIZED = problem_responses(status.HTTP_401_UNAUTHORIZED)
 
@@ -79,7 +36,7 @@ async def register(
         password=body.password,
         full_name=body.full_name,
     )
-    return _token_response(response, settings, result)
+    return token_response(response, settings, result)
 
 
 @router.post(
@@ -97,7 +54,7 @@ async def login(
     result = await auth.login(
         session, settings, limiter, client_ip=client_ip, email=body.email, password=body.password
     )
-    return _token_response(response, settings, result)
+    return token_response(response, settings, result)
 
 
 @router.post("/refresh", response_model=TokenResponse, responses=_UNAUTHORIZED)
@@ -118,9 +75,9 @@ async def refresh(
         problem = domain_error_response(
             exc, base_url=settings.problem_base_url, instance=request.url.path
         )
-        _clear_refresh_cookie(problem, settings)
+        clear_refresh_cookie(problem, settings)
         return problem
-    return _token_response(response, settings, result)
+    return token_response(response, settings, result)
 
 
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT, responses=_UNAUTHORIZED)
@@ -133,5 +90,5 @@ async def logout(
     """End this session: revoke its refresh token family and clear the cookie."""
     await auth.logout(session, user=user, refresh_token=refresh_token)
     response = Response(status_code=status.HTTP_204_NO_CONTENT)
-    _clear_refresh_cookie(response, settings)
+    clear_refresh_cookie(response, settings)
     return response

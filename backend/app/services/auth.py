@@ -15,7 +15,12 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
-from app.core.exceptions import InvalidCredentials, InvalidToken, RefreshTokenReused
+from app.core.exceptions import (
+    IncorrectPassword,
+    InvalidCredentials,
+    InvalidToken,
+    RefreshTokenReused,
+)
 from app.core.security import (
     create_access_token,
     decode_access_token,
@@ -86,6 +91,15 @@ async def revoke_family(session: AsyncSession, family_id: uuid.UUID) -> None:
     await session.execute(
         update(RefreshToken)
         .where(RefreshToken.family_id == family_id, RefreshToken.revoked_at.is_(None))
+        .values(revoked_at=_now())
+    )
+
+
+async def revoke_all_sessions(session: AsyncSession, user_id: uuid.UUID) -> None:
+    """Revoke every live refresh token of a user, signing them out everywhere."""
+    await session.execute(
+        update(RefreshToken)
+        .where(RefreshToken.user_id == user_id, RefreshToken.revoked_at.is_(None))
         .values(revoked_at=_now())
     )
 
@@ -179,6 +193,31 @@ async def refresh(session: AsyncSession, settings: Settings, refresh_token: str)
     tokens, successor = await _issue_tokens(session, settings, user, family_id=row.family_id)
     row.replaced_by = successor.id
     return AuthResult(user=user, tokens=tokens)
+
+
+async def change_password(
+    session: AsyncSession,
+    settings: Settings,
+    limiter: RateLimiter,
+    user: User,
+    *,
+    current_password: str,
+    new_password: str,
+) -> AuthResult:
+    """Change the password and sign out every other session.
+
+    The refresh cookie is not sent to this endpoint, so the current session cannot be
+    singled out. Instead all sessions are revoked and the caller gets a fresh one.
+    """
+    # Before any hashing, like login.
+    await limiter.check_password_change(user.id)
+    if not await passwords.verify_password(user.password_hash, current_password):
+        await limiter.record_password_change_failure(user.id)
+        raise IncorrectPassword("The current password is incorrect.")
+    await limiter.clear_password_change_failures(user.id)
+    user.password_hash = await passwords.hash_password(new_password)
+    await revoke_all_sessions(session, user.id)
+    return await _start_session(session, settings, user)
 
 
 async def logout(session: AsyncSession, *, user: User, refresh_token: str | None) -> None:

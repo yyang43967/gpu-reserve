@@ -78,3 +78,14 @@ class RateLimited(DomainError):
 class TooManyLoginAttempts(RateLimited):
     type_slug = "too-many-login-attempts"
     title = "Too many login attempts"
+
+
+class TooManyPasswordAttempts(RateLimited):
+    type_slug = "too-many-password-attempts"
+    title = "Too many password attempts"
+
+
+class IncorrectPassword(DomainError):
+    kind = ErrorKind.INVALID
+    type_slug = "incorrect-password"
+    title = "Incorrect password"
