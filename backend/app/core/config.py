@@ -71,6 +71,23 @@ class Settings(BaseSettings):
     # How long a presigned upload stays usable.
     upload_url_ttl_seconds: int = Field(default=300, gt=0)
 
+    @field_validator(
+        "s3_endpoint_url",
+        "s3_public_endpoint_url",
+        "s3_region",
+        "s3_access_key_id",
+        "s3_secret_access_key",
+        mode="before",
+    )
+    @classmethod
+    def blank_is_unset(cls, value: object) -> object:
+        # An env file line like `S3_ACCESS_KEY_ID=` means "not set". Passing "" to boto3
+        # would count as an explicit (empty) key and skip the default credential chain,
+        # which is how production gets the instance role's credentials.
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
     @field_validator("cors_origins", mode="before")
     @classmethod
     def split_origins(cls, value: object) -> object:
