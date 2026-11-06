@@ -13,6 +13,9 @@ x-backend-env: &backend-env
   DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-gpureserve}:${POSTGRES_PASSWORD:-gpureserve}@postgres:5432/${POSTGRES_DB:-gpureserve}
   REDIS_URL: redis://redis:6379/0
   CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173}
+  # Development-only signing key, used when JWT_SECRET is unset. Never deploy it.
+  JWT_SECRET: ${JWT_SECRET:-local-development-only-jwt-secret-do-not-deploy}
+  REFRESH_COOKIE_SECURE: ${REFRESH_COOKIE_SECURE:-false}
 
 services:
   postgres:

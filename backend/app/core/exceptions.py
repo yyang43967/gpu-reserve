@@ -31,3 +31,9 @@ class DomainError(Exception):
     def __init__(self, detail: str | None = None) -> None:
         super().__init__(detail or self.title)
         self.detail = detail
+
+
+class InvalidToken(DomainError):
+    kind = ErrorKind.UNAUTHENTICATED
+    type_slug = "invalid-token"
+    title = "Invalid token"
