@@ -31,6 +31,9 @@ class Settings(BaseSettings):
     # Seconds to wait on each dependency in the readiness probe.
     ready_check_timeout_seconds: float = 2.0
 
+    # Prefix for the `type` URI of problem-details error responses.
+    problem_base_url: str = "https://gpureserve.dev/errors"
+
     @field_validator("cors_origins", mode="before")
     @classmethod
     def split_origins(cls, value: object) -> object:

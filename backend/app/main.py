@@ -7,6 +7,7 @@ from redis.asyncio import Redis
 
 from app.api import health
 from app.core.config import Settings, get_settings
+from app.core.errors import register_error_handlers
 from app.db.session import create_engine, create_session_factory
 
 API_PREFIX = "/api/v1"
@@ -31,6 +32,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app = FastAPI(title="GPU Reserve API", version="0.1.0", lifespan=lifespan)
     app.state.settings = settings
 
+    # Registered before CORS so that CORS wraps the error middleware and 500s stay readable.
+    register_error_handlers(app, settings.problem_base_url)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins,
