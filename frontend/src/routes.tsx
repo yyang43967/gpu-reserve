@@ -3,6 +3,7 @@ import type { RouteObject } from "react-router";
 import { RedirectIfAuthenticated, RequireAdmin, RequireAuth } from "@/auth/guards";
 import { AppLayout, AuthLayout } from "@/components/layout/AppLayout";
 import { AccountPage } from "@/pages/AccountPage";
+import { AdminLabsPage } from "@/pages/admin/AdminLabsPage";
 import { AdminPage } from "@/pages/admin/AdminPage";
 import { AdminUsersPage } from "@/pages/admin/AdminUsersPage";
 import { DashboardPage } from "@/pages/DashboardPage";
@@ -51,6 +52,7 @@ export const routes: RouteObject[] = [
             children: [
               { path: "admin", element: <AdminPage /> },
               { path: "admin/users", element: <AdminUsersPage /> },
+              { path: "admin/labs", element: <AdminLabsPage /> },
             ],
           },
           { path: "*", element: <NotFoundPage /> },

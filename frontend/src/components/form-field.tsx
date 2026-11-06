@@ -3,6 +3,7 @@ import { useId, type ComponentProps, type ReactNode } from "react";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { NativeSelect } from "@/components/ui/native-select";
+import { Textarea } from "@/components/ui/textarea";
 
 interface FieldProps {
   label: string;
@@ -72,6 +73,23 @@ export function SelectField({ label, error, description, id, ...selectProps }: S
   return (
     <Field label={label} error={error} description={description} id={id}>
       {(aria) => <NativeSelect {...aria} {...selectProps} />}
+    </Field>
+  );
+}
+
+type TextareaFieldProps = ComponentProps<typeof Textarea> & FieldProps;
+
+/** A labelled multi-line input with the same error handling as FormField. */
+export function TextareaField({
+  label,
+  error,
+  description,
+  id,
+  ...textareaProps
+}: TextareaFieldProps) {
+  return (
+    <Field label={label} error={error} description={description} id={id}>
+      {(aria) => <Textarea {...aria} {...textareaProps} />}
     </Field>
   );
 }

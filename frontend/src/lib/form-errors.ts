@@ -6,6 +6,7 @@ import { ApiError } from "@/lib/api";
 const FIELD_FOR_CODE: Record<string, string> = {
   "email-taken": "email",
   "incorrect-password": "current_password",
+  "lab-name-taken": "name",
 };
 
 export function retryAfterMessage(seconds: number | null): string {
