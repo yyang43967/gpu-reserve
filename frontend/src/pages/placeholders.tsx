@@ -1,15 +1,7 @@
 import { Link, useParams } from "react-router";
 
+import { PageHeader } from "@/components/page-header";
 import { EmptyState } from "@/components/states";
-
-function PageHeader({ title, description }: { title: string; description: string }) {
-  return (
-    <div className="mb-6">
-      <h1 className="text-2xl font-semibold tracking-tight">{title}</h1>
-      <p className="mt-1 text-sm text-muted-foreground">{description}</p>
-    </div>
-  );
-}
 
 function ComingSoon({ title, description }: { title: string; description: string }) {
   return (
@@ -42,10 +34,6 @@ export function FindSlotPage() {
 
 export function MyReservationsPage() {
   return <ComingSoon title="My reservations" description="Upcoming and past reservations." />;
-}
-
-export function AdminPage() {
-  return <ComingSoon title="Admin" description="Labs, servers, users, and approvals." />;
 }
 
 export function AssistantPage() {
