@@ -115,3 +115,23 @@ class FullNameRequired(DomainError):
     kind = ErrorKind.INVALID
     type_slug = "full-name-required"
     title = "Full name required"
+
+
+class LabNotFound(DomainError):
+    kind = ErrorKind.NOT_FOUND
+    type_slug = "lab-not-found"
+    title = "Lab not found"
+
+
+class LabNameTaken(DomainError):
+    kind = ErrorKind.CONFLICT
+    type_slug = "lab-name-taken"
+    title = "Lab name already in use"
+
+
+class LabNotEmpty(DomainError):
+    """A lab that still has servers cannot be deleted; deactivate it instead."""
+
+    kind = ErrorKind.CONFLICT
+    type_slug = "lab-not-empty"
+    title = "Lab has servers"

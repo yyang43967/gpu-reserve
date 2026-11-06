@@ -15,8 +15,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
 from app.main import create_app
-from app.models import User, UserRole
-from app.services import users
+from app.models import Lab, User, UserRole
+from app.services import labs, users
 
 pytestmark = pytest.mark.integration
 
@@ -33,9 +33,25 @@ class Access(StrEnum):
 
 
 @dataclass(frozen=True)
+class Targets:
+    """Records that routes with path parameters act on."""
+
+    user: User
+    lab: Lab
+    # A lab with no servers, so deleting it succeeds.
+    empty_lab: Lab
+
+
+@dataclass(frozen=True)
 class Context:
     caller: User
     target: User
+    lab: Lab
+    empty_lab: Lab
+
+    @classmethod
+    def of(cls, caller: User, targets: Targets) -> "Context":
+        return cls(caller=caller, target=targets.user, lab=targets.lab, empty_lab=targets.empty_lab)
 
 
 @dataclass(frozen=True)
@@ -57,6 +73,14 @@ class RouteCase:
 
 def _target(ctx: Context) -> dict[str, str]:
     return {"user_id": str(ctx.target.id)}
+
+
+def _lab(ctx: Context) -> dict[str, str]:
+    return {"lab_id": str(ctx.lab.id)}
+
+
+def _empty_lab(ctx: Context) -> dict[str, str]:
+    return {"lab_id": str(ctx.empty_lab.id)}
 
 
 MATRIX = [
@@ -100,6 +124,22 @@ MATRIX = [
         path_params=_target,
     ),
     RouteCase("DELETE", "/users/{user_id}", Access.ADMIN, path_params=_target),
+    RouteCase("GET", "/labs", Access.AUTHENTICATED),
+    RouteCase(
+        "POST",
+        "/labs",
+        Access.ADMIN,
+        body=lambda ctx: {"name": "Robotics Lab", "location": "Building 7"},
+    ),
+    RouteCase("GET", "/labs/{lab_id}", Access.AUTHENTICATED, path_params=_lab),
+    RouteCase(
+        "PATCH",
+        "/labs/{lab_id}",
+        Access.ADMIN,
+        body=lambda ctx: {"location": "Building 9"},
+        path_params=_lab,
+    ),
+    RouteCase("DELETE", "/labs/{lab_id}", Access.ADMIN, path_params=_empty_lab),
 ]
 
 PROTECTED = [case for case in MATRIX if case.access in {Access.AUTHENTICATED, Access.ADMIN}]
@@ -164,10 +204,27 @@ async def student(api_client: AsyncClient, db_session: AsyncSession) -> Caller:
     return await _caller(api_client, db_session, "student@example.edu", UserRole.STUDENT)
 
 
+async def _lab_named(db: AsyncSession, name: str) -> Lab:
+    lab = await labs.create_lab(
+        db,
+        name=name,
+        location="Building 3",
+        timezone="America/Los_Angeles",
+        description=None,
+        is_active=True,
+    )
+    await db.commit()
+    return lab
+
+
 @pytest.fixture
-async def target(db_session: AsyncSession) -> User:
-    """Another account that user-management routes act on."""
-    return await _create(db_session, "target@example.edu", UserRole.STUDENT)
+async def targets(db_session: AsyncSession) -> Targets:
+    return Targets(
+        # Another account that user-management routes act on.
+        user=await _create(db_session, "target@example.edu", UserRole.STUDENT),
+        lab=await _lab_named(db_session, "Vision Lab"),
+        empty_lab=await _lab_named(db_session, "Empty Lab"),
+    )
 
 
 async def call(
@@ -193,9 +250,9 @@ def assert_allowed(response: Response) -> None:
 
 @pytest.mark.parametrize("case", PROTECTED, ids=_ids(PROTECTED))
 async def test_anonymous_is_unauthenticated(
-    api_client: AsyncClient, admin: Caller, target: User, case: RouteCase
+    api_client: AsyncClient, admin: Caller, targets: Targets, case: RouteCase
 ) -> None:
-    response = await call(api_client, case, Context(caller=admin.user, target=target))
+    response = await call(api_client, case, Context.of(admin.user, targets))
 
     assert_problem(response, 401, "not-authenticated")
     assert response.headers["www-authenticate"] == "Bearer"
@@ -203,9 +260,9 @@ async def test_anonymous_is_unauthenticated(
 
 @pytest.mark.parametrize("case", PROTECTED, ids=_ids(PROTECTED))
 async def test_bad_token_is_rejected(
-    api_client: AsyncClient, admin: Caller, target: User, case: RouteCase
+    api_client: AsyncClient, admin: Caller, targets: Targets, case: RouteCase
 ) -> None:
-    ctx = Context(caller=admin.user, target=target)
+    ctx = Context.of(admin.user, targets)
 
     response = await call(api_client, case, ctx, {"Authorization": "Bearer not-a-token"})
 
@@ -213,11 +270,11 @@ async def test_bad_token_is_rejected(
 
 
 async def test_refresh_ignores_access_tokens(
-    api_client: AsyncClient, student: Caller, target: User
+    api_client: AsyncClient, student: Caller, targets: Targets
 ) -> None:
     [case] = [c for c in MATRIX if c.access is Access.REFRESH_COOKIE]
 
-    response = await call(api_client, case, Context(student.user, target), student.headers)
+    response = await call(api_client, case, Context.of(student.user, targets), student.headers)
 
     assert_problem(response, 401, "invalid-token")
 
@@ -227,18 +284,18 @@ async def test_refresh_ignores_access_tokens(
 
 @pytest.mark.parametrize("case", ADMIN_ONLY, ids=_ids(ADMIN_ONLY))
 async def test_student_is_forbidden_on_admin_routes(
-    api_client: AsyncClient, student: Caller, target: User, case: RouteCase
+    api_client: AsyncClient, student: Caller, targets: Targets, case: RouteCase
 ) -> None:
-    response = await call(api_client, case, Context(student.user, target), student.headers)
+    response = await call(api_client, case, Context.of(student.user, targets), student.headers)
 
     assert_problem(response, 403, "forbidden")
 
 
 @pytest.mark.parametrize("case", CALLABLE_BY_STUDENT, ids=_ids(CALLABLE_BY_STUDENT))
 async def test_student_is_allowed(
-    api_client: AsyncClient, student: Caller, target: User, case: RouteCase
+    api_client: AsyncClient, student: Caller, targets: Targets, case: RouteCase
 ) -> None:
-    response = await call(api_client, case, Context(student.user, target), student.headers)
+    response = await call(api_client, case, Context.of(student.user, targets), student.headers)
 
     assert_allowed(response)
 
@@ -251,8 +308,8 @@ ADMIN_CALLABLE = [case for case in MATRIX if case.access is not Access.REFRESH_C
 
 @pytest.mark.parametrize("case", ADMIN_CALLABLE, ids=_ids(ADMIN_CALLABLE))
 async def test_admin_is_allowed(
-    api_client: AsyncClient, admin: Caller, target: User, case: RouteCase
+    api_client: AsyncClient, admin: Caller, targets: Targets, case: RouteCase
 ) -> None:
-    response = await call(api_client, case, Context(admin.user, target), admin.headers)
+    response = await call(api_client, case, Context.of(admin.user, targets), admin.headers)
 
     assert_allowed(response)
