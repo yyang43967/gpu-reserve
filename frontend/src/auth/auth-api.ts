@@ -39,7 +39,11 @@ export function getMe(signal?: AbortSignal): Promise<User> {
   return apiFetch<User>("/me", { signal });
 }
 
-export function updateProfile(input: { full_name: string }): Promise<User> {
+/** Omitted fields are left unchanged; `avatar_key: null` removes the avatar. */
+export function updateProfile(input: {
+  full_name?: string;
+  avatar_key?: string | null;
+}): Promise<User> {
   return apiFetch<User>("/me", { method: "PATCH", body: input });
 }
 
