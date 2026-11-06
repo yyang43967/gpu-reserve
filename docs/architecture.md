@@ -11,6 +11,7 @@ A short overview. It will be expanded as components are built.
 | Worker | ARQ | Background and scheduled jobs; same image as the API |
 | Database | PostgreSQL 16 with `btree_gist` and `pgvector` | Source of truth, including double-booking prevention |
 | Cache / queue | Redis 7 | ARQ queue, rate limits, availability cache |
+| Object storage | SeaweedFS locally, S3 in production | Avatars and server images; private bucket, presigned URLs |
 | Email | Mailpit locally | |
 
 ## Health
@@ -30,7 +31,7 @@ Short-lived access tokens are kept in browser memory. Sessions persist through a
 | `POST /api/v1/auth/login` | Start a session |
 | `POST /api/v1/auth/refresh` | Rotate the refresh cookie and return a new access token |
 | `POST /api/v1/auth/logout` | End the current session (204) |
-| `GET`, `PATCH /api/v1/me` | Current user; change the display name |
+| `GET`, `PATCH /api/v1/me` | Current user; change the display name or avatar |
 | `PUT /api/v1/me/password` | Change password; signs out every other session |
 | `/api/v1/users` | Admin user management: list, create, read, update, delete |
 
@@ -84,3 +85,41 @@ sequenceDiagram
 ### Errors
 
 Every error response is an RFC 7807 problem document (`application/problem+json`) with a stable `type` URI, `title`, `status`, `detail`, and `instance`. Validation errors add `errors: [{field, message}]`. Rate-limited responses (429) include `Retry-After`.
+
+## Labs and servers
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/v1/labs`, `GET /api/v1/labs/{id}` | List and read labs; students see active labs only |
+| `POST`, `PATCH`, `DELETE /api/v1/labs…` | Admin lab management; deleting a lab that still has servers is refused (409) |
+| `GET /api/v1/servers`, `GET /api/v1/servers/{id}` | List with filters (`lab_id`, `gpu_model`, `min_gpu_memory_gb`, `min_gpus`, `status`) and read; students don't see retired servers or servers in inactive labs |
+| `POST`, `PATCH`, `DELETE /api/v1/servers…` | Admin server management; changing `gpu_count` adds or soft-removes GPU rows |
+| `POST /api/v1/uploads/presign` | Signed upload form for an `avatar` (any user) or `server_image` (admins) |
+
+Each server has one GPU row per active GPU, numbered from 0. Reasoning for visibility, GPU numbering, and soft removal is in [decisions.md](decisions.md#phase-3--labs-and-servers).
+
+## Uploads
+
+The API never handles image bytes. It signs a form, the browser posts the file to storage, and the API checks the stored object before saving its key.
+
+```mermaid
+sequenceDiagram
+    participant B as Browser
+    participant A as API
+    participant S as Object storage
+    participant D as Postgres
+
+    B->>A: POST /uploads/presign {purpose, content_type, size_bytes}
+    A-->>B: {url, fields, key} (key chosen by the server)
+    B->>S: POST form (policy: exact key and type, size range)
+    S-->>B: 204
+    B->>A: PATCH /me {avatar_key} or PATCH /servers/{id} {image_key}
+    A->>S: HEAD key (exists, size, type)
+    A->>D: save key, commit
+    A-->>B: 200 with a presigned GET URL
+    A->>S: DELETE the replaced object (after the response)
+```
+
+- The bucket is private. Images are read through presigned GET URLs signed at the start of the current hour, so a URL stays the same for an hour and the browser can cache the image.
+- In the browser, the storage POST is a plain `fetch` without the access token or cookies. Saving an upload is a separate form action; an upload that is never saved stays in the bucket (a known gap, see decisions).
+- Locally, SeaweedFS runs in the `storage` and `full` Compose profiles. The API reaches it as `seaweedfs:8333` on the Compose network and signs browser URLs for `localhost:8333`.

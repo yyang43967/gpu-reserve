@@ -1,6 +1,6 @@
 import { vi } from "vitest";
 
-import type { Page, TokenResponse, User, UserRole } from "@/lib/api-types";
+import type { Lab, Page, Server, TokenResponse, User, UserRole } from "@/lib/api-types";
 
 export function makeUser(overrides: Partial<User> = {}): User {
   return {
@@ -11,6 +11,41 @@ export function makeUser(overrides: Partial<User> = {}): User {
     weekly_gpu_hour_quota: 48,
     is_active: true,
     avatar_key: null,
+    avatar_url: null,
+    created_at: "2026-11-05T09:00:00+00:00",
+    ...overrides,
+  };
+}
+
+export function makeLab(overrides: Partial<Lab> = {}): Lab {
+  return {
+    id: "lab-1",
+    name: "Vision Lab",
+    location: "Gates 104",
+    timezone: "America/Los_Angeles",
+    description: null,
+    is_active: true,
+    created_at: "2026-11-05T09:00:00+00:00",
+    ...overrides,
+  };
+}
+
+export function makeServer(overrides: Partial<Server> = {}): Server {
+  return {
+    id: "server-1",
+    lab: { id: "lab-1", name: "Vision Lab", timezone: "America/Los_Angeles", is_active: true },
+    hostname: "gpu-01",
+    gpu_model: "A100_80GB",
+    gpu_memory_gb: 80,
+    gpu_count: 8,
+    cpu_cores: 64,
+    ram_gb: 512,
+    interconnect: null,
+    status: "available",
+    requires_approval: false,
+    max_booking_hours: 12,
+    notes: null,
+    image_url: null,
     created_at: "2026-11-05T09:00:00+00:00",
     ...overrides,
   };
@@ -50,8 +85,13 @@ export function page<T>(items: T[], overrides: Partial<Page<T>> = {}): Page<T> {
 
 export interface FakeRequest {
   method: string;
+  /** Scheme and host, to tell API calls from direct calls to storage. */
+  origin: string;
   path: string;
   query: URLSearchParams;
+  headers: Headers;
+  credentials: RequestCredentials | undefined;
+  /** Parsed JSON for string bodies; other bodies, such as FormData, as sent. */
   body: unknown;
 }
 
@@ -70,9 +110,12 @@ export function fakeApi(...routes: Route[]) {
     );
     const request: FakeRequest = {
       method: init.method ?? "GET",
+      origin: url.origin,
       path: url.pathname.replace(/^\/api\/v1/, ""),
       query: url.searchParams,
-      body: typeof init.body === "string" ? (JSON.parse(init.body) as unknown) : undefined,
+      headers: new Headers(init.headers),
+      credentials: init.credentials,
+      body: typeof init.body === "string" ? (JSON.parse(init.body) as unknown) : init.body,
     };
     requests.push(request);
     for (const route of routes) {

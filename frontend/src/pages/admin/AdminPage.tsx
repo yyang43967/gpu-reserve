@@ -1,4 +1,4 @@
-import { ChevronRight, Users } from "lucide-react";
+import { Building2, ChevronRight, Server, Users } from "lucide-react";
 import { Link } from "react-router";
 
 import { PageHeader } from "@/components/page-header";
@@ -9,6 +9,18 @@ const SECTIONS = [
     title: "Users",
     description: "Create accounts, change roles and quotas, deactivate or delete users.",
     icon: Users,
+  },
+  {
+    to: "/admin/labs",
+    title: "Labs",
+    description: "Add labs, set their time zones, and deactivate labs that close.",
+    icon: Building2,
+  },
+  {
+    to: "/admin/servers",
+    title: "Servers",
+    description: "Add servers, change GPU counts and booking rules, and upload photos.",
+    icon: Server,
   },
 ] as const;
 

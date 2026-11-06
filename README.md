@@ -14,20 +14,58 @@ docker compose --profile core up -d --wait   # postgres, redis, api on :8000
 curl localhost:8000/api/v1/ready
 ```
 
-The `full` profile adds the background worker, Mailpit (UI on :8025), and the frontend dev server on :5173:
+The `full` profile adds the background worker, Mailpit (UI on :8025), object storage (S3 API on :8333), and the frontend dev server on :5173:
 
 ```bash
 docker compose --profile full up -d --wait
 ```
 
-`docker-compose.override.yml` is applied automatically and enables hot reload with source bind mounts. To run the built images exactly as CI does, pass `-f docker-compose.yml`.
-
-For day-to-day work, the lighter setup is `core` in Docker plus the frontend and tests on the host:
+For day-to-day work, the lighter setup is `core` in Docker plus the frontend and tests on the host. The Vite dev server proxies `/api` to `localhost:8000`:
 
 ```bash
 cd frontend && pnpm install && pnpm dev
 cd backend && uv sync && uv run pytest
 ```
+
+### Running the API with hot reload
+
+`docker-compose.override.yml` is loaded automatically whenever you run `docker compose` from the repository root without `-f`. It bind-mounts `backend/app` into the API and worker containers (read-only) and starts the API with `uvicorn --reload`, so changes under `backend/app` take effect without a restart:
+
+```bash
+docker compose --profile core up -d --wait
+```
+
+Check that the running container picked it up. The output should list the `backend/app` mount and a command ending in `--reload`:
+
+```bash
+docker inspect gpu-reserve-api-1 --format '{{range .Mounts}}{{.Source}} {{end}}{{.Config.Cmd}}'
+```
+
+If it doesn't, the container was created from the base file alone (for example with `-f docker-compose.yml`). Running the `up` command above again recreates it with the override.
+
+Only `backend/app` is mounted. Rebuild the image after changing anything else that is copied into it: dependencies (`pyproject.toml`, `uv.lock`), the `Dockerfile`, or migrations under `backend/alembic`:
+
+```bash
+docker compose up -d --build api
+```
+
+The worker uses the same image, so recreate it too when it is running (`docker compose --profile full up -d --wait`).
+
+To run the built images exactly as CI does, without the override, pass the base file explicitly:
+
+```bash
+docker compose -f docker-compose.yml --profile core up -d --wait
+```
+
+### Uploads and object storage
+
+Avatars and server images are uploaded by the browser directly to S3-compatible storage. Locally that is SeaweedFS, in the `storage` profile (also part of `full`). Start it next to `core` when working on uploads:
+
+```bash
+docker compose --profile core --profile storage up -d --wait
+```
+
+It creates the `gpu-reserve-uploads` bucket on startup, allows CORS from `CORS_ORIGINS`, and listens on `127.0.0.1:8333`. Without it, everything except uploads and image URLs works. When the API runs on the host instead of in Compose, set both `S3_ENDPOINT_URL` and `S3_PUBLIC_ENDPOINT_URL` to `http://localhost:8333` (see `.env.example`).
 
 ### Database migrations and the first admin
 
@@ -39,14 +77,14 @@ uv run alembic upgrade head
 uv run python -m app.cli create-admin --email admin@example.edu --name "Lab Admin"
 ```
 
-Against the Compose stack instead:
+Against the Compose stack instead (rebuild the image first if migrations changed, since `backend/alembic` is not mounted):
 
 ```bash
 docker compose run --rm api alembic upgrade head
 docker compose run --rm api python -m app.cli create-admin --email admin@example.edu --name "Lab Admin"
 ```
 
-Admins manage other accounts at `/admin/users` in the web app.
+Admins manage accounts, labs, and servers under `/admin` in the web app.
 
 ## Repository layout
 

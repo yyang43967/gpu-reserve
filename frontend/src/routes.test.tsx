@@ -6,8 +6,6 @@ import { renderRoute } from "@/test/render";
 
 describe("routing", () => {
   it.each([
-    ["/servers", "Servers"],
-    ["/servers/abc", "Server details"],
     ["/find-slot", "Find a slot"],
     ["/reservations", "My reservations"],
     ["/assistant", "Assistant"],
@@ -19,7 +17,7 @@ describe("routing", () => {
 
   it("shows the main navigation on app pages", async () => {
     fakeApi(...signedInAs("student"), healthy);
-    renderRoute("/servers");
+    renderRoute("/find-slot");
     expect((await screen.findAllByRole("link", { name: "Find a slot" })).length).toBeGreaterThan(0);
   });
 

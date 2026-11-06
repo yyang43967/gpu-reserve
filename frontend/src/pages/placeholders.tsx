@@ -1,4 +1,4 @@
-import { Link, useParams } from "react-router";
+import { Link } from "react-router";
 
 import { PageHeader } from "@/components/page-header";
 import { EmptyState } from "@/components/states";
@@ -9,20 +9,6 @@ function ComingSoon({ title, description }: { title: string; description: string
       <PageHeader title={title} description={description} />
       <EmptyState title="Nothing here yet" description="This page is under construction." />
     </>
-  );
-}
-
-export function ServersPage() {
-  return <ComingSoon title="Servers" description="Browse GPU servers across labs." />;
-}
-
-export function ServerDetailPage() {
-  const { serverId } = useParams();
-  return (
-    <ComingSoon
-      title="Server details"
-      description={`Specs and availability for server ${serverId ?? ""}.`}
-    />
   );
 }
 

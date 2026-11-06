@@ -10,6 +10,8 @@ export interface User {
   weekly_gpu_hour_quota: number;
   is_active: boolean;
   avatar_key: string | null;
+  /** A presigned download URL, or null without an avatar. */
+  avatar_url: string | null;
   created_at: string;
 }
 
@@ -41,4 +43,62 @@ export interface Problem {
   detail?: string;
   instance?: string;
   errors?: FieldError[];
+}
+
+export type GpuModel =
+  "RTX_4090" | "RTX_6000_ADA" | "L40S" | "A100_40GB" | "A100_80GB" | "H100_80GB";
+
+export type ServerStatus = "available" | "maintenance" | "retired";
+
+export interface Lab {
+  id: string;
+  name: string;
+  location: string;
+  /** An IANA time zone name, such as America/Los_Angeles. */
+  timezone: string;
+  description: string | null;
+  is_active: boolean;
+  created_at: string;
+}
+
+/** The part of a lab embedded in each server. */
+export interface LabSummary {
+  id: string;
+  name: string;
+  timezone: string;
+  is_active: boolean;
+}
+
+export interface Server {
+  id: string;
+  lab: LabSummary;
+  hostname: string;
+  gpu_model: GpuModel;
+  /** Memory per GPU, derived from the GPU model. */
+  gpu_memory_gb: number;
+  gpu_count: number;
+  cpu_cores: number;
+  ram_gb: number;
+  interconnect: string | null;
+  status: ServerStatus;
+  requires_approval: boolean;
+  max_booking_hours: number;
+  notes: string | null;
+  /** A presigned download URL, or null without an image. */
+  image_url: string | null;
+  created_at: string;
+}
+
+export type UploadPurpose = "avatar" | "server_image";
+
+/**
+ * A short-lived form for one upload straight to storage: POST every entry of `fields`,
+ * then the file as the last field, named `file`.
+ */
+export interface PresignResponse {
+  key: string;
+  url: string;
+  fields: Record<string, string>;
+  max_bytes: number;
+  expires_at: string;
 }

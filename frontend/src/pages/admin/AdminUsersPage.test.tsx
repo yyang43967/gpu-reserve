@@ -1,4 +1,4 @@
-import { fireEvent, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
 import type { User } from "@/lib/api-types";
@@ -195,6 +195,24 @@ describe("user list", () => {
     expect(await screen.findByText("No users match these filters")).toBeInTheDocument();
     expect(lastListQuery(requests)).toMatchObject({ role: "admin", is_active: "false" });
     expect(router.state.location.search).toBe("?role=admin&status=inactive");
+  });
+
+  it("keeps both filters when two change before the page re-renders", async () => {
+    fakeApi(...signedInAs("admin"), usersApi([me, grace, alan]));
+    const { router } = renderRoute("/admin/users");
+    await findRow("Grace Hopper");
+
+    // One act batches both events into a single render, so the second change sees
+    // the same render as the first.
+    act(() => {
+      fireEvent.change(screen.getByLabelText("Status"), { target: { value: "inactive" } });
+      fireEvent.change(screen.getByLabelText("Role"), { target: { value: "student" } });
+    });
+
+    await waitFor(() => {
+      expect(router.state.location.search).toBe("?role=student&status=inactive");
+    });
+    expect(await screen.findByText("Alan Turing")).toBeInTheDocument();
   });
 
   it("clears filters from the empty state", async () => {

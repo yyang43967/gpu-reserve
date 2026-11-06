@@ -93,7 +93,7 @@ async def test_empty_patch_changes_nothing(api_client: AsyncClient) -> None:
         ({"role": "admin"}, "role"),
         ({"weekly_gpu_hour_quota": 1000}, "weekly_gpu_hour_quota"),
         ({"email": "other@example.edu"}, "email"),
-        ({"avatar_key": "avatars/x.png"}, "avatar_key"),
+        ({"is_active": False}, "is_active"),
     ],
 )
 async def test_update_rejects_invalid_or_privileged_fields(

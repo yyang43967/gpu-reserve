@@ -21,6 +21,15 @@ if (!("ResizeObserver" in globalThis)) {
   };
 }
 
+// jsdom has no object URLs. Stand-ins let image previews render; tests spy on them.
+if (!("createObjectURL" in URL)) {
+  let next = 0;
+  Object.assign(URL, {
+    createObjectURL: () => `blob:test/${String(++next)}`,
+    revokeObjectURL: () => undefined,
+  });
+}
+
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();

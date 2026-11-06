@@ -8,10 +8,12 @@ import { changePassword, updateProfile } from "@/auth/auth-api";
 import { meQueryKey, useAuth } from "@/auth/auth-context";
 import { FormAlert } from "@/components/form-alert";
 import { FormField } from "@/components/form-field";
+import { ImageUploadField } from "@/components/image-upload";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import type { User } from "@/lib/api-types";
-import { applyServerErrors } from "@/lib/form-errors";
+import { applyServerErrors, describeError } from "@/lib/form-errors";
+import { KEEP_IMAGE, type ImageChoice } from "@/lib/image-choice";
 import { PASSWORD_MAX_LENGTH, PASSWORD_MIN_LENGTH } from "@/lib/validation";
 
 function SuccessMessage({ message }: { message: string | null }) {
@@ -94,6 +96,80 @@ function ProfileCard({ user }: { user: User }) {
             <SuccessMessage message={saved} />
           </div>
         </form>
+      </CardContent>
+    </Card>
+  );
+}
+
+function AvatarCard({ user }: { user: User }) {
+  const queryClient = useQueryClient();
+  const [choice, setChoice] = useState<ImageChoice>(KEEP_IMAGE);
+  const [uploading, setUploading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [formError, setFormError] = useState<string | null>(null);
+  const [saved, setSaved] = useState<string | null>(null);
+  // Bumped after each save so the field starts fresh and frees its local previews.
+  const [fieldVersion, setFieldVersion] = useState(0);
+
+  const changed = choice.kind === "set" || (choice.kind === "remove" && user.avatar_url !== null);
+
+  const save = async () => {
+    if (!changed) return;
+    setFormError(null);
+    setSaved(null);
+    setSaving(true);
+    try {
+      const updated = await updateProfile({
+        avatar_key: choice.kind === "set" ? choice.key : null,
+      });
+      queryClient.setQueryData(meQueryKey, updated);
+      setChoice(KEEP_IMAGE);
+      setFieldVersion((version) => version + 1);
+      setSaved(
+        updated.avatar_url === null ? "Your photo has been removed." : "Your photo has been saved.",
+      );
+    } catch (error) {
+      setFormError(describeError(error));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>
+          <h2>Photo</h2>
+        </CardTitle>
+        <CardDescription>Shown next to your name. Up to 2 MiB.</CardDescription>
+      </CardHeader>
+      <CardContent className="grid gap-4">
+        <FormAlert message={formError} />
+        <ImageUploadField
+          key={fieldVersion}
+          label="Profile photo"
+          purpose="avatar"
+          shape="round"
+          currentUrl={user.avatar_url}
+          alt="Your profile photo"
+          choice={choice}
+          onChoiceChange={(next) => {
+            setSaved(null);
+            setFormError(null);
+            setChoice(next);
+          }}
+          onUploadingChange={setUploading}
+        />
+        <div className="flex flex-wrap items-center gap-3">
+          <Button
+            type="button"
+            disabled={saving || uploading || !changed}
+            onClick={() => void save()}
+          >
+            {saving ? "Saving…" : "Save photo"}
+          </Button>
+          <SuccessMessage message={saved} />
+        </div>
       </CardContent>
     </Card>
   );
@@ -211,10 +287,11 @@ export function AccountPage() {
     <>
       <div className="mb-6">
         <h1 className="text-2xl font-semibold tracking-tight">Account</h1>
-        <p className="mt-1 text-sm text-muted-foreground">Your profile and password.</p>
+        <p className="mt-1 text-sm text-muted-foreground">Your profile, photo, and password.</p>
       </div>
       <div className="grid max-w-xl gap-6">
         <ProfileCard user={user} />
+        <AvatarCard user={user} />
         <PasswordCard />
       </div>
     </>

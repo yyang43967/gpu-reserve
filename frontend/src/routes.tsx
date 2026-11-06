@@ -3,7 +3,9 @@ import type { RouteObject } from "react-router";
 import { RedirectIfAuthenticated, RequireAdmin, RequireAuth } from "@/auth/guards";
 import { AppLayout, AuthLayout } from "@/components/layout/AppLayout";
 import { AccountPage } from "@/pages/AccountPage";
+import { AdminLabsPage } from "@/pages/admin/AdminLabsPage";
 import { AdminPage } from "@/pages/admin/AdminPage";
+import { AdminServersPage } from "@/pages/admin/AdminServersPage";
 import { AdminUsersPage } from "@/pages/admin/AdminUsersPage";
 import { DashboardPage } from "@/pages/DashboardPage";
 import { LoginPage } from "@/pages/LoginPage";
@@ -12,11 +14,11 @@ import {
   FindSlotPage,
   MyReservationsPage,
   NotFoundPage,
-  ServerDetailPage,
-  ServersPage,
 } from "@/pages/placeholders";
 import { RegisterPage } from "@/pages/RegisterPage";
 import { RouteErrorPage } from "@/pages/RouteErrorPage";
+import { ServerDetailPage } from "@/pages/ServerDetailPage";
+import { ServersPage } from "@/pages/ServersPage";
 
 export const routes: RouteObject[] = [
   {
@@ -51,6 +53,8 @@ export const routes: RouteObject[] = [
             children: [
               { path: "admin", element: <AdminPage /> },
               { path: "admin/users", element: <AdminUsersPage /> },
+              { path: "admin/labs", element: <AdminLabsPage /> },
+              { path: "admin/servers", element: <AdminServersPage /> },
             ],
           },
           { path: "*", element: <NotFoundPage /> },

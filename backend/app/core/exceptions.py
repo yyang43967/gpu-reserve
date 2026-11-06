@@ -115,3 +115,66 @@ class FullNameRequired(DomainError):
     kind = ErrorKind.INVALID
     type_slug = "full-name-required"
     title = "Full name required"
+
+
+class LabNotFound(DomainError):
+    kind = ErrorKind.NOT_FOUND
+    type_slug = "lab-not-found"
+    title = "Lab not found"
+
+
+class LabNameTaken(DomainError):
+    kind = ErrorKind.CONFLICT
+    type_slug = "lab-name-taken"
+    title = "Lab name already in use"
+
+
+class LabNotEmpty(DomainError):
+    """A lab that still has servers cannot be deleted; deactivate it instead."""
+
+    kind = ErrorKind.CONFLICT
+    type_slug = "lab-not-empty"
+    title = "Lab has servers"
+
+
+class UnknownLab(DomainError):
+    """A request body names a lab that does not exist."""
+
+    kind = ErrorKind.INVALID
+    type_slug = "unknown-lab"
+    title = "Unknown lab"
+
+
+class ServerNotFound(DomainError):
+    kind = ErrorKind.NOT_FOUND
+    type_slug = "server-not-found"
+    title = "Server not found"
+
+
+class HostnameTaken(DomainError):
+    kind = ErrorKind.CONFLICT
+    type_slug = "hostname-taken"
+    title = "Hostname already in use"
+
+
+class GpusInUse(DomainError):
+    """GPUs that would be removed, or a server that would be deleted, have future
+    active allocations."""
+
+    kind = ErrorKind.CONFLICT
+    type_slug = "gpus-in-use"
+    title = "GPUs in use"
+
+
+class InvalidUpload(DomainError):
+    """An upload request or an uploaded object breaks the upload rules."""
+
+    kind = ErrorKind.INVALID
+    type_slug = "invalid-upload"
+    title = "Invalid upload"
+
+
+class UploadNotFound(DomainError):
+    kind = ErrorKind.INVALID
+    type_slug = "upload-not-found"
+    title = "Upload not found"

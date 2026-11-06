@@ -51,6 +51,12 @@ def make_settings(migrated_database_url: str, redis_url: str) -> Callable[..., S
             "database_url": migrated_database_url,
             "redis_url": redis_url,
             "ready_check_timeout_seconds": 1.0,
+            # Signing needs no network, so most tests point at a host that does not exist.
+            # Tests that talk to storage use the SeaweedFS container instead.
+            "s3_endpoint_url": "http://storage.test:8333",
+            "s3_region": "us-east-1",
+            "s3_access_key_id": "test-access-key",
+            "s3_secret_access_key": "test-secret-key",
         }
         values.update(overrides)
         return Settings.model_validate(values)

@@ -1,7 +1,7 @@
 import { keepPreviousData, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ChevronLeft, Pencil, Plus, Search, Trash2 } from "lucide-react";
 import { useEffect, useState, type SyntheticEvent } from "react";
-import { Link, useSearchParams } from "react-router";
+import { Link } from "react-router";
 
 import {
   adminUsersKey,
@@ -12,6 +12,7 @@ import {
 } from "@/admin/users-api";
 import { meQueryKey, useAuth } from "@/auth/auth-context";
 import { PageHeader } from "@/components/page-header";
+import { Pagination } from "@/components/pagination";
 import { EmptyState, ErrorState, LoadingState } from "@/components/states";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -26,7 +27,9 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import type { Page, User, UserRole } from "@/lib/api-types";
+import type { User, UserRole } from "@/lib/api-types";
+import { pageCount } from "@/lib/pagination";
+import { useLatestSearchParams } from "@/lib/use-search-params";
 import { cn } from "@/lib/utils";
 import { CreateUserDialog, DeleteUserDialog, EditUserDialog } from "@/pages/admin/user-dialogs";
 
@@ -39,27 +42,37 @@ function oneOf<T extends string>(value: string | null, allowed: readonly T[]): T
   return allowed.find((item) => item === value) ?? null;
 }
 
-/** Filters and page live in the URL, so reload, back, and shared links keep them. */
-function useListParams() {
-  const [searchParams, setSearchParams] = useSearchParams();
+function readParams(searchParams: URLSearchParams): UserListParams {
   const page = Number.parseInt(searchParams.get("page") ?? "", 10);
-  const params: UserListParams = {
+  return {
     page: Number.isInteger(page) && page > 0 ? page : 1,
     q: searchParams.get("q")?.trim() ?? "",
     role: oneOf(searchParams.get("role"), ROLES),
     status: oneOf(searchParams.get("status"), STATUSES),
   };
+}
+
+function writeParams(params: UserListParams): URLSearchParams {
+  const query = new URLSearchParams();
+  if (params.page > 1) query.set("page", String(params.page));
+  if (params.q) query.set("q", params.q);
+  if (params.role) query.set("role", params.role);
+  if (params.status) query.set("status", params.status);
+  return query;
+}
+
+/** Filters and page live in the URL, so reload, back, and shared links keep them. */
+function useListParams() {
+  const [searchParams, updateSearchParams] = useLatestSearchParams();
+  const params = readParams(searchParams);
 
   /** Paging adds a history entry so Back returns to the previous page; filters replace it. */
   const update = (changes: Partial<UserListParams>, { push = false } = {}) => {
-    // Any filter change starts again from the first page.
-    const next = { ...params, page: 1, ...changes };
-    const query = new URLSearchParams();
-    if (next.page > 1) query.set("page", String(next.page));
-    if (next.q) query.set("q", next.q);
-    if (next.role) query.set("role", next.role);
-    if (next.status) query.set("status", next.status);
-    setSearchParams(query, { replace: !push });
+    updateSearchParams(
+      // Any filter change starts again from the first page.
+      (current) => writeParams({ ...readParams(current), page: 1, ...changes }),
+      { replace: !push },
+    );
   };
 
   return [params, update] as const;
@@ -247,49 +260,6 @@ function UsersTable({
   );
 }
 
-function pageCount(data: Page<unknown>): number {
-  return Math.max(1, Math.ceil(data.total / data.page_size));
-}
-
-function Pagination({ data, onPage }: { data: Page<User>; onPage: (page: number) => void }) {
-  const totalPages = pageCount(data);
-  const first = (data.page - 1) * data.page_size + 1;
-  const last = first + data.items.length - 1;
-
-  return (
-    <nav aria-label="Pagination" className="mt-4 flex flex-wrap items-center justify-between gap-3">
-      <p className="text-sm text-muted-foreground">
-        {first}–{last} of {data.total}
-      </p>
-      <div className="flex items-center gap-2">
-        <Button
-          variant="outline"
-          size="sm"
-          disabled={data.page <= 1}
-          onClick={() => {
-            onPage(data.page - 1);
-          }}
-        >
-          Previous
-        </Button>
-        <span className="text-sm tabular-nums">
-          Page {data.page} of {totalPages}
-        </span>
-        <Button
-          variant="outline"
-          size="sm"
-          disabled={data.page >= totalPages}
-          onClick={() => {
-            onPage(data.page + 1);
-          }}
-        >
-          Next
-        </Button>
-      </div>
-    </nav>
-  );
-}
-
 export function AdminUsersPage() {
   const { user: currentUser } = useAuth();
   const queryClient = useQueryClient();
@@ -366,7 +336,7 @@ export function AdminUsersPage() {
         <Pagination
           data={users.data}
           onPage={(page) => {
-            updateParams({ ...params, page }, { push: true });
+            updateParams({ page }, { push: true });
           }}
         />
       </>

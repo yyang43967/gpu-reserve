@@ -55,6 +55,7 @@ function session(token: string): TokenResponse {
       weekly_gpu_hour_quota: 48,
       is_active: true,
       avatar_key: null,
+      avatar_url: null,
       created_at: "2026-11-05T00:00:00+00:00",
     },
   };
