@@ -1,4 +1,4 @@
-import { fireEvent, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
 import type { Server } from "@/lib/api-types";
@@ -151,6 +151,52 @@ describe("servers page", () => {
         gpu_model: "RTX_4090",
         min_gpus: "8",
       });
+    });
+  });
+
+  it("keeps every filter when several change before the page re-renders", async () => {
+    const requests = fakeApi(...signedInAs("student"), healthy, labsApi, serversApi([a100, rtx]));
+    const { router } = renderRoute("/servers?page=2");
+    await screen.findByRole("heading", { name: "Servers" });
+
+    // One act batches the events into a single render, so each change sees the
+    // same render as the first.
+    act(() => {
+      fireEvent.change(screen.getByLabelText("Memory per GPU"), { target: { value: "48" } });
+      fireEvent.change(screen.getByLabelText("GPUs per server"), { target: { value: "4" } });
+      fireEvent.change(screen.getByLabelText("Status"), { target: { value: "available" } });
+    });
+
+    await waitFor(() => {
+      expect(router.state.location.search).toBe("?memory=48&gpus=4&status=available");
+    });
+    await waitFor(() => {
+      expect(lastServerQuery(requests)).toEqual({
+        page: "1",
+        min_gpu_memory_gb: "48",
+        min_gpus: "4",
+        status: "available",
+      });
+    });
+    expect(await screen.findByRole("heading", { name: "gpu-01" })).toBeInTheDocument();
+  });
+
+  it("builds on a location set elsewhere after its own updates", async () => {
+    fakeApi(...signedInAs("student"), healthy, labsApi, serversApi([a100, rtx]));
+    const { router } = renderRoute("/servers");
+    await screen.findByRole("heading", { name: "gpu-01" });
+
+    fireEvent.change(screen.getByLabelText("GPU model"), { target: { value: "RTX_4090" } });
+    await waitFor(() => {
+      expect(router.state.location.search).toBe("?gpu=RTX_4090");
+    });
+    // A link or the Back button replaces the filters.
+    await act(() => router.navigate("/servers?memory=80"));
+
+    fireEvent.change(screen.getByLabelText("Status"), { target: { value: "available" } });
+
+    await waitFor(() => {
+      expect(router.state.location.search).toBe("?memory=80&status=available");
     });
   });
 

@@ -1,7 +1,7 @@
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { Cpu, MemoryStick, Server as ServerIcon, ShieldCheck, Timer } from "lucide-react";
 import { useEffect } from "react";
-import { Link, useSearchParams } from "react-router";
+import { Link } from "react-router";
 
 import { useAuth } from "@/auth/auth-context";
 import { Pagination } from "@/components/pagination";
@@ -14,6 +14,7 @@ import { NativeSelect } from "@/components/ui/native-select";
 import { labsListKey, listLabs } from "@/labs/labs-api";
 import type { GpuModel, Server, ServerStatus } from "@/lib/api-types";
 import { pageCount } from "@/lib/pagination";
+import { useLatestSearchParams } from "@/lib/use-search-params";
 import {
   GPU_MODELS,
   SERVER_STATUS_LABELS,
@@ -44,11 +45,12 @@ function oneOf<T extends string | number>(value: string | null, allowed: readonl
   return allowed.find((item) => String(item) === value) ?? null;
 }
 
-/** Filters and page live in the URL, so reload, back, and shared links keep them. */
-function useListParams(statuses: readonly ServerStatus[]) {
-  const [searchParams, setSearchParams] = useSearchParams();
+function readParams(
+  searchParams: URLSearchParams,
+  statuses: readonly ServerStatus[],
+): ServerListParams {
   const page = Number.parseInt(searchParams.get("page") ?? "", 10);
-  const params: ServerListParams = {
+  return {
     page: Number.isInteger(page) && page > 0 ? page : 1,
     // An empty value, as in "?lab=", means no filter.
     labId: searchParams.get("lab") ? searchParams.get("lab") : null,
@@ -57,19 +59,31 @@ function useListParams(statuses: readonly ServerStatus[]) {
     minGpus: oneOf(searchParams.get("gpus"), MIN_GPU_OPTIONS),
     status: oneOf(searchParams.get("status"), statuses),
   };
+}
+
+function writeParams(params: ServerListParams): URLSearchParams {
+  const query = new URLSearchParams();
+  if (params.page > 1) query.set("page", String(params.page));
+  if (params.labId) query.set("lab", params.labId);
+  if (params.gpuModel) query.set("gpu", params.gpuModel);
+  if (params.minGpuMemoryGb !== null) query.set("memory", String(params.minGpuMemoryGb));
+  if (params.minGpus !== null) query.set("gpus", String(params.minGpus));
+  if (params.status) query.set("status", params.status);
+  return query;
+}
+
+/** Filters and page live in the URL, so reload, back, and shared links keep them. */
+function useListParams(statuses: readonly ServerStatus[]) {
+  const [searchParams, updateSearchParams] = useLatestSearchParams();
+  const params = readParams(searchParams, statuses);
 
   /** Paging adds a history entry so Back returns to the previous page; filters replace it. */
   const update = (changes: Partial<ServerListParams>, { push = false } = {}) => {
-    // Any filter change starts again from the first page.
-    const next = { ...params, page: 1, ...changes };
-    const query = new URLSearchParams();
-    if (next.page > 1) query.set("page", String(next.page));
-    if (next.labId) query.set("lab", next.labId);
-    if (next.gpuModel) query.set("gpu", next.gpuModel);
-    if (next.minGpuMemoryGb !== null) query.set("memory", String(next.minGpuMemoryGb));
-    if (next.minGpus !== null) query.set("gpus", String(next.minGpus));
-    if (next.status) query.set("status", next.status);
-    setSearchParams(query, { replace: !push });
+    updateSearchParams(
+      // Any filter change starts again from the first page.
+      (current) => writeParams({ ...readParams(current, statuses), page: 1, ...changes }),
+      { replace: !push },
+    );
   };
 
   return [params, update] as const;
@@ -338,7 +352,7 @@ export function ServersPage() {
         <Pagination
           data={servers.data}
           onPage={(page) => {
-            updateParams({ ...params, page }, { push: true });
+            updateParams({ page }, { push: true });
           }}
         />
       </>
