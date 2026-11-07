@@ -143,13 +143,68 @@ describe("server detail page", () => {
     if (!day) throw new Error("no day row");
     expect(within(day).getByText("Sun, Nov 3")).toBeInTheDocument();
     expect(within(day).getAllByTestId("timeline-slot")).toHaveLength(50);
-    expect(within(day).getByText("08:00–10:00: 0 of 8 free; all free otherwise")).toHaveClass(
-      "sr-only",
+    // The repeated hour is marked where the clock goes back, after 01:30 PDT.
+    const divider = within(day).getByTestId("clock-change");
+    expect(divider.previousElementSibling).toHaveAttribute(
+      "title",
+      "Sun, Nov 3, 01:30 PDT: 8 of 8 GPUs free",
     );
+    expect(divider.nextElementSibling).toHaveAttribute(
+      "title",
+      "Sun, Nov 3, 01:00 PST: 8 of 8 GPUs free",
+    );
+    expect(
+      within(day).getByText(/Clocks go back: 01:00–02:00 happens twice \(PDT, then PST\)\./, {
+        selector: "p",
+      }),
+    ).toBeInTheDocument();
+    expect(
+      within(day).getByText(
+        "08:00–10:00: 0 of 8 free; all free otherwise. Clocks go back: 01:00–02:00 happens twice (PDT, then PST).",
+      ),
+    ).toHaveClass("sr-only");
     const window = requests.find((r) => r.path.endsWith("/availability"))?.query;
     const from = new Date(window?.get("from") ?? "");
     const to = new Date(window?.get("to") ?? "");
     expect(to.getTime() - from.getTime()).toBe(7 * 24 * 60 * 60_000);
+  });
+
+  it("draws the spring-forward day with 46 slots and marks the skipped hour", async () => {
+    fakeApi(
+      ...signedInAs("student"),
+      healthy,
+      on("GET", `/servers/${SERVER_ID}`, () => Response.json(server)),
+      on("GET", `/servers/${SERVER_ID}/availability`, () =>
+        Response.json({
+          server_id: SERVER_ID,
+          timezone: "America/Los_Angeles",
+          gpu_count: 8,
+          slot_minutes: 30,
+          starts_at: "2030-03-10T08:00:00Z",
+          ends_at: "2030-03-11T07:00:00Z",
+          runs: [{ starts_at: "2030-03-10T08:00:00Z", ends_at: "2030-03-11T07:00:00Z", free: 8 }],
+        }),
+      ),
+    );
+    renderRoute(`/servers/${SERVER_ID}`);
+
+    const [day] = await screen.findAllByTestId("timeline-day");
+    if (!day) throw new Error("no day row");
+    expect(within(day).getAllByTestId("timeline-slot")).toHaveLength(46);
+    const divider = within(day).getByTestId("clock-change");
+    expect(divider.previousElementSibling).toHaveAttribute(
+      "title",
+      "Sun, Mar 10, 01:30 PST: 8 of 8 GPUs free",
+    );
+    expect(divider.nextElementSibling).toHaveAttribute(
+      "title",
+      "Sun, Mar 10, 03:00 PDT: 8 of 8 GPUs free",
+    );
+    expect(
+      within(day).getByText(/Clocks go forward: 02:00–03:00 is skipped \(PST to PDT\)\./, {
+        selector: "p",
+      }),
+    ).toBeInTheDocument();
   });
 
   it("shows an availability error with a retry", async () => {

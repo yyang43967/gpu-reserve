@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { Availability, FreeRun } from "@/lib/api-types";
-import { buildTimelineDays, describeDay } from "@/reservations/timeline";
+import { buildTimelineDays, describeClockChange, describeDay } from "@/reservations/timeline";
 
 const LA = "America/Los_Angeles";
 
@@ -60,6 +60,51 @@ describe("buildTimelineDays", () => {
       ["2030-01-13", 0, 4],
     ]);
     expect(days[1]?.slots.map((s) => s.free)).toEqual([2, 2, 0, 0]);
+  });
+});
+
+describe("clock changes", () => {
+  it("marks the repeated hour on the fall-back day", () => {
+    const [day] = buildTimelineDays(wholeDay("2030-11-03T07:00:00Z", "2030-11-04T08:00:00Z"), LA);
+
+    // 00:00, 00:30, 01:00, 01:30 PDT, then 01:00 PST again.
+    expect(day?.clockChange).toEqual({
+      slotIndex: 4,
+      kind: "back",
+      before: "PDT",
+      after: "PST",
+      hours: "01:00–02:00",
+    });
+    expect(day?.clockChange && describeClockChange(day.clockChange)).toBe(
+      "Clocks go back: 01:00–02:00 happens twice (PDT, then PST).",
+    );
+  });
+
+  it("marks the skipped hour on the spring-forward day", () => {
+    const [day] = buildTimelineDays(wholeDay("2030-03-10T08:00:00Z", "2030-03-11T07:00:00Z"), LA);
+
+    // 00:00 to 01:30 PST, then 03:00 PDT.
+    expect(day?.clockChange).toEqual({
+      slotIndex: 4,
+      kind: "forward",
+      before: "PST",
+      after: "PDT",
+      hours: "02:00–03:00",
+    });
+    expect(day && describeDay(day, 4, LA)).toBe(
+      "All 4 GPUs free. Clocks go forward: 02:00–03:00 is skipped (PST to PDT).",
+    );
+  });
+
+  it("leaves ordinary days and zones without daylight saving unmarked", () => {
+    const [day] = buildTimelineDays(wholeDay("2030-01-12T08:00:00Z", "2030-01-13T08:00:00Z"), LA);
+    expect(day?.clockChange).toBeNull();
+
+    const tokyo = buildTimelineDays(
+      { ...wholeDay("2030-11-02T15:00:00Z", "2030-11-03T15:00:00Z"), timezone: "Asia/Tokyo" },
+      "Asia/Tokyo",
+    );
+    expect(tokyo.map((d) => [d.slots.length, d.clockChange])).toEqual([[48, null]]);
   });
 });
 

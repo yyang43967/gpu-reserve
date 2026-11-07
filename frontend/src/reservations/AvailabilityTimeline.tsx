@@ -2,7 +2,12 @@ import { useEffect, useRef } from "react";
 
 import { formatDateKey, formatInLab } from "@/lib/lab-time";
 import { cn } from "@/lib/utils";
-import { buildTimelineDays, describeDay, type TimelineSlot } from "@/reservations/timeline";
+import {
+  buildTimelineDays,
+  describeClockChange,
+  describeDay,
+  type TimelineSlot,
+} from "@/reservations/timeline";
 import type { Availability } from "@/lib/api-types";
 
 // Green, amber, and slate stay distinguishable in light and dark themes, and the legend
@@ -73,44 +78,68 @@ export function AvailabilityTimeline({
         </div>
         <ul className="grid w-max gap-1.5" aria-label="Free GPUs by day">
           {days.map((day) => (
-            <li key={day.key} className="flex items-center gap-2" data-testid="timeline-day">
+            <li key={day.key} className="flex items-start gap-2" data-testid="timeline-day">
               <span className="sticky left-0 z-10 flex h-6 w-24 shrink-0 items-center bg-card text-xs font-medium text-muted-foreground">
                 {formatDateKey(day.key)}
               </span>
               <span className="sr-only">{describeDay(day, gpuCount, timezone)}</span>
-              <div className="flex gap-px" aria-hidden={onPickSlot ? undefined : true}>
-                {Array.from({ length: day.leadingSlots }, (_, i) => (
-                  <span key={`pad-${String(i)}`} className="h-6 w-2.5" />
-                ))}
-                {day.slots.map((slot) => {
-                  const label = slotLabel(slot, gpuCount, timezone);
-                  const className = cn("h-6 w-2.5 rounded-[2px]", cellClass(slot.free, gpuCount));
-                  const pickable = onPickSlot && slot.free > 0 && slot.start > now;
-                  return pickable ? (
-                    <button
-                      key={slot.start.toISOString()}
-                      type="button"
-                      title={label}
-                      aria-label={`Book from ${label}`}
-                      data-testid="timeline-slot"
-                      className={cn(
-                        className,
-                        "outline-none hover:ring-2 hover:ring-ring focus-visible:ring-2 focus-visible:ring-ring",
-                      )}
-                      onClick={() => {
-                        onPickSlot(slot.start);
-                      }}
-                    />
-                  ) : (
-                    <span
-                      key={slot.start.toISOString()}
-                      title={label}
-                      aria-hidden="true"
-                      data-testid="timeline-slot"
-                      className={className}
-                    />
-                  );
-                })}
+              <div className="grid gap-0.5">
+                <div className="flex gap-px" aria-hidden={onPickSlot ? undefined : true}>
+                  {Array.from({ length: day.leadingSlots }, (_, i) => (
+                    <span key={`pad-${String(i)}`} className="h-6 w-2.5" />
+                  ))}
+                  {day.slots.map((slot, index) => {
+                    const label = slotLabel(slot, gpuCount, timezone);
+                    const change = day.clockChange;
+                    const divider =
+                      change?.slotIndex === index ? (
+                        <span
+                          key={`change-${String(index)}`}
+                          data-testid="clock-change"
+                          title={describeClockChange(change)}
+                          className="mx-0.5 h-6 w-0.5 rounded-full bg-foreground"
+                        />
+                      ) : null;
+                    const className = cn("h-6 w-2.5 rounded-[2px]", cellClass(slot.free, gpuCount));
+                    const pickable = onPickSlot && slot.free > 0 && slot.start > now;
+                    const cell = pickable ? (
+                      <button
+                        key={slot.start.toISOString()}
+                        type="button"
+                        title={label}
+                        aria-label={`Book from ${label}`}
+                        data-testid="timeline-slot"
+                        className={cn(
+                          className,
+                          "outline-none hover:ring-2 hover:ring-ring focus-visible:ring-2 focus-visible:ring-ring",
+                        )}
+                        onClick={() => {
+                          onPickSlot(slot.start);
+                        }}
+                      />
+                    ) : (
+                      <span
+                        key={slot.start.toISOString()}
+                        title={label}
+                        aria-hidden="true"
+                        data-testid="timeline-slot"
+                        className={className}
+                      />
+                    );
+                    return divider ? [divider, cell] : cell;
+                  })}
+                </div>
+                {day.clockChange && (
+                  <p
+                    className="w-0 min-w-full text-[10px] text-muted-foreground"
+                    style={{ paddingLeft: day.leadingSlots * CELL_PX }}
+                    aria-hidden="true"
+                  >
+                    {describeClockChange(day.clockChange)} This row is{" "}
+                    {day.clockChange.kind === "back" ? "an hour longer" : "an hour shorter"} than
+                    the hour scale.
+                  </p>
+                )}
               </div>
             </li>
           ))}
