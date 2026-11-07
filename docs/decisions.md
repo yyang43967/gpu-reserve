@@ -597,3 +597,13 @@ Each entry records the context, the decision, and why. Newest phases at the bott
 ### Test coverage
 - `pytest-cov` measures `app/services` (target 80%). Coverage runs with `concurrency = ["greenlet", "thread"]`: SQLAlchemy's async layer runs ORM code inside greenlets, and without that setting those lines are reported as missed.
 
+### Known gap: no application logging configuration
+- **What happens now:** nothing configures Python logging. The API's output comes from uvicorn's own loggers, and the worker's from ARQ's. Records from `app.*` loggers at INFO, such as "expire_pending changed 1 rows" or a dispatch report, are dropped in both processes. Warnings and errors still reach stderr through Python's last-resort handler, without a format or request context. Running the worker against Mailpit showed it: ARQ printed each tick and its return value, and the job's own INFO lines never appeared.
+- **Why it is not fixed here:** the right fix is structured logging, which belongs with the observability work. A plain `basicConfig` now would be replaced then.
+- **Planned fix:**
+  - One `configure_logging(settings)` in `app/core/logging.py`, called at API startup (in the lifespan) and in the worker's `on_startup`, so both processes log the same way.
+  - JSON lines on stdout: timestamp, level, logger, message, and context fields. Level from `LOG_LEVEL`.
+  - A request ID per HTTP request, set by middleware in a context variable and added to every record. Worker records carry the job name and ARQ job id instead.
+  - uvicorn's and ARQ's loggers routed through the same handler, so there is one format.
+  - A test that an `app.*` INFO record is emitted as JSON with the request ID.
+
