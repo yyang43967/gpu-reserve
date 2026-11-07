@@ -2,7 +2,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Query, status
+from fastapi import APIRouter, Query, Response, status
 from pydantic import AwareDatetime
 
 from app.api import problem_responses
@@ -10,7 +10,9 @@ from app.api.deps import AdminUser, CurrentUser, SessionDep, SettingsDep
 from app.models import ReservationStatus
 from app.schemas.pagination import Page, PageParamsDep
 from app.schemas.reservation import ReservationCreate, ReservationRead, ReservationReject
-from app.services import reservations
+from app.services import calendar, reservations
+
+CALENDAR_MEDIA_TYPE = "text/calendar; charset=utf-8"
 
 router = APIRouter(
     prefix="/reservations",
@@ -99,6 +101,30 @@ async def list_reservations(
         total=listing.total,
         page=paging.page,
         page_size=paging.page_size,
+    )
+
+
+# Registered before "/{reservation_id}", which would otherwise match "<id>.ics" and
+# reject it as an invalid UUID.
+@router.get(
+    "/{reservation_id}.ics",
+    response_class=Response,
+    responses={
+        **_NOT_FOUND,
+        status.HTTP_200_OK: {"content": {CALENDAR_MEDIA_TYPE: {}}},
+    },
+)
+async def get_reservation_calendar(
+    reservation_id: uuid.UUID, user: CurrentUser, session: SessionDep
+) -> Response:
+    """An iCalendar file for one of your own reservations. Download it again after a
+    change: its SEQUENCE increases, so calendar apps replace the old copy. Only the
+    owner can download it; anyone else, admins included, gets 404."""
+    body = await calendar.reservation_calendar(session, user, reservation_id, now=datetime.now(UTC))
+    return Response(
+        content=body,
+        media_type=CALENDAR_MEDIA_TYPE,
+        headers={"Content-Disposition": f'attachment; filename="reservation-{reservation_id}.ics"'},
     )
 
 
