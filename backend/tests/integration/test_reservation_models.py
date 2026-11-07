@@ -82,6 +82,23 @@ async def _book(
     return reservation
 
 
+async def test_exclusion_constraint_definition(db_session: AsyncSession) -> None:
+    """The migration drift check does not compare exclusion constraints, so the
+    definition the migrations create is asserted here."""
+    definition = await db_session.scalar(
+        text(
+            "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+            "WHERE conname = :name AND contype = 'x'"
+        ),
+        {"name": ALLOCATION_OVERLAP_CONSTRAINT},
+    )
+
+    assert definition == (
+        "EXCLUDE USING gist (gpu_id WITH =, tstzrange(starts_at, ends_at, '[)'::text) WITH &&)"
+        " WHERE (active)"
+    )
+
+
 async def test_overlapping_active_allocations_are_rejected(db_session: AsyncSession) -> None:
     user, server, gpus = await _world(db_session)
     await _book(db_session, user, server, gpus[0], T0, T0 + 2 * HOUR)
