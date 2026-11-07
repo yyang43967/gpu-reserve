@@ -154,6 +154,20 @@ async def _count_active_reservations(
     return count or 0
 
 
+async def count_active_reservations(
+    session: AsyncSession, user_id: uuid.UUID, now: datetime
+) -> int:
+    """Pending and approved reservations of the user that have not ended."""
+    return await _count_active_reservations(session, user_id, now)
+
+
+async def load_quota_bookings(
+    session: AsyncSession, user_id: uuid.UUID, span: Interval
+) -> list[Booking]:
+    """The user's reservations that count toward the quota and overlap `span`."""
+    return await _load_quota_bookings(session, user_id, span)
+
+
 async def _load_quota_bookings(
     session: AsyncSession, user_id: uuid.UUID, span: Interval
 ) -> list[Booking]:
@@ -731,17 +745,13 @@ async def server_availability(
     busy = [Interval(row.starts_at, row.ends_at) for row in busy_rows]
 
     runs: list[FreeRun] = []
-    slot_start = window.start
-    while slot_start < window.end:
-        slot = Interval(slot_start, slot_start + booking_rules.SLOT)
-        # An active GPU has at most one active allocation per instant, so counting
-        # overlapping allocations counts busy GPUs.
-        free = server.gpu_count - sum(1 for b in busy if b.overlap_minutes(slot) > 0)
+    for index, free in enumerate(booking_rules.free_per_slot(window, server.gpu_count, busy)):
+        slot_start = window.start + index * booking_rules.SLOT
+        slot_end = slot_start + booking_rules.SLOT
         if runs and runs[-1].free == free:
-            runs[-1] = FreeRun(runs[-1].starts_at, slot.end, free)
+            runs[-1] = FreeRun(runs[-1].starts_at, slot_end, free)
         else:
-            runs.append(FreeRun(slot.start, slot.end, free))
-        slot_start = slot.end
+            runs.append(FreeRun(slot_start, slot_end, free))
     return Availability(server=server, window=window, runs=runs)
 
 

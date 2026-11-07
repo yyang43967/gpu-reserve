@@ -83,12 +83,13 @@ async def add_server(
     status: ServerStatus = ServerStatus.AVAILABLE,
     requires_approval: bool = False,
     max_booking_hours: int = 12,
+    gpu_model: GpuModel = GpuModel.A100_80GB,
 ) -> Server:
     server = await servers.create_server(
         db,
         lab_id=lab.id,
         hostname=hostname,
-        gpu_model=GpuModel.A100_80GB,
+        gpu_model=gpu_model,
         gpu_count=gpu_count,
         cpu_cores=64,
         ram_gb=512,

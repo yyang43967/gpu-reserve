@@ -217,6 +217,17 @@ MATRIX = [
         body=lambda ctx: {"reason": "Booked for a class"},
         path_params=_pending,
     ),
+    RouteCase(
+        "POST",
+        "/search/slots",
+        Access.AUTHENTICATED,
+        body=lambda ctx: {
+            "gpu_count": 1,
+            "duration_minutes": 60,
+            "earliest": next_saturday(datetime.now(UTC)).isoformat(),
+            "latest": (next_saturday(datetime.now(UTC)) + timedelta(hours=4)).isoformat(),
+        },
+    ),
     # Open to every signed-in user for avatars. Server images are admin-only; that rule
     # lives in the uploads service and is tested in test_uploads_api.
     RouteCase(
