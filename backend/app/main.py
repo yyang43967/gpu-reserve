@@ -15,6 +15,7 @@ from app.api import (
     reservations,
     search,
     servers,
+    stats,
     uploads,
     users,
 )
@@ -68,6 +69,7 @@ def create_app(settings: Settings | None = None, storage: ObjectStorage | None =
     app.include_router(servers.router, prefix=API_PREFIX)
     app.include_router(reservations.router, prefix=API_PREFIX)
     app.include_router(search.router, prefix=API_PREFIX)
+    app.include_router(stats.router, prefix=API_PREFIX)
     app.include_router(uploads.router, prefix=API_PREFIX)
 
     return app

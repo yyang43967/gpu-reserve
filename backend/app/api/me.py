@@ -13,7 +13,6 @@ from app.schemas.me import ChangePasswordRequest, UpdateProfileRequest
 from app.schemas.reservation import QuotaRead
 from app.schemas.user import UserRead
 from app.services import auth, reservations, users
-from app.services.booking_rules import MINUTES_PER_HOUR
 
 router = APIRouter(
     prefix="/me", tags=["me"], responses=problem_responses(status.HTTP_401_UNAUTHORIZED)
@@ -46,14 +45,7 @@ async def get_quota(
     quota = await reservations.quota_status(
         session, user, at=at or datetime.now(UTC), quota_zone=settings.quota_zone
     )
-    return QuotaRead(
-        week_start=quota.week.start,
-        week_end=quota.week.end,
-        timezone=quota.timezone,
-        used_hours=quota.used_minutes / MINUTES_PER_HOUR,
-        quota_hours=quota.quota_minutes / MINUTES_PER_HOUR,
-        remaining_hours=quota.remaining_minutes / MINUTES_PER_HOUR,
-    )
+    return QuotaRead.build(quota)
 
 
 @router.patch("", responses=problem_responses(status.HTTP_422_UNPROCESSABLE_CONTENT))
