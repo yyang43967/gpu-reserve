@@ -569,6 +569,42 @@ async def test_list_can_be_soonest_first(
     assert [r.starts_at for r in listing.items] == starts
 
 
+@pytest.mark.parametrize("order", list(reservations.ReservationOrder))
+async def test_equal_starts_page_without_duplicates_or_gaps(
+    db_session: AsyncSession, admin: User, order: reservations.ReservationOrder
+) -> None:
+    """Five reservations share a start, so only the id tiebreak decides their order.
+    Paging two at a time must return each of them exactly once."""
+    lab = await add_lab(db_session)
+    booked = []
+    for i in range(5):
+        owner = await add_user(db_session, f"tie{i}@example.edu")
+        server = await add_server(db_session, lab, f"tie-node-{i}")
+        booked.append(await _book(db_session, owner, server))
+    # One earlier and one later, so the tied group sits across page boundaries.
+    first_owner = await add_user(db_session, "early@example.edu")
+    await _book(
+        db_session, first_owner, await add_server(db_session, lab, "early"), SATURDAY - 3 * H
+    )
+    last_owner = await add_user(db_session, "late@example.edu")
+    await _book(db_session, last_owner, await add_server(db_session, lab, "late"), SATURDAY + 3 * H)
+
+    seen: list[uuid.UUID] = []
+    for offset in range(0, 7, 2):
+        page = await reservations.list_reservations(
+            db_session,
+            admin,
+            reservations.ReservationFilters(order=order),
+            offset=offset,
+            limit=2,
+        )
+        seen.extend(r.id for r in page.items)
+
+    assert len(seen) == len(set(seen)) == 7
+    tied = [rid for rid in seen if rid in {r.id for r in booked}]
+    assert tied == sorted(r.id for r in booked)
+
+
 async def test_list_order_through_the_api(
     api_client: AsyncClient, student_headers: dict[str, str], server: Server
 ) -> None:
