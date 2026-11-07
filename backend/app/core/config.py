@@ -92,6 +92,10 @@ class Settings(BaseSettings):
     # Links in emails point here.
     frontend_url: str = "http://localhost:5173"
 
+    # Presigned upload URLs per user, so one account cannot fill the bucket.
+    presign_user_limit: int = Field(default=30, gt=0)
+    presign_user_window_seconds: int = Field(default=10 * 60, gt=0)
+
     # Weekly GPU-hour quotas run Monday 00:00 to Monday 00:00 in this one zone, for
     # every lab. It is set on its own, not taken from the lab default, so changing the
     # default for new labs can never move existing quota weeks.

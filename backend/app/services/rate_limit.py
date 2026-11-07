@@ -1,4 +1,5 @@
-"""Fixed-window throttling of login and registration, stored in Redis.
+"""Fixed-window throttling of login, registration, password changes, and upload URLs,
+stored in Redis.
 
 Both endpoints run argon2, which is deliberately expensive, so unthrottled they invite
 password guessing and make CPU exhaustion cheap. Limits are checked before any hashing.
@@ -59,6 +60,7 @@ class RateLimiter:
         self._password_change = Window(
             settings.password_change_failure_limit, settings.password_change_window_seconds
         )
+        self._presign = Window(settings.presign_user_limit, settings.presign_user_window_seconds)
 
     async def check_login(self, *, client_ip: str, email: str) -> None:
         """Count this attempt against the IP; refuse if the IP or email is over its limit."""
@@ -106,6 +108,13 @@ class RateLimiter:
 
     async def clear_password_change_failures(self, user_id: uuid.UUID) -> None:
         await self._safely(self._redis.delete(self._password_change_key(user_id)))
+
+    async def check_presign(self, user_id: uuid.UUID) -> None:
+        """Count a request for an upload URL. Each URL lets the holder store one file,
+        so without a limit one account could fill the bucket."""
+        count = await self._safely(self._hit(f"presign:user:{user_id}", self._presign.seconds))
+        if count is not None and count.value > self._presign.limit:
+            raise RateLimited(count.ttl, "Too many upload requests. Try again later.")
 
     @staticmethod
     def _email_key(email: str) -> str:

@@ -3,7 +3,7 @@ from datetime import UTC, datetime
 from fastapi import APIRouter, status
 
 from app.api import problem_responses
-from app.api.deps import CurrentUser, SettingsDep, StorageDep
+from app.api.deps import CurrentUser, RateLimiterDep, SettingsDep, StorageDep
 from app.schemas.upload import PresignRequest, PresignResponse
 from app.services import uploads
 
@@ -16,16 +16,26 @@ router = APIRouter(
 
 @router.post(
     "/presign",
-    responses=problem_responses(status.HTTP_403_FORBIDDEN, status.HTTP_422_UNPROCESSABLE_CONTENT),
+    responses=problem_responses(
+        status.HTTP_403_FORBIDDEN,
+        status.HTTP_422_UNPROCESSABLE_CONTENT,
+        status.HTTP_429_TOO_MANY_REQUESTS,
+    ),
 )
 async def presign_upload(
-    body: PresignRequest, user: CurrentUser, storage: StorageDep, settings: SettingsDep
+    body: PresignRequest,
+    user: CurrentUser,
+    storage: StorageDep,
+    settings: SettingsDep,
+    limiter: RateLimiterDep,
 ) -> PresignResponse:
     """Get a short-lived form to upload one PNG, JPEG, or WebP image straight to storage.
 
     Avatars (up to 2 MiB) are open to every signed-in user; server images (up to 5 MiB)
-    to admins only. Save the returned key on the profile or server afterwards.
+    to admins only. Save the returned key on the profile or server afterwards. Each
+    user may request a limited number of upload forms per window (429 beyond it).
     """
+    await limiter.check_presign(user.id)
     ticket = uploads.create_upload(
         storage,
         user,
