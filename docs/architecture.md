@@ -109,6 +109,10 @@ Each server has one GPU row per active GPU, numbered from 0. Reasoning for visib
 | `POST /api/v1/reservations/{id}/approve`, `/reject` | Admin decisions on pending reservations; reject requires a reason |
 | `GET /api/v1/servers/{id}/availability` | Free GPUs per 30-minute slot, merged into runs, for up to 14 days |
 | `GET /api/v1/me/quota` | GPU-hours used and left in the current quota week, or the week containing `?at=` |
+| `GET /api/v1/reservations/{id}.ics` | iCalendar file for one of your own reservations |
+| `POST /api/v1/search/slots` | Ranked (server, start, end) candidates for N GPUs for a duration in a window |
+| `GET /api/v1/stats/overview` | Dashboard numbers; admins also get queue size and GPU usage |
+| `GET /api/v1/stats/utilization` | Admin: booked, pending, and available GPU-hours per server |
 
 Each reservation holds one `gpu_allocations` row per GPU. An exclusion constraint on `(gpu_id, time range) WHERE active` makes double-booking impossible at the database level. Allocation picks the lowest free GPU numbers and retries in a savepoint if another booking takes one first.
 

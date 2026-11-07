@@ -555,6 +555,7 @@ Each entry records the context, the decision, and why. Newest phases at the bott
   - `SKIP LOCKED` is what keeps dispatchers independent. Without it, a second dispatcher still never double-sends: it waits for the row, re-reads it, and finds it sent. But it waits behind a stuck send instead of delivering other rows.
   - The per-job advisory lock used by the sweeping jobs is not used here. It would serialize dispatchers and make `SKIP LOCKED` pointless.
 - **Any failure is an attempt**, including an error while building the message, not only transport errors. A row that always fails is given up on after five attempts instead of stopping every tick at the same place. The error is kept in `last_error` (cut to 1,000 characters) and logged.
+- **Database errors while preparing run in a savepoint.** A failed query aborts the whole Postgres transaction, so the failure could not be recorded in it: the commit would fail, the tick would stop, and the row would stay due with its attempts unchanged, the same at every tick. Preparing the message runs inside `begin_nested()`. A database error rolls back to the savepoint only. The row lock was taken before the savepoint, so it is kept, and the attempt is recorded and committed in the same transaction. A test makes the preparation run `SELECT 1 / 0` and checks that the attempt is recorded and the next row is still sent.
 - **When to change:** move to leases (option 2) if sends get slow enough to put pressure on the connection pool, or if the number of workers grows. That removes the connection held during the network call, at the cost of a lease length to choose and rows stuck until it expires after a crash.
 - **Accepted race, stale reminders:** the staleness check reads the reservation without locking it. A cancellation that commits between that read and the send can let one reminder for a cancelled booking through. Locking the reservation row during an SMTP call would block the user's own cancel for the length of the send, which is worse than one unneeded reminder.
 
@@ -570,4 +571,29 @@ Each entry records the context, the decision, and why. Newest phases at the bott
 ### Upload URL rate limit
 - **Rule:** at most 30 presigned upload forms per user per 10 minutes, as a fixed-window counter in Redis (`presign:user:{id}`), the same mechanism as the login limits. Over the limit: 429 `too-many-requests` with `Retry-After`. It fails open on a Redis outage, like the other limits.
 - **Why per user:** each form lets its holder store one file of up to 5 MiB, and every caller is signed in, so the account is the natural unit.
+
+### Slot search
+- **What it answers:** "N GPUs (optionally a model or a minimum memory per GPU) for D minutes, between A and B". Every result starts at or after `earliest` and ends at or before `latest`; `latest` is the latest end, not the latest start, so the window means the same thing as a calendar range. Starts are on the 30-minute grid and strictly after now; an `earliest` in the past moves to the next boundary.
+- **Validation:** the duration is a whole number of half hours (422 from the schema). The window is at most 14 days, and it must still hold the job once times in the past are dropped (422 `invalid-search-window`).
+- **The search applies the booking rules, so results can be booked:** only servers that are `available` in active labs with enough GPUs; starts within the 14-day horizon; durations within the server's `max_booking_hours`; the peak-hours limit; and the caller's weekly quota in every week the result overlaps. A user already holding four reservations gets 409 `too-many-reservations` instead of a list they could not book.
+- **Algorithm:** one query loads the candidate servers, one loads their active allocations over the window. Per server, a difference array gives free GPUs per slot (linear in slots plus allocations; availability uses the same function), and a sliding-window minimum finds every start whose slots all have enough free GPUs. Then the rules filter the starts.
+- **Ranking:** earliest start; then servers that need no approval; then the smallest GPU memory that fits, keeping large GPUs for jobs that need them; then the fewest GPUs left free beside the booking, which limits fragmentation; then hostname. At most 3 results per server, and those 3 do not overlap (greedy: earliest, then the next start at or after its end), so a list is not three copies of "the same slot, 30 minutes later". At most 20 in all.
+- **Advisory only:** booking a result goes through `create_reservation`, which can still refuse it if someone else booked first. A test books the first result.
+- **No HTTP in the service:** `search_slots` takes plain arguments and returns dataclasses, so the assistant's tool can call it directly later.
+
+### Calendar export
+- **Hand-written iCalendar.** One VEVENT with UTC times needs about 60 lines; a library would be a new dependency for that. The parts that are easy to get wrong are tested: TEXT escaping, CRLF endings, and folding at 75 octets (not characters) without splitting a UTF-8 character, using text with 2- and 3-byte characters.
+- **Fields:** `VERSION`, `PRODID`, `UID` (`<reservation id>@gpu-reserve`, stable across downloads), `DTSTAMP`, `DTSTART`/`DTEND` in UTC, `STATUS` (pending is `TENTATIVE`; rejected, cancelled, and expired are `CANCELLED`), summary, location, and a description with the GPU numbers and purpose.
+- **`SEQUENCE`** is the number of audited changes after creation. Calendar apps replace an event when the same UID arrives with a higher sequence, so downloading again after a cancellation updates the entry.
+- **Owner only.** The file is the owner's copy of their booking; an admin who is not the owner gets 404, like any other non-owner. Admins still see the reservation itself through the JSON endpoint.
+- **Route order:** `/{id}.ics` is registered before `/{id}`, which would otherwise match `<id>.ics` and reject it as an invalid UUID.
+
+### Dashboard and utilization numbers
+- **Overview (everyone):** quota for the current quota week, the next three pending or approved bookings that have not ended (a running one first), and the number of the caller's pending requests.
+- **Overview (admins add):** the number of pending requests, GPUs held right now by approved reservations, GPUs on servers that are not retired, and this quota week's utilization.
+- **Utilization:** per server that is not retired, GPU-hours booked (approved and completed) and pending, against GPU-hours available, in a window of at most 31 days (default: the last seven). It sums allocation time clipped to the window. Allocations of reservations ended early were shortened, so only time used counts; GPUs removed since still count, since their bookings happened. Servers in maintenance are included, because time they could not be booked is worth seeing.
+- **Accepted approximation:** available hours use each server's current GPU count and status for the whole window, including past windows. There is no history of capacity changes, so a server that grew from 4 to 8 GPUs last week counts as 8 for all of it. If that ever matters, the fix is an append-only table of capacity changes (server, GPU count, status, from), and integrating over it.
+
+### Test coverage
+- `pytest-cov` measures `app/services` (target 80%). Coverage runs with `concurrency = ["greenlet", "thread"]`: SQLAlchemy's async layer runs ORM code inside greenlets, and without that setting those lines are reported as missed.
 
