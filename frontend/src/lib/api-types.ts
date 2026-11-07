@@ -102,3 +102,52 @@ export interface PresignResponse {
   max_bytes: number;
   expires_at: string;
 }
+
+export type ReservationStatus =
+  "pending" | "approved" | "rejected" | "cancelled" | "expired" | "completed";
+
+export interface Reservation {
+  id: string;
+  status: ReservationStatus;
+  gpu_count: number;
+  starts_at: string;
+  ends_at: string;
+  purpose: string;
+  created_via: "web" | "assistant";
+  decided_at: string | null;
+  decision_reason: string | null;
+  created_at: string;
+  server: { id: string; hostname: string; gpu_model: GpuModel };
+  lab: { id: string; name: string; timezone: string };
+  user: { id: string; full_name: string; email: string };
+  /** Numbers of the GPUs this reservation holds or held. */
+  gpu_indexes: number[];
+}
+
+/** A stretch of 30-minute slots with the same number of free GPUs. */
+export interface FreeRun {
+  starts_at: string;
+  ends_at: string;
+  free: number;
+}
+
+export interface Availability {
+  server_id: string;
+  /** The lab's zone, for display. */
+  timezone: string;
+  gpu_count: number;
+  slot_minutes: number;
+  starts_at: string;
+  ends_at: string;
+  runs: FreeRun[];
+}
+
+/** GPU-hours in the current quota week. Hours can be fractional. */
+export interface Quota {
+  week_start: string;
+  week_end: string;
+  timezone: string;
+  used_hours: number;
+  quota_hours: number;
+  remaining_hours: number;
+}

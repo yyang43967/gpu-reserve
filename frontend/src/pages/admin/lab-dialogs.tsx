@@ -38,10 +38,17 @@ import {
 import { ApiError } from "@/lib/api";
 import type { Lab } from "@/lib/api-types";
 import { applyServerErrors, describeError } from "@/lib/form-errors";
+import { hasHalfHourOffsets } from "@/lib/lab-time";
 
-/** IANA names the browser knows, offered as suggestions; the API has the final say. */
+/**
+ * IANA names the browser knows whose offsets are whole half hours, offered as
+ * suggestions. The API applies the same rule and has the final say; its 422 shows
+ * under the field.
+ */
 const TIME_ZONES: readonly string[] =
-  typeof Intl.supportedValuesOf === "function" ? Intl.supportedValuesOf("timeZone") : [];
+  typeof Intl.supportedValuesOf === "function"
+    ? Intl.supportedValuesOf("timeZone").filter((zone) => hasHalfHourOffsets(zone))
+    : [];
 
 function isKnownTimeZone(value: string): boolean {
   try {

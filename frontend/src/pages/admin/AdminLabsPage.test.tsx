@@ -265,6 +265,56 @@ describe("creating a lab", () => {
       ),
     ).toBeInTheDocument();
   });
+
+  it("suggests only time zones whose offsets are whole half hours", async () => {
+    fakeApi(...signedInAs("admin"), labsApi([]));
+    renderRoute("/admin/labs");
+    const dialog = await openCreate();
+
+    const input = within(dialog).getByLabelText("Time zone");
+    const listId = input.getAttribute("list") ?? "";
+    const suggestions = [...document.querySelectorAll(`#${listId} option`)].map(
+      (option) => (option as HTMLOptionElement).value,
+    );
+
+    // The browser lists some zones under their older names (Asia/Calcutta for Kolkata).
+    expect(suggestions).toContain("America/Los_Angeles");
+    expect(suggestions).toContain("Asia/Calcutta");
+    expect(suggestions).not.toContain("Asia/Katmandu");
+    expect(suggestions).not.toContain("Pacific/Chatham");
+  });
+
+  it("shows the API's refusal of a typed-in zone under the field", async () => {
+    const requests = fakeApi(
+      ...signedInAs("admin"),
+      on("POST", "/labs", () =>
+        problem(422, "validation-error", {
+          errors: [
+            {
+              field: "timezone",
+              message: "time zones with offsets that are not whole half hours are not supported",
+            },
+          ],
+        }),
+      ),
+      labsApi([]),
+    );
+    renderRoute("/admin/labs");
+    const dialog = await openCreate();
+
+    type(within(dialog).getByLabelText("Name"), "Himalaya Lab");
+    type(within(dialog).getByLabelText("Location"), "Kathmandu");
+    type(within(dialog).getByLabelText("Time zone"), "Asia/Kathmandu");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Create lab" }));
+
+    expect(
+      await within(dialog).findByText(
+        "time zones with offsets that are not whole half hours are not supported",
+      ),
+    ).toBeInTheDocument();
+    expect(within(dialog).getByLabelText("Time zone")).toHaveAttribute("aria-invalid", "true");
+    expect(labRequests(requests, "POST")[0]?.body).toMatchObject({ timezone: "Asia/Kathmandu" });
+  });
 });
 
 describe("editing a lab", () => {
