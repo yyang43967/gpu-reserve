@@ -41,6 +41,7 @@ from app.models import (
     CreatedVia,
     Gpu,
     GpuAllocation,
+    Lab,
     NotificationKind,
     Reservation,
     ReservationStatus,
@@ -575,6 +576,7 @@ async def approve_reservation(
         )
     if reservation.starts_at <= now:
         raise InvalidReservationState("This reservation has already started.")
+    await _ensure_server_open(session, reservation.server_id)
     reservation.status = ReservationStatus.APPROVED
     reservation.decided_by = admin.id
     reservation.decided_at = now
@@ -615,6 +617,29 @@ async def reject_reservation(
     )
     await session.flush()
     return await load_reservation(session, reservation_id)
+
+
+async def _ensure_server_open(session: AsyncSession, server_id: uuid.UUID) -> None:
+    """Refuse an approval when the server is no longer open for booking.
+
+    The server row is locked FOR SHARE, as a booking does, so a concurrent change to
+    maintenance either commits first and is seen here, or waits for the approval. The
+    caller already holds the reservation's row lock; no path locks a server row and
+    then a reservation row, so this order cannot deadlock.
+    """
+    row = (
+        await session.execute(
+            select(Server.hostname, Server.status, Lab.is_active)
+            .join(Server.lab)
+            .where(Server.id == server_id)
+            .with_for_update(read=True, of=Server)
+        )
+    ).one()
+    if row.status is not ServerStatus.AVAILABLE or not row.is_active:
+        raise ServerUnavailable(
+            f"{row.hostname} is not open for booking right now, so the request cannot be "
+            "approved. Reject it, or approve it once the server is back."
+        )
 
 
 def _record_decision(
