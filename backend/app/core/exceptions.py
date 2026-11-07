@@ -178,3 +178,129 @@ class UploadNotFound(DomainError):
     kind = ErrorKind.INVALID
     type_slug = "upload-not-found"
     title = "Upload not found"
+
+
+# --- reservations: request rules (422) ---
+
+
+class InvalidTimeRange(DomainError):
+    kind = ErrorKind.INVALID
+    type_slug = "invalid-time-range"
+    title = "End must be after start"
+
+
+class InvalidTimeGrid(DomainError):
+    kind = ErrorKind.INVALID
+    type_slug = "invalid-time-grid"
+    title = "Times must fall on the half hour"
+
+
+class StartInPast(DomainError):
+    kind = ErrorKind.INVALID
+    type_slug = "start-in-past"
+    title = "Start is not in the future"
+
+
+class StartTooFar(DomainError):
+    kind = ErrorKind.INVALID
+    type_slug = "start-too-far"
+    title = "Start is too far ahead"
+
+
+class BookingTooShort(DomainError):
+    kind = ErrorKind.INVALID
+    type_slug = "booking-too-short"
+    title = "Booking too short"
+
+
+class BookingTooLong(DomainError):
+    kind = ErrorKind.INVALID
+    type_slug = "booking-too-long"
+    title = "Booking too long"
+
+
+class TooManyGpus(DomainError):
+    """More GPUs requested than the server has."""
+
+    kind = ErrorKind.INVALID
+    type_slug = "too-many-gpus"
+    title = "More GPUs than the server has"
+
+
+class PeakHoursLimit(DomainError):
+    kind = ErrorKind.INVALID
+    type_slug = "peak-hours-limit"
+    title = "Peak-hours limit exceeded"
+
+
+# --- reservations: state rules (409) ---
+
+
+class QuotaExceeded(DomainError):
+    kind = ErrorKind.CONFLICT
+    type_slug = "quota-exceeded"
+    title = "Weekly quota exceeded"
+
+
+class ServerUnavailable(DomainError):
+    """The server is in maintenance or retired, or its lab is inactive."""
+
+    kind = ErrorKind.CONFLICT
+    type_slug = "server-unavailable"
+    title = "Server not available for booking"
+
+
+class TooManyReservations(DomainError):
+    kind = ErrorKind.CONFLICT
+    type_slug = "too-many-reservations"
+    title = "Too many active reservations"
+
+
+class GpuUnavailable(DomainError):
+    kind = ErrorKind.CONFLICT
+    type_slug = "gpu-unavailable"
+    title = "GPUs unavailable"
+
+
+class AllocationContention(DomainError):
+    """Other bookings kept taking the chosen GPUs; the client may try again."""
+
+    kind = ErrorKind.CONFLICT
+    type_slug = "allocation-contention"
+    title = "GPUs are in high demand"
+
+
+class ReservationNotFound(DomainError):
+    kind = ErrorKind.NOT_FOUND
+    type_slug = "reservation-not-found"
+    title = "Reservation not found"
+
+
+class InvalidReservationState(DomainError):
+    """The reservation's status or timing does not allow this transition."""
+
+    kind = ErrorKind.CONFLICT
+    type_slug = "invalid-reservation-state"
+    title = "Reservation cannot be changed"
+
+
+class ServerHasReservations(DomainError):
+    """A server with any booking history cannot be deleted; retire it instead."""
+
+    kind = ErrorKind.CONFLICT
+    type_slug = "server-has-reservations"
+    title = "Server has reservations"
+
+
+class UserHasReservations(DomainError):
+    """A user with any booking history cannot be deleted; deactivate them instead."""
+
+    kind = ErrorKind.CONFLICT
+    type_slug = "user-has-reservations"
+    title = "User has reservations"
+
+
+class InvalidAvailabilityWindow(DomainError):
+    kind = ErrorKind.INVALID
+    type_slug = "invalid-availability-window"
+    title = "Invalid availability window"

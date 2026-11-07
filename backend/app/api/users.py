@@ -98,6 +98,7 @@ async def update_user(
         role=body.role,
         is_active=body.is_active,
         weekly_gpu_hour_quota=body.weekly_gpu_hour_quota,
+        now=datetime.now(UTC),
     )
     return UserRead.build(user, storage, datetime.now(UTC))
 

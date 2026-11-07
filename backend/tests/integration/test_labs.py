@@ -112,6 +112,10 @@ async def test_concurrent_creates_with_the_same_name(
         ({"name": "Lab", "location": ""}, "location"),
         ({"name": "Lab", "location": "B1", "timezone": "Mars/Olympus"}, "timezone"),
         ({"name": "Lab", "location": "B1", "timezone": "PST"}, "timezone"),
+        # Offsets that are not whole half hours: +05:45, +08:45, +12:45/+13:45.
+        ({"name": "Lab", "location": "B1", "timezone": "Asia/Kathmandu"}, "timezone"),
+        ({"name": "Lab", "location": "B1", "timezone": "Australia/Eucla"}, "timezone"),
+        ({"name": "Lab", "location": "B1", "timezone": "Pacific/Chatham"}, "timezone"),
         ({"name": "Lab", "location": "B1", "id": str(uuid.uuid4())}, "id"),
     ],
 )
@@ -212,6 +216,38 @@ async def test_update_changes_only_sent_fields(
     assert updated["timezone"] == "America/New_York"
     assert updated["name"] == "Vision Lab"
     assert updated["description"] == "Cameras and GPUs."
+
+
+@pytest.mark.parametrize(
+    "timezone",
+    [
+        "Asia/Kolkata",  # +05:30
+        "Australia/Adelaide",  # +09:30 / +10:30
+        "Australia/Lord_Howe",  # +10:30 / +11:00, a 30-minute daylight saving shift
+        "UTC",
+    ],
+)
+async def test_half_hour_offsets_are_accepted(
+    api_client: AsyncClient, admin_headers: dict[str, str], timezone: str
+) -> None:
+    response = await api_client.post(
+        LABS, json={"name": "Lab", "location": "B1", "timezone": timezone}, headers=admin_headers
+    )
+
+    assert response.status_code == 201, response.text
+
+
+async def test_update_rejects_timezone_off_the_half_hour_grid(
+    api_client: AsyncClient, admin_headers: dict[str, str]
+) -> None:
+    lab = await create_lab(api_client, admin_headers)
+
+    response = await api_client.patch(
+        f"{LABS}/{lab['id']}", json={"timezone": "Asia/Kathmandu"}, headers=admin_headers
+    )
+
+    assert response.status_code == 422, response.text
+    assert "timezone" in {error["field"] for error in response.json()["errors"]}
 
 
 async def test_update_clears_description_with_null(

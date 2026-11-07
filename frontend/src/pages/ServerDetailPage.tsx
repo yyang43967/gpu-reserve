@@ -1,16 +1,29 @@
 import { useQuery } from "@tanstack/react-query";
-import { CalendarClock, ChevronLeft } from "lucide-react";
-import type { ReactNode } from "react";
+import { ChevronLeft } from "lucide-react";
+import { useState, type ReactNode } from "react";
 import { Link, useParams } from "react-router";
 
 import { PageHeader } from "@/components/page-header";
 import { EmptyState, ErrorState, LoadingState } from "@/components/states";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { ApiError } from "@/lib/api";
 import type { Server } from "@/lib/api-types";
+import { formatInLab } from "@/lib/lab-time";
+import { cn } from "@/lib/utils";
 import { isUuid } from "@/lib/validation";
+import { AvailabilityTimeline } from "@/reservations/AvailabilityTimeline";
+import { nextBookableStart } from "@/reservations/booking";
+import { BookingDialog } from "@/reservations/BookingDialog";
+import {
+  AVAILABILITY_DAYS,
+  availabilityKey,
+  getAvailability,
+} from "@/reservations/reservations-api";
 import { GPU_MODELS, SERVER_STATUS_LABELS, getServer, serverKey } from "@/servers/servers-api";
+
+const DAY_MS = 24 * 60 * 60_000;
 
 const STATUS_VARIANTS = {
   available: "outline",
@@ -43,8 +56,71 @@ function Spec({ label, children }: { label: string; children: ReactNode }) {
   );
 }
 
+function unavailableReason(server: Server): string | null {
+  if (!server.lab.is_active) return "This lab is closed, so its servers cannot be booked.";
+  if (server.status === "maintenance") return "This server is in maintenance and cannot be booked.";
+  if (server.status === "retired") return "This server is retired and cannot be booked.";
+  return null;
+}
+
+function AvailabilityCard({
+  server,
+  onPickSlot,
+}: {
+  server: Server;
+  onPickSlot: ((start: Date) => void) | undefined;
+}) {
+  // Fixed for the life of the page, so the query key stays stable.
+  const [window] = useState(() => {
+    const from = new Date();
+    return { from, to: new Date(from.getTime() + AVAILABILITY_DAYS * DAY_MS) };
+  });
+  const availability = useQuery({
+    queryKey: availabilityKey(server.id),
+    queryFn: ({ signal }) => getAvailability(server.id, window.from, window.to, signal),
+  });
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>
+          <h2>Availability</h2>
+        </CardTitle>
+        <CardDescription>
+          Free GPUs per half hour for the next {AVAILABILITY_DAYS} days.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        {availability.isPending ? (
+          <LoadingState label="Loading availability" />
+        ) : availability.isError ? (
+          <ErrorState
+            title="Could not load availability"
+            message={availability.error.message}
+            onRetry={() => {
+              void availability.refetch();
+            }}
+          />
+        ) : availability.data.runs.length === 0 ? (
+          <EmptyState title="No availability" description="Nothing to show for this window." />
+        ) : (
+          <AvailabilityTimeline
+            availability={availability.data}
+            now={new Date()}
+            onPickSlot={onPickSlot}
+          />
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 function ServerDetails({ server }: { server: Server }) {
   const gpu = GPU_MODELS[server.gpu_model].label;
+  const [bookingStart, setBookingStart] = useState<Date | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const reason = unavailableReason(server);
+  const bookable = reason === null;
 
   return (
     <>
@@ -58,8 +134,40 @@ function ServerDetails({ server }: { server: Server }) {
             </Badge>
             {server.requires_approval && <Badge variant="secondary">Requires approval</Badge>}
             {!server.lab.is_active && <Badge variant="destructive">Lab inactive</Badge>}
+            <Button
+              size="sm"
+              disabled={!bookable}
+              onClick={() => {
+                setNotice(null);
+                setBookingStart(nextBookableStart(new Date()));
+              }}
+            >
+              Book GPUs
+            </Button>
           </div>
         }
+      />
+      <p
+        role="status"
+        className={cn("text-sm text-muted-foreground", (notice ?? reason) && "mb-4")}
+      >
+        {notice ?? reason}
+      </p>
+      <BookingDialog
+        server={server}
+        start={bookingStart}
+        onOpenChange={(open) => {
+          if (!open) setBookingStart(null);
+        }}
+        onBooked={(reservation) => {
+          setBookingStart(null);
+          const when = formatInLab(reservation.starts_at, server.lab.timezone);
+          setNotice(
+            reservation.status === "pending"
+              ? `Requested ${String(reservation.gpu_count)} GPUs from ${when}. An admin will review it.`
+              : `Booked ${String(reservation.gpu_count)} GPUs from ${when}.`,
+          );
+        }}
       />
 
       <div className="grid gap-6 lg:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
@@ -126,23 +234,7 @@ function ServerDetails({ server }: { server: Server }) {
               className="aspect-video w-full rounded-lg border object-cover"
             />
           )}
-          <Card>
-            <CardHeader>
-              <CardTitle>
-                <h2>Availability</h2>
-              </CardTitle>
-              <CardDescription>Booked and free GPUs over the coming days.</CardDescription>
-            </CardHeader>
-            <CardContent>
-              <div className="flex flex-col items-center gap-2 rounded-lg border border-dashed p-8 text-center">
-                <CalendarClock className="size-8 text-muted-foreground" aria-hidden="true" />
-                <p className="font-medium">Availability timeline coming soon</p>
-                <p className="text-sm text-muted-foreground">
-                  Reservations are not open yet. This is where free and booked GPUs will show.
-                </p>
-              </div>
-            </CardContent>
-          </Card>
+          <AvailabilityCard server={server} onPickSlot={bookable ? setBookingStart : undefined} />
         </div>
       </div>
     </>

@@ -3,18 +3,15 @@ import type { RouteObject } from "react-router";
 import { RedirectIfAuthenticated, RequireAdmin, RequireAuth } from "@/auth/guards";
 import { AppLayout, AuthLayout } from "@/components/layout/AppLayout";
 import { AccountPage } from "@/pages/AccountPage";
+import { AdminApprovalsPage } from "@/pages/admin/AdminApprovalsPage";
 import { AdminLabsPage } from "@/pages/admin/AdminLabsPage";
 import { AdminPage } from "@/pages/admin/AdminPage";
 import { AdminServersPage } from "@/pages/admin/AdminServersPage";
 import { AdminUsersPage } from "@/pages/admin/AdminUsersPage";
 import { DashboardPage } from "@/pages/DashboardPage";
 import { LoginPage } from "@/pages/LoginPage";
-import {
-  AssistantPage,
-  FindSlotPage,
-  MyReservationsPage,
-  NotFoundPage,
-} from "@/pages/placeholders";
+import { MyReservationsPage } from "@/pages/MyReservationsPage";
+import { AssistantPage, FindSlotPage, NotFoundPage } from "@/pages/placeholders";
 import { RegisterPage } from "@/pages/RegisterPage";
 import { RouteErrorPage } from "@/pages/RouteErrorPage";
 import { ServerDetailPage } from "@/pages/ServerDetailPage";
@@ -55,6 +52,7 @@ export const routes: RouteObject[] = [
               { path: "admin/users", element: <AdminUsersPage /> },
               { path: "admin/labs", element: <AdminLabsPage /> },
               { path: "admin/servers", element: <AdminServersPage /> },
+              { path: "admin/approvals", element: <AdminApprovalsPage /> },
             ],
           },
           { path: "*", element: <NotFoundPage /> },

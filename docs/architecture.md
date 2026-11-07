@@ -98,6 +98,64 @@ Every error response is an RFC 7807 problem document (`application/problem+json`
 
 Each server has one GPU row per active GPU, numbered from 0. Reasoning for visibility, GPU numbering, and soft removal is in [decisions.md](decisions.md#phase-3--labs-and-servers).
 
+## Reservations
+
+| Endpoint | Purpose |
+|---|---|
+| `POST /api/v1/reservations` | Book GPUs on a server; `approved` at once, or `pending` on servers that require approval |
+| `GET /api/v1/reservations` | Students see their own; admins see all. Filters: `status`, `server_id`, `user_id` (admins), and `from`/`to` (overlap) |
+| `GET /api/v1/reservations/{id}` | Owner or admin |
+| `POST /api/v1/reservations/{id}/cancel` | Owner or admin; a running reservation ends early at the next half hour |
+| `POST /api/v1/reservations/{id}/approve`, `/reject` | Admin decisions on pending reservations; reject requires a reason |
+| `GET /api/v1/servers/{id}/availability` | Free GPUs per 30-minute slot, merged into runs, for up to 14 days |
+| `GET /api/v1/me/quota` | GPU-hours used and left in the current quota week |
+
+Each reservation holds one `gpu_allocations` row per GPU. An exclusion constraint on `(gpu_id, time range) WHERE active` makes double-booking impossible at the database level. Allocation picks the lowest free GPU numbers and retries in a savepoint if another booking takes one first.
+
+### Creating a reservation
+
+```mermaid
+sequenceDiagram
+    participant A as API
+    participant D as Postgres
+
+    A->>A: check request shape (aware times, end after start)
+    A->>D: pg_advisory_xact_lock(user)
+    A->>D: re-read is_active and quota
+    A->>D: SELECT server, lab ... FOR SHARE OF servers
+    A->>A: grid, horizon, duration, GPU count, peak hours, server open
+    A->>D: count active reservations, load this user's bookings in the quota weeks
+    loop up to 3 attempts, each in a savepoint
+        A->>D: free GPUs (removed_at IS NULL, no overlapping active allocation)
+        A->>D: INSERT reservation, then allocations in ascending GPU order
+        alt exclusion violation (23P01) or deadlock (40P01)
+            A->>D: ROLLBACK TO SAVEPOINT, try again
+        end
+    end
+    A->>D: INSERT audit row, COMMIT
+```
+
+### Locks
+
+| Path | Takes, in order |
+|---|---|
+| Booking | user advisory lock, then server row `FOR SHARE` |
+| Server change or delete | server row `FOR UPDATE` |
+| Quota change, deactivation | user advisory lock (deactivation then locks the user's reservation rows) |
+| Approve, reject, cancel | reservation row `FOR UPDATE` |
+
+Reasoning, alternatives, and the concurrency tests are in [decisions.md](decisions.md#phase-4--reservations).
+
+### Pages
+
+| Page | What it does |
+|---|---|
+| Server detail (`/servers/:id`) | Seven-day availability timeline in the lab's time zone, and the booking dialog; clicking a free half hour starts a booking there |
+| My reservations (`/reservations`) | Weekly quota bar, the signed-in user's reservations with a status filter, and cancel or end early |
+| Approvals (`/admin/approvals`) | Admins approve or reject pending requests, soonest start first |
+
+Times are converted between the lab's wall clock and UTC in the browser with `Intl` (`frontend/src/lib/lab-time.ts`). The API only ever sees UTC instants with an offset.
+
 ## Uploads
 
 The API never handles image bytes. It signs a form, the browser posts the file to storage, and the API checks the stored object before saving its key.
