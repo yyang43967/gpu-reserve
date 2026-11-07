@@ -108,7 +108,7 @@ Each server has one GPU row per active GPU, numbered from 0. Reasoning for visib
 | `POST /api/v1/reservations/{id}/cancel` | Owner or admin; a running reservation ends early at the next half hour |
 | `POST /api/v1/reservations/{id}/approve`, `/reject` | Admin decisions on pending reservations; reject requires a reason |
 | `GET /api/v1/servers/{id}/availability` | Free GPUs per 30-minute slot, merged into runs, for up to 14 days |
-| `GET /api/v1/me/quota` | GPU-hours used and left in the current quota week |
+| `GET /api/v1/me/quota` | GPU-hours used and left in the current quota week, or the week containing `?at=` |
 
 Each reservation holds one `gpu_allocations` row per GPU. An exclusion constraint on `(gpu_id, time range) WHERE active` makes double-booking impossible at the database level. Allocation picks the lowest free GPU numbers and retries in a savepoint if another booking takes one first.
 
@@ -125,7 +125,7 @@ sequenceDiagram
     A->>D: SELECT server, lab ... FOR SHARE OF servers
     A->>A: grid, horizon, duration, GPU count, peak hours, server open
     A->>D: count active reservations, load this user's bookings in the quota weeks
-    loop up to 3 attempts, each in a savepoint
+    loop first attempt + up to 3 retries, each in a savepoint
         A->>D: free GPUs (removed_at IS NULL, no overlapping active allocation)
         A->>D: INSERT reservation, then allocations in ascending GPU order
         alt exclusion violation (23P01) or deadlock (40P01)

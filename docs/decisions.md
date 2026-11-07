@@ -312,9 +312,10 @@ Each entry records the context, the decision, and why. Newest phases at the bott
   - In one transaction, select the server's active GPUs with no overlapping active allocation, ordered by number.
   - Take the lowest `k` and insert the reservation and `k` allocations.
   - If the constraint fires, retry with fresh availability.
-  - If fewer than `k` GPUs are free, return 409 `gpu-unavailable`. After three failed attempts, return 409 `allocation-contention`.
+  - If fewer than `k` GPUs are free, return 409 `gpu-unavailable`. If the first attempt and three retries all lose to other bookings, return 409 `allocation-contention`.
 - **Why it is correct:** the constraint holds no matter how a row is written. Under READ COMMITTED, an insert that overlaps an uncommitted allocation waits for that transaction, then fails once it commits. The retry therefore always sees the winner.
 - **Retry details:**
+  - Up to three retries after the first attempt (`MAX_ALLOCATION_RETRIES = 3`), so at most four attempts. The first version counted three attempts in total. It was changed to count retries, which is the documented behavior; the extra round costs one more savepoint under contention and nothing otherwise.
   - Each attempt runs in a savepoint (`begin_nested`). A failed attempt rolls back only its own inserts. The user and server locks taken before the savepoint stay held.
   - Each attempt builds new `Reservation` and `GpuAllocation` objects. Nothing from a rolled-back savepoint is reused.
   - The retryable error is recognized by SQLSTATE, not by message text: `23P01` (exclusion violation) and `40P01` (deadlock detected). Any other database error, such as a foreign key violation, propagates on the first attempt. A test checks that.
@@ -367,10 +368,27 @@ Each entry records the context, the decision, and why. Newest phases at the bott
 - **Stale quota, found during implementation:** the booking read the quota from the `User` object loaded when the request was authenticated, before the lock. An admin lowering the quota at the same moment was therefore invisible to it. The booking now re-reads `is_active` and the quota after taking the lock. A deterministic test holds the admin's change uncommitted, confirms the booking is blocked, commits, and checks that the booking gets `quota-exceeded`. Removing either the lock on the admin side or the re-read makes the test fail.
 - **Which weeks are checked:** every quota week the new booking overlaps, not only the current one. Otherwise a booking that spills past Monday 00:00 could overfill next week.
 - **Fixed quota timezone:**
-  - The quota week runs from Monday 00:00 to the next Monday 00:00 in one fixed zone, the default lab zone, whichever lab a booking is in. Usage is summed across all labs.
+  - The quota week runs from Monday 00:00 to the next Monday 00:00 in one fixed zone, whichever lab a booking is in. Usage is summed across all labs.
+  - The zone is its own setting, `QUOTA_TIMEZONE` (default `America/Los_Angeles`), validated like a lab zone (IANA name, whole-half-hour offsets). It is passed into the booking and quota functions as an argument.
+  - It is deliberately not derived from the default zone for new labs. The two only look related: one is a form default, the other defines when every user's week resets. If the quota zone followed the lab default, changing that default would silently move every quota week, and bookings already accepted could end up over the quota in the new weeks.
   - A per-lab week was rejected: one user's bookings would be counted in different week windows depending on the lab. Near a week boundary, hours booked in one lab just before its Monday and in another lab just after a later Monday land in different weeks. The user could then hold more than the quota within a single week of either zone.
   - Weeks that contain a daylight saving change are 167 or 169 hours long.
 - **`/me/quota`** uses the same functions as the check (`_load_quota_bookings` and `used_gpu_minutes`), so the number shown is the number enforced. Hours are fractional, because bookings are in half hours.
+- **`/me/quota?at=`** returns the week containing any instant, not only the current week. A booking is checked against the week it falls in, so showing only this week's numbers would let the dialog say "40 hours left" for a booking next week that is then refused. The booking dialog asks for the week of the chosen start. A booking that crosses Monday is still checked against both weeks; the dialog shows the start's week, and the API's `quota-exceeded` detail names the week that overflowed.
+
+### Active-reservation limit
+- **Rule:** a user may hold at most four reservations that are `pending` or `approved` and have not ended (`ends_at > now`).
+- **Running bookings count.** A running booking still holds GPUs. The limit exists to stop one person from holding many slots at once; leaving running ones out would let a user with four running bookings queue four more.
+- **Pending past its start counts** until the expiry job marks it `expired`, because its GPUs are still held until then.
+
+### Peak-hours limit per booking
+- **Rule:** the GPU-hours a single booking spends inside weekday 09:00–18:00 (lab time) may not exceed 4.
+- **Summed across every peak window the booking touches**, not checked per day. The limit is about how much of the busiest time one booking takes, so splitting it by day would let a long booking take 4 GPU-hours of peak time on each of several days.
+- **In practice** this only differs from a per-day check when a booking spans two peak windows, which needs more than 15 hours. That is possible only on servers where an admin raised `max_booking_hours` above the default 12.
+
+### Approval only before the start
+- **Rule:** approving a `pending` reservation whose start has passed returns 409 `invalid-reservation-state`. Rejecting it is still allowed, since that releases the GPUs.
+- **Why:** a pending reservation past its start belongs to the expiry job, which turns it into `expired`. If approval stayed open, an admin and the job could act on the same row at the same moment. The row lock would make the outcome consistent, but it would depend on who came first. The student would also get an approval for time that has already partly passed. A clear cut-off at the start gives one owner per transition: admins before the start, the job after it.
 
 ### Lock order
 - Bookings take the user lock, then the server row.
