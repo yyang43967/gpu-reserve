@@ -215,3 +215,7 @@ sequenceDiagram
 - Notifications are written in the same transaction as the change they report, so a committed change always has one and a rolled-back change never does.
 - The sweeping jobs are single idempotent statements and take a per-job advisory lock, so overlapping ticks do not run together.
 
+
+## End-to-end tests
+
+Playwright drives the production build of the frontend (`vite preview`) against `docker-compose.e2e.yml`, a separate Compose project with Postgres in memory, Redis, the API, the worker, and Mailpit. Global setup migrates and empties that database, creates an admin, and adds a lab with two servers. See `frontend/e2e/README.md`.

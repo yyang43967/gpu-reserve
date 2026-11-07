@@ -60,6 +60,7 @@ Each entry records the context, the decision, and why. Newest phases at the bott
 - **Context:** The repository is private for now, so Actions minutes are billed. GitHub offers native arm64 runners (`ubuntu-24.04-arm`) to private repositories.
 - **Decision:** Pull requests run lint, type checks, and unit and integration tests on `ubuntu-latest`. Pushes to `main` also build the arm64 image and smoke-test the `core` stack on `ubuntu-24.04-arm`. Playwright will join the `main`-only job in Phase 5.
 - **Why:** Fast, cheap PR feedback, plus a native build of the production architecture without QEMU. The runner labels do not change when the repository goes public.
+- **Outcome:** the Playwright job was added in Phase 5 as its own `main`-only job, also runnable by hand (`workflow_dispatch`). See "End-to-end tests".
 
 ### Integration tests with testcontainers
 - **Decision:** Tests marked `integration` start real Postgres and Redis containers once per session. They run on every PR. Locally, `pytest -m "not integration"` skips them when Docker is off.
@@ -615,6 +616,14 @@ Each entry records the context, the decision, and why. Newest phases at the bott
 - **No emails for history.** Notification rows created while replaying the past are deleted at the end. The worker then queues the reminder for the booking that starts within the hour, as it would for any booking.
 - **Passwords from the environment.** `ADMIN_PASSWORD` as for `create-admin`; `SEED_STUDENT_PASSWORD` for all eight students, or a random unusable password when unset. No password is in the code.
 - **Guards:** refuses to run with `ENVIRONMENT=production`, and refuses a database that already has users unless `--reset` is given, which truncates every application table first.
+
+### End-to-end tests
+- **A separate Compose file, not a profile.** The plan was an `e2e` profile in `docker-compose.yml`. A profile would share the development database: the tests empty it before every run, so running them would wipe the data a developer is working with. `docker-compose.e2e.yml` is its own project (`gpu-reserve-e2e`) with its own containers, ports (API on 18000, Mailpit on 18025), and Postgres on `tmpfs`, so it can run next to the development stack and leaves nothing behind. It repeats a few service definitions; that duplication is the price of the isolation.
+- **What runs where:** Postgres, Redis, the API, the worker, and Mailpit in containers, with small memory limits; the frontend is built and served by `vite preview` on the host, started by Playwright, proxying `/api` to the stack. One Chromium. This fits the 8 GB development machine alongside the dev stack.
+- **A known starting state, every run:** global setup runs the migrations, empties the database with `python -m app.cli reset-database` (refused unless `ENVIRONMENT=test`, which only this stack sets), creates an admin with a random password, and adds one lab with an open server and a server that needs approval. Accounts the tests register carry a per-run id.
+- **Times that do not depend on the clock:** bookings start tomorrow at 19:00 or later in the lab's zone: always in the future, inside the horizon, outside peak hours, and a few GPU-hours. The browser runs in Tokyo, a zone no lab uses, so any time taken from the browser's zone instead of the lab's would show up as a failure.
+- **Specs:** a new student registers, finds a slot, books it from the prefilled dialog, and sees it in My reservations; a student requests a restricted server, an admin approves it, and the approval email arrives in Mailpit (read through its API). The email check waits for the worker's next minute tick, up to about 90 seconds.
+- **CI:** a `main`-only job, like the image job, and runnable by hand on any branch. It uploads the HTML report and traces when it fails, and prints the stack's logs.
 
 ### Known gap: no application logging configuration
 - **What happens now:** nothing configures Python logging. The API's output comes from uvicorn's own loggers, and the worker's from ARQ's. Records from `app.*` loggers at INFO, such as "expire_pending changed 1 rows" or a dispatch report, are dropped in both processes. Warnings and errors still reach stderr through Python's last-resort handler, without a format or request context. Running the worker against Mailpit showed it: ARQ printed each tick and its return value, and the job's own INFO lines never appeared.
