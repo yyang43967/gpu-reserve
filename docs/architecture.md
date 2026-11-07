@@ -12,7 +12,7 @@ A short overview. It will be expanded as components are built.
 | Database | PostgreSQL 16 with `btree_gist` and `pgvector` | Source of truth, including double-booking prevention |
 | Cache / queue | Redis 7 | ARQ queue, rate limits, availability cache |
 | Object storage | SeaweedFS locally, S3 in production | Avatars and server images; private bucket, presigned URLs |
-| Email | Mailpit locally | |
+| Email | Mailpit locally, SES in production | Sent by the worker from a `notifications` outbox table |
 
 ## Health
 
@@ -181,3 +181,33 @@ sequenceDiagram
 - The bucket is private. Images are read through presigned GET URLs signed at the start of the current hour, so a URL stays the same for an hour and the browser can cache the image.
 - In the browser, the storage POST is a plain `fetch` without the access token or cookies. Saving an upload is a separate form action; an upload that is never saved stays in the bucket (a known gap, see decisions).
 - Locally, SeaweedFS runs in the `storage` and `full` Compose profiles. The API reaches it as `seaweedfs:8333` on the Compose network and signs browser URLs for `localhost:8333`.
+- Upload forms are limited per user (30 per 10 minutes).
+
+## Background jobs and email
+
+The worker runs the ARQ image with a cron schedule. Each task opens a transaction and calls a function in `app/services/jobs.py` with the current time.
+
+| Job | Every | Does |
+|---|---|---|
+| `expire_pending` | minute | Pending reservations past their start become `expired`; GPUs released; owner notified |
+| `complete_finished` | 5 minutes | Approved reservations past their end become `completed`; GPUs released |
+| `queue_reminders` | 5 minutes | Queues a reminder for approved reservations starting within the hour |
+| `dispatch_notifications` | minute | Sends due rows from the outbox, with retries and backoff |
+
+```mermaid
+sequenceDiagram
+    participant A as API
+    participant D as Postgres
+    participant W as Worker
+    participant M as Mail (Mailpit / SES)
+
+    A->>D: approve + insert notification row (one transaction)
+    W->>D: due notification rows
+    W->>D: re-read the reservation (skip stale reminders)
+    W->>M: send
+    W->>D: mark sent, or schedule a retry
+```
+
+- Notifications are written in the same transaction as the change they report, so a committed change always has one and a rolled-back change never does.
+- The sweeping jobs are single idempotent statements and take a per-job advisory lock, so overlapping ticks do not run together.
+

@@ -393,9 +393,9 @@ Each entry records the context, the decision, and why. Newest phases at the bott
 ### Lock order
 - Bookings take the user lock, then the server row.
 - Deactivation takes the user lock, then the user's reservation rows.
-- Approve, reject, and cancel take only the reservation row.
+- Approve, reject, and cancel take the reservation row. Approve then takes the server row `FOR SHARE` (see "Approval checks the server").
 - Server changes take only the server row.
-- No path takes a reservation row and then the user lock, or the server row and then the user lock, so these paths cannot deadlock against each other.
+- No path takes a reservation row and then the user lock, or the server row and then the user lock, or the server row and then a reservation row, so these paths cannot deadlock against each other.
 
 ### Time grid and rules
 - **Granularity is checked in UTC:** `starts_at` and `ends_at` must be whole multiples of 30 minutes since the Unix epoch.
@@ -502,3 +502,51 @@ Each entry records the context, the decision, and why. Newest phases at the bott
 - **No notifications** on approve, reject, cancel, or deactivation.
 - **Lab deactivation and maintenance** leave existing bookings in place. Their owners can still see and cancel them, but nobody tells them.
 - **Approve does not check the server's state:** an admin can approve a pending reservation on a server that has since gone into maintenance.
+  - **Outcome:** fixed in Phase 5. See "Approval checks the server".
+
+## Phase 5 — Jobs, search, polish
+
+### Notifications: a transactional outbox
+- **Context:** approvals, rejections, cancellations, expiries, and reminders send email. Email goes to an outside system, so it cannot be part of the database transaction that makes the change.
+- **Options considered:**
+  1. Send from the request after commit. The request waits on SMTP, and a crash or SMTP outage after the commit loses the email.
+  2. Enqueue an ARQ job after commit. Faster for the request, but a Redis outage or a crash between the commit and the enqueue still loses it.
+  3. Write a `notifications` row in the same transaction as the change, and deliver rows from a worker (chosen).
+- **Decision:** `notify_owner` adds a row next to the change. A committed change always has its row; a rolled-back one never does. A test cancels, flushes, rolls back, and finds no row.
+- **Shape:** one row per `(reservation_id, kind)`, enforced by a unique constraint, with `status` (`pending`, `sent`, `skipped`, `failed`), `attempts`, `next_attempt_at`, and `last_error`. A partial index on `next_attempt_at WHERE status = 'pending'` serves the dispatcher.
+- **At least once:** a send and the update that records it cannot be atomic. A crash in between can send a message twice. That is accepted: a duplicate notice is a nuisance, a missing one can cost someone their booking.
+- **Stale reminders:** the dispatcher re-reads the reservation before sending. A reminder whose reservation is no longer approved, or has already started, is marked `skipped`. Other kinds report a change that did happen and are always sent.
+
+### Who is notified
+- **Rule:** the owner is emailed when someone else changed their reservation, and always for expiry and reminders, which have no actor.
+  - Admin approval, rejection, or cancellation (including ending a running booking early): email.
+  - Deactivation releases every booking with the admin as the actor, so the user gets one email per released booking, even though the account is now inactive. They need to know.
+  - A student cancelling or ending their own booking: no email. They just did it.
+  - An admin deciding their own request: no email, by the same rule.
+- **No "inactive recipients are skipped" rule.** It would contradict the deactivation case, and nothing else needs it: deactivation releases all bookings first, so an inactive account never gets reminders.
+- **Completion** sends nothing. A booking ending on time is not news.
+
+### Sweeping jobs and idempotency
+- **Jobs:** `expire_pending` every minute, `complete_finished` and `queue_reminders` every five minutes. Each is a thin ARQ wrapper around a service function that takes `now`.
+- **`complete_finished`** is one statement: a CTE updates approved reservations with `ends_at <= now` to `completed`, deactivates their allocations, and inserts system audit rows (`actor_id NULL`). `audit_log.actor_id` was already nullable; a test checks the migrated column.
+- **Idempotent by construction:** each statement selects by state (`status = 'approved' AND ends_at <= now`), and the state it writes no longer matches. A second run finds nothing. Reminders rely on the unique `(reservation_id, kind)` constraint with `ON CONFLICT DO NOTHING`. Tests run each job twice.
+- **Races with requests:** the job's UPDATE and a request's `FOR UPDATE` both lock the row. Under READ COMMITTED, whichever waits re-reads the row after the other commits, so a late cancel finds a completed reservation and is refused, and a job finds a cancelled one and skips it.
+- **No overlapping runs, two layers:**
+  1. ARQ cron jobs are `unique`: a tick has one job id, so several workers enqueue it once.
+  2. Consecutive ticks can still overlap if one runs long. Each sweeping job takes `pg_try_advisory_xact_lock(1, hashtext(job_name))` and returns at once when another run holds it. The two-key form uses a key space Postgres keeps separate from the single-key user locks, so a job name can never collide with a user id's hash. A test holds the single-key lock on the same hash and shows the job still runs.
+  The statements are idempotent without the lock. The lock keeps two runs from queueing behind each other on the same rows and doing the same work twice.
+- **Late reminders:** a reminder is queued for approved reservations starting within the next hour. A booking made less than an hour before its start is picked up by the next run, so its reminder can arrive up to five minutes after the booking. Accepted: the person booked moments ago.
+
+### Email
+- **Transports:** an `EmailSender` interface with two implementations. `SmtpSender` uses the standard library's `smtplib` in a worker thread (Mailpit locally). `SesSender` uses the SES v2 API through boto3 with the instance role's credentials, so production needs no SMTP password. `EMAIL_BACKEND` picks one. No new dependencies.
+- **Bodies:** plain text and HTML, from `string.Template`. Every value placed in the HTML is passed through `html.escape`, because purposes and rejection reasons are typed by users. Names and hostnames are escaped too, rather than deciding field by field which ones are trusted. `string.Template` does not re-read substituted values, so a `$` in a purpose stays literal. Tests cover `<script>` in the purpose and the reason.
+- **Times** are shown in the lab's time zone with its abbreviation, as in the app.
+
+### Approval checks the server
+- **Rule:** approving returns 409 `server-unavailable` when the server is not `available` or its lab is inactive. Rejection is still allowed and releases the GPUs.
+- **Locking:** after the reservation row, approval takes the server row `FOR SHARE`, like a booking. A concurrent switch to maintenance (which takes `FOR UPDATE`) either commits first and is seen, or waits for the approval. Server changes never lock reservation rows, so this order cannot deadlock.
+
+### Upload URL rate limit
+- **Rule:** at most 30 presigned upload forms per user per 10 minutes, as a fixed-window counter in Redis (`presign:user:{id}`), the same mechanism as the login limits. Over the limit: 429 `too-many-requests` with `Retry-After`. It fails open on a Redis outage, like the other limits.
+- **Why per user:** each form lets its holder store one file of up to 5 MiB, and every caller is signed in, so the account is the natural unit.
+
