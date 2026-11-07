@@ -597,6 +597,17 @@ Each entry records the context, the decision, and why. Newest phases at the bott
 ### Test coverage
 - `pytest-cov` measures `app/services` (target 80%). Coverage runs with `concurrency = ["greenlet", "thread"]`: SQLAlchemy's async layer runs ORM code inside greenlets, and without that setting those lines are reported as missed.
 
+### Find a slot in the browser
+- **Which zone the window is typed in:** the search can span labs in different zones, so a typed "08:00" needs a zone. The form has a time zone picker listing the labs' zones. It starts in the browser's zone when a lab uses it, since people usually search in the zone they live in, and otherwise in the first lab's. Results are always shown in each result's own lab zone, like every other time in the app.
+- **Booking a result opens the booking dialog**, prefilled with the server, start, end, and GPU count, instead of booking in one click. A booking needs a purpose, and the dialog already shows the per-field errors (a conflict if someone booked first, the peak limit, quota). The dialog takes any "bookable server" shape, so search results need no extra request for the full server.
+- **Results refresh after booking.** The search query lives under the reservations query key, which every booking invalidates, so a slot that is now taken disappears or shows fewer free GPUs.
+- **Validation in the browser mirrors the API's:** whole or half hours, a window at least as long as the job, at most 14 days. The API stays the authority; its 409 (too many reservations) and 422 (window) are shown as a message without a retry button, since retrying would give the same answer.
+
+### Dashboard, calendar download, utilization page
+- **Dashboard:** one request (`/stats/overview`) fills it. The scaffold's "API status" card is gone, along with the `/health` client it used; readiness is for probes, not people.
+- **Calendar download:** a plain link cannot carry the bearer token, so "Add to calendar" fetches the file through the API client (with the same refresh-on-401), then saves it through a temporary object URL.
+- **Utilization page:** preset periods (last 7 or 30 days, next 7 or 14 days) rather than date inputs. Presets need no answer to "dates in which zone?", which has none for a page spanning labs. A table carries the numbers; the bars are decorative and hidden from screen readers. On a phone, the table scrolls inside its frame instead of the page.
+
 ### Known gap: no application logging configuration
 - **What happens now:** nothing configures Python logging. The API's output comes from uvicorn's own loggers, and the worker's from ARQ's. Records from `app.*` loggers at INFO, such as "expire_pending changed 1 rows" or a dispatch report, are dropped in both processes. Warnings and errors still reach stderr through Python's last-resort handler, without a format or request context. Running the worker against Mailpit showed it: ARQ printed each tick and its return value, and the job's own INFO lines never appeared.
 - **Why it is not fixed here:** the right fix is structured logging, which belongs with the observability work. A plain `basicConfig` now would be replaced then.
