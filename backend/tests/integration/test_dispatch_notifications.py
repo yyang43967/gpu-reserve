@@ -515,3 +515,30 @@ async def test_a_row_that_cannot_be_prepared_counts_as_a_failed_attempt(
     assert (broken.status, broken.attempts) == (NotificationStatus.PENDING, 1)
     assert broken.last_error is not None and "missing template field" in broken.last_error
     assert (await _get(job_factory, healthy_id)).status is NotificationStatus.SENT
+
+
+async def test_a_database_error_while_preparing_still_records_the_attempt(
+    job_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failing query aborts the transaction, so the failure could not be written in
+    it. Preparing runs in a savepoint: the error rolls back to it, the row lock taken
+    before it is kept, and the attempt is recorded in the same transaction."""
+    [broken_id, healthy_id] = await _rows(job_factory, [NotificationKind.APPROVED], users=2)
+    original = notifications.prepare_email
+
+    async def prepare(session: AsyncSession, note: Notification, **kwargs: object) -> object:
+        if note.id == broken_id:
+            await session.execute(text("SELECT 1 / 0"))
+        return await original(session, note, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(notifications, "prepare_email", prepare)
+    sender = FakeSender()
+
+    report = await _dispatch(job_factory, sender)
+
+    assert report == jobs.DispatchReport(sent=1, retried=1)
+    broken = await _get(job_factory, broken_id)
+    assert (broken.status, broken.attempts) == (NotificationStatus.PENDING, 1)
+    assert broken.next_attempt_at == NOW + timedelta(minutes=1)
+    assert broken.last_error is not None and "division by zero" in broken.last_error
+    assert (await _get(job_factory, healthy_id)).status is NotificationStatus.SENT

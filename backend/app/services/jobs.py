@@ -303,18 +303,33 @@ async def _deliver(
     frontend_url: str,
     counts: _Counts,
 ) -> None:
-    """Send one locked row and record the outcome on it. The caller commits."""
+    """Send one locked row and record the outcome on it. The caller commits.
+
+    Any failure counts as an attempt, including a bug while preparing the message, so
+    a row that always fails is given up on after the last attempt instead of stopping
+    every tick at the same place.
+
+    Preparing runs in a savepoint. A database error inside it aborts only the
+    savepoint: rolling back to it keeps the transaction usable and keeps the row lock,
+    which was taken before the savepoint, so the failure is recorded in the same
+    transaction. Without it, the aborted transaction could not record anything, the
+    commit would fail, and the row would stay due with its attempts unchanged.
+    """
     try:
-        email = await notifications.prepare_email(session, note, now=now, frontend_url=frontend_url)
-        if email is None:
-            note.status = NotificationStatus.SKIPPED
-            counts.skipped += 1
-            return
+        async with session.begin_nested():
+            email = await notifications.prepare_email(
+                session, note, now=now, frontend_url=frontend_url
+            )
+    except Exception as error:
+        _record_failure(note, error, now=now, counts=counts)
+        return
+    if email is None:
+        note.status = NotificationStatus.SKIPPED
+        counts.skipped += 1
+        return
+    try:
         await sender.send(email)
     except Exception as error:
-        # Any failure, including a bug while preparing the message, counts as an
-        # attempt. A row that always fails is given up on after the last attempt
-        # instead of stopping every tick at the same place.
         _record_failure(note, error, now=now, counts=counts)
         return
     note.status = NotificationStatus.SENT
