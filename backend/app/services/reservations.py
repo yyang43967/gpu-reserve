@@ -55,7 +55,9 @@ from app.services.booking_rules import Booking, Interval
 from app.services.servers import get_server, visibility_conditions
 
 MAX_ACTIVE_RESERVATIONS: Final = 4
-MAX_ALLOCATION_ATTEMPTS: Final = 3
+# After the first attempt, retry up to this many times when another booking takes a
+# chosen GPU first.
+MAX_ALLOCATION_RETRIES: Final = 3
 # Weekly quotas are counted in one fixed zone, whichever lab a booking is in.
 QUOTA_TIMEZONE: Final = ZoneInfo(DEFAULT_LAB_TIMEZONE)
 
@@ -308,7 +310,7 @@ async def _allocate(
 ) -> uuid.UUID:
     """Insert the reservation and its allocations, retrying when another booking takes
     a chosen GPU first. Returns the new reservation's id."""
-    for _attempt in range(MAX_ALLOCATION_ATTEMPTS):
+    for _attempt in range(1 + MAX_ALLOCATION_RETRIES):
         try:
             async with session.begin_nested():
                 free = await _select_free_gpus(session, server.id, interval)

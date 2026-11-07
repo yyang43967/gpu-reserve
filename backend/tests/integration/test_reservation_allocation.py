@@ -116,7 +116,7 @@ async def test_deadlock_is_retried(
     assert len(calls) == 2
 
 
-async def test_retries_stop_after_three_attempts(
+async def test_retries_stop_after_three_retries(
     db_session: AsyncSession,
     world: tuple[User, Server, list[Gpu]],
     monkeypatch: pytest.MonkeyPatch,
@@ -133,7 +133,8 @@ async def test_retries_stop_after_three_attempts(
     with pytest.raises(AllocationContention):
         await create_reservation(db_session, user, _request(server), now=NOW)
 
-    assert len(calls) == 3
+    # The first attempt plus three retries.
+    assert len(calls) == 4
     await db_session.rollback()
     assert await _count(db_session, Reservation) == 1
 
