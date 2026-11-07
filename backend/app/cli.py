@@ -35,17 +35,22 @@ class CommandError(Exception):
     """A problem to report to the operator, with no traceback."""
 
 
-def _read_password() -> str:
-    password = os.environ.get(PASSWORD_ENV_VAR)
-    if password is None:
-        password = getpass.getpass("Password: ")
-        if getpass.getpass("Repeat password: ") != password:
-            raise CommandError("The passwords do not match.")
+def validate_password(password: str) -> str:
     if not PASSWORD_MIN_LENGTH <= len(password) <= PASSWORD_MAX_LENGTH:
         raise CommandError(
             f"The password must be {PASSWORD_MIN_LENGTH} to {PASSWORD_MAX_LENGTH} characters."
         )
     return password
+
+
+def read_password(env_var: str = PASSWORD_ENV_VAR) -> str:
+    """The password from `env_var`, or an interactive prompt when it is unset."""
+    password = os.environ.get(env_var)
+    if password is None:
+        password = getpass.getpass("Password: ")
+        if getpass.getpass("Repeat password: ") != password:
+            raise CommandError("The passwords do not match.")
+    return validate_password(password)
 
 
 def _validate_email(email: str) -> str:
@@ -87,7 +92,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         email = _validate_email(args.email)
-        password = _read_password()
+        password = read_password()
         message = asyncio.run(
             create_admin(Settings(), email=email, full_name=args.name, password=password)
         )
