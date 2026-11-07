@@ -12,12 +12,6 @@ function ComingSoon({ title, description }: { title: string; description: string
   );
 }
 
-export function FindSlotPage() {
-  return (
-    <ComingSoon title="Find a slot" description="Search for GPUs that fit your job and window." />
-  );
-}
-
 export function AssistantPage() {
   return (
     <ComingSoon title="Assistant" description="Ask about policies and find hardware for a job." />

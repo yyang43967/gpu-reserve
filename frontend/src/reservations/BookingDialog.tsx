@@ -16,6 +16,19 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import type { Reservation, Server } from "@/lib/api-types";
+
+/** What the dialog needs to know about a server: a full server, or a search result. */
+export type BookableServer = Pick<
+  Server,
+  "id" | "hostname" | "gpu_count" | "max_booking_hours" | "requires_approval"
+> & { lab: { name: string; timezone: string } };
+
+/** Values to start the form with. Without an end, the booking lasts an hour. */
+export interface BookingPrefill {
+  start: Date;
+  end?: Date;
+  gpuCount?: number;
+}
 import { formatInLab, labDateKey, labLocalToUtc, labTimeOfDay } from "@/lib/lab-time";
 import {
   ambiguityNote,
@@ -106,33 +119,35 @@ function WeekQuota({ start }: { start: Date | null }) {
   );
 }
 
-function defaults(server: Server, start: Date): BookingValues {
+function defaults(server: BookableServer, prefill: BookingPrefill): BookingValues {
   const zone = server.lab.timezone;
-  const end = new Date(start.getTime() + DEFAULT_LENGTH_MS);
+  const { start } = prefill;
+  const end = prefill.end ?? new Date(start.getTime() + DEFAULT_LENGTH_MS);
   return {
     start_date: labDateKey(start, zone),
     start_time: labTimeOfDay(start, zone),
     end_date: labDateKey(end, zone),
     end_time: labTimeOfDay(end, zone),
-    gpu_count: 1,
+    gpu_count: prefill.gpuCount ?? 1,
     purpose: "",
   };
 }
 
 function BookingForm({
   server,
-  start,
+  prefill,
   onBooked,
 }: {
-  server: Server;
-  start: Date;
+  server: BookableServer;
+  prefill: BookingPrefill;
   onBooked: (reservation: Reservation) => void;
 }) {
   const zone = server.lab.timezone;
   const queryClient = useQueryClient();
   const [formError, setFormError] = useState<string | null>(null);
-  // Whether the person chose the end date themselves (a multi-day booking).
-  const [endDatePicked, setEndDatePicked] = useState(false);
+  // Whether the end date was chosen rather than implied (a multi-day booking). A
+  // prefilled end, such as a search result's, counts as chosen.
+  const [endDatePicked, setEndDatePicked] = useState(prefill.end !== undefined);
   const schema = useMemo(() => makeSchema(zone, server.gpu_count), [zone, server.gpu_count]);
   const {
     register,
@@ -144,7 +159,7 @@ function BookingForm({
     formState: { errors, isSubmitting },
   } = useForm<BookingValues>({
     resolver: zodResolver(schema),
-    defaultValues: defaults(server, start),
+    defaultValues: defaults(server, prefill),
   });
 
   /** Keep the end date consistent with the start and end times; see impliedEndDate. */
@@ -285,12 +300,17 @@ function BookingForm({
 export function BookingDialog({
   server,
   start,
+  end,
+  gpuCount,
   onOpenChange,
   onBooked,
 }: {
-  server: Server;
+  server: BookableServer;
   /** The start to prefill, or null when the dialog is closed. */
   start: Date | null;
+  /** The end to prefill; an hour after the start when omitted. */
+  end?: Date;
+  gpuCount?: number;
   onOpenChange: (open: boolean) => void;
   onBooked: (reservation: Reservation) => void;
 }) {
@@ -304,7 +324,13 @@ export function BookingDialog({
           </DialogDescription>
         </DialogHeader>
         {/* Content unmounts when closed, so every opening starts fresh. */}
-        {start && <BookingForm server={server} start={start} onBooked={onBooked} />}
+        {start && (
+          <BookingForm
+            server={server}
+            prefill={{ start, ...(end && { end }), ...(gpuCount && { gpuCount }) }}
+            onBooked={onBooked}
+          />
+        )}
       </DialogContent>
     </Dialog>
   );
