@@ -8,6 +8,7 @@ import { AdminLabsPage } from "@/pages/admin/AdminLabsPage";
 import { AdminPage } from "@/pages/admin/AdminPage";
 import { AdminServersPage } from "@/pages/admin/AdminServersPage";
 import { AdminUsersPage } from "@/pages/admin/AdminUsersPage";
+import { AdminUtilizationPage } from "@/pages/admin/AdminUtilizationPage";
 import { DashboardPage } from "@/pages/DashboardPage";
 import { LoginPage } from "@/pages/LoginPage";
 import { MyReservationsPage } from "@/pages/MyReservationsPage";
@@ -54,6 +55,7 @@ export const routes: RouteObject[] = [
               { path: "admin/labs", element: <AdminLabsPage /> },
               { path: "admin/servers", element: <AdminServersPage /> },
               { path: "admin/approvals", element: <AdminApprovalsPage /> },
+              { path: "admin/utilization", element: <AdminUtilizationPage /> },
             ],
           },
           { path: "*", element: <NotFoundPage /> },

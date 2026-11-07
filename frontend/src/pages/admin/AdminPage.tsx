@@ -1,4 +1,4 @@
-import { Building2, ChevronRight, ClipboardCheck, Server, Users } from "lucide-react";
+import { Building2, ChevronRight, ClipboardCheck, Gauge, Server, Users } from "lucide-react";
 import { Link } from "react-router";
 
 import { PageHeader } from "@/components/page-header";
@@ -9,6 +9,12 @@ const SECTIONS = [
     title: "Approvals",
     description: "Approve or reject bookings on servers that need approval.",
     icon: ClipboardCheck,
+  },
+  {
+    to: "/admin/utilization",
+    title: "Utilization",
+    description: "See how much GPU time each server has booked, pending, and free.",
+    icon: Gauge,
   },
   {
     to: "/admin/users",

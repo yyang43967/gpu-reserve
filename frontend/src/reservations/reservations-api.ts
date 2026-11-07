@@ -1,4 +1,4 @@
-import { apiFetch } from "@/lib/api";
+import { apiFetch, apiFetchBlob } from "@/lib/api";
 import type { Availability, Page, Quota, Reservation, ReservationStatus } from "@/lib/api-types";
 
 export const RESERVATIONS_PAGE_SIZE = 20;
@@ -129,4 +129,28 @@ export function wouldEndEarly(reservation: Reservation, now: Date): boolean {
     new Date(reservation.starts_at) < now &&
     now < new Date(reservation.ends_at)
   );
+}
+
+export const CALENDAR_MEDIA_TYPE = "text/calendar";
+
+/** The reservation as an iCalendar file. Only its owner can download it. */
+export function getReservationCalendar(id: string): Promise<Blob> {
+  return apiFetchBlob(`/reservations/${encodeURIComponent(id)}.ics`, {
+    accept: CALENDAR_MEDIA_TYPE,
+  });
+}
+
+/** Save a file the user asked for, through a temporary link. */
+export function saveFile(blob: Blob, filename: string): void {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  // Revoked on the next turn, after the browser has started the download.
+  setTimeout(() => {
+    URL.revokeObjectURL(url);
+  }, 0);
 }

@@ -242,10 +242,12 @@ describe("my reservations page", () => {
 
     const rejected = await screen.findByRole("listitem", { name: /a100-node-01/ });
     expect(within(rejected).getByText("Reason: Class booking")).toBeInTheDocument();
-    expect(within(rejected).queryByRole("button")).toBeNull();
+    expect(within(rejected).queryByRole("button", { name: /Cancel|End early/ })).toBeNull();
     // Approved but already over by the client's clock.
     const past = screen.getByRole("listitem", { name: /past-node/ });
-    expect(within(past).queryByRole("button")).toBeNull();
+    expect(within(past).queryByRole("button", { name: /Cancel|End early/ })).toBeNull();
+    // A calendar file is still available for both.
+    expect(within(past).getByRole("button", { name: "Add to calendar" })).toBeInTheDocument();
   });
 
   it("shows empty, filtered-empty, and error states", async () => {
@@ -268,5 +270,58 @@ describe("my reservations page", () => {
     expect(await screen.findByText("No reservations match this filter")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Show all" }));
     expect(await screen.findByText("No reservations yet")).toBeInTheDocument();
+  });
+
+  it("downloads a reservation as a calendar file", async () => {
+    const createObjectURL = vi.fn(() => "blob:calendar");
+    const revokeObjectURL = vi.fn();
+    vi.stubGlobal("URL", Object.assign(URL, { createObjectURL, revokeObjectURL }));
+    const clicked: string[] = [];
+    const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (
+      this: HTMLAnchorElement,
+    ) {
+      clicked.push(this.download);
+    });
+    const requests = api(
+      () => [reservation()],
+      [
+        on(
+          "GET",
+          "/reservations/r-1.ics",
+          () =>
+            new Response("BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n", {
+              headers: { "Content-Type": "text/calendar; charset=utf-8" },
+            }),
+        ),
+      ],
+    );
+    renderRoute("/reservations");
+
+    const item = await screen.findByRole("listitem", { name: /a100-node-01/ });
+    fireEvent.click(within(item).getByRole("button", { name: "Add to calendar" }));
+
+    await waitFor(() => {
+      expect(clicked).toEqual(["reservation-r-1.ics"]);
+    });
+    const download = requests.find((r) => r.path === "/reservations/r-1.ics");
+    expect(download?.headers.get("Accept")).toBe("text/calendar");
+    expect(download?.headers.get("Authorization")).toBe("Bearer access-token");
+    expect(createObjectURL).toHaveBeenCalledOnce();
+    click.mockRestore();
+  });
+
+  it("explains a failed calendar download on the reservation", async () => {
+    api(
+      () => [reservation()],
+      [on("GET", "/reservations/r-1.ics", () => problem(404, "reservation-not-found"))],
+    );
+    renderRoute("/reservations");
+
+    const item = await screen.findByRole("listitem", { name: /a100-node-01/ });
+    fireEvent.click(within(item).getByRole("button", { name: "Add to calendar" }));
+
+    expect(await within(item).findByRole("alert")).toHaveTextContent(
+      "Could not download the calendar file.",
+    );
   });
 });
