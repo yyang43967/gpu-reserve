@@ -113,18 +113,74 @@ describe("server detail page", () => {
     expect(await screen.findByText("Lab inactive")).toBeInTheDocument();
   });
 
-  it("labels the availability timeline as not ready yet", async () => {
+  it("shows availability, one row per lab day with the slots returned", async () => {
+    const requests = fakeApi(
+      ...signedInAs("student"),
+      healthy,
+      on("GET", `/servers/${SERVER_ID}`, () => Response.json(server)),
+      on("GET", `/servers/${SERVER_ID}/availability`, () =>
+        Response.json({
+          server_id: SERVER_ID,
+          timezone: "America/Los_Angeles",
+          gpu_count: 8,
+          slot_minutes: 30,
+          starts_at: "2030-11-03T07:00:00Z",
+          ends_at: "2030-11-04T08:00:00Z",
+          // The fall-back day in Los Angeles: 25 hours, so 50 half-hour slots.
+          runs: [
+            { starts_at: "2030-11-03T07:00:00Z", ends_at: "2030-11-03T16:00:00Z", free: 8 },
+            { starts_at: "2030-11-03T16:00:00Z", ends_at: "2030-11-03T18:00:00Z", free: 0 },
+            { starts_at: "2030-11-03T18:00:00Z", ends_at: "2030-11-04T08:00:00Z", free: 8 },
+          ],
+        }),
+      ),
+    );
+    renderRoute(`/servers/${SERVER_ID}`);
+
+    const days = await screen.findAllByTestId("timeline-day");
+    expect(days).toHaveLength(1);
+    const [day] = days;
+    if (!day) throw new Error("no day row");
+    expect(within(day).getByText("Sun, Nov 3")).toBeInTheDocument();
+    expect(within(day).getAllByTestId("timeline-slot")).toHaveLength(50);
+    expect(within(day).getByText("08:00–10:00: 0 of 8 free; all free otherwise")).toHaveClass(
+      "sr-only",
+    );
+    const window = requests.find((r) => r.path.endsWith("/availability"))?.query;
+    const from = new Date(window?.get("from") ?? "");
+    const to = new Date(window?.get("to") ?? "");
+    expect(to.getTime() - from.getTime()).toBe(7 * 24 * 60 * 60_000);
+  });
+
+  it("shows an availability error with a retry", async () => {
+    let fail = true;
     fakeApi(
       ...signedInAs("student"),
       healthy,
       on("GET", `/servers/${SERVER_ID}`, () => Response.json(server)),
+      on("GET", `/servers/${SERVER_ID}/availability`, () =>
+        fail
+          ? problem(500, "internal-error", { detail: "Database is down." })
+          : Response.json({
+              server_id: SERVER_ID,
+              timezone: "America/Los_Angeles",
+              gpu_count: 8,
+              slot_minutes: 30,
+              starts_at: "2030-01-12T08:00:00Z",
+              ends_at: "2030-01-13T08:00:00Z",
+              runs: [
+                { starts_at: "2030-01-12T08:00:00Z", ends_at: "2030-01-13T08:00:00Z", free: 8 },
+              ],
+            }),
+      ),
     );
     renderRoute(`/servers/${SERVER_ID}`);
 
-    const heading = await screen.findByRole("heading", { name: "Availability" });
-    const card = heading.closest("[data-slot=card]");
-    if (!(card instanceof HTMLElement)) throw new Error("no availability card");
-    expect(within(card).getByText("Availability timeline coming soon")).toBeInTheDocument();
+    expect(await screen.findByText("Could not load availability")).toBeInTheDocument();
+    fail = false;
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+
+    expect(await screen.findAllByTestId("timeline-slot")).toHaveLength(48);
   });
 
   it("shows a loading state first", async () => {

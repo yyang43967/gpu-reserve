@@ -191,3 +191,10 @@ export function hasHalfHourOffsets(timeZone: string, now: Date = new Date()): bo
     return false;
   }
 }
+
+/** "2030-01-13" from "2030-01-12" and 1. Calendar arithmetic, independent of zones. */
+export function addDaysToKey(key: string, days: number): string {
+  const [year, month, day] = key.split("-").map(Number);
+  const date = new Date(Date.UTC(year ?? 0, (month ?? 1) - 1, (day ?? 1) + days));
+  return date.toISOString().slice(0, 10);
+}
