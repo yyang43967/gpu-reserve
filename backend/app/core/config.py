@@ -18,6 +18,13 @@ class Environment(StrEnum):
     PRODUCTION = "production"
 
 
+class EmailBackend(StrEnum):
+    # Plain SMTP, for Mailpit locally.
+    SMTP = "smtp"
+    # Amazon SES through its API, with the instance role's credentials.
+    SES = "ses"
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
@@ -74,6 +81,17 @@ class Settings(BaseSettings):
     # How long a presigned upload stays usable.
     upload_url_ttl_seconds: int = Field(default=300, gt=0)
 
+    # Outgoing email. Locally, Mailpit accepts SMTP on port 1025.
+    email_backend: EmailBackend = EmailBackend.SMTP
+    email_from: str = "GPU Reserve <no-reply@gpureserve.dev>"
+    # SES only. Unset means the default from the environment or instance metadata.
+    ses_region: str | None = None
+    smtp_host: str = "localhost"
+    smtp_port: int = Field(default=1025, gt=0)
+    smtp_timeout_seconds: float = Field(default=10.0, gt=0)
+    # Links in emails point here.
+    frontend_url: str = "http://localhost:5173"
+
     # Weekly GPU-hour quotas run Monday 00:00 to Monday 00:00 in this one zone, for
     # every lab. It is set on its own, not taken from the lab default, so changing the
     # default for new labs can never move existing quota weeks.
@@ -85,6 +103,7 @@ class Settings(BaseSettings):
         "s3_region",
         "s3_access_key_id",
         "s3_secret_access_key",
+        "ses_region",
         mode="before",
     )
     @classmethod

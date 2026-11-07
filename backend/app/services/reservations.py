@@ -41,6 +41,7 @@ from app.models import (
     CreatedVia,
     Gpu,
     GpuAllocation,
+    NotificationKind,
     Reservation,
     ReservationStatus,
     Server,
@@ -49,7 +50,7 @@ from app.models import (
     UserRole,
 )
 from app.models.reservation import HOLDING_STATUSES, QUOTA_STATUSES
-from app.services import audit, booking_rules, locks
+from app.services import audit, booking_rules, locks, notifications
 from app.services.booking_rules import Booking, Interval
 from app.services.servers import get_server, visibility_conditions
 
@@ -406,6 +407,9 @@ async def finish_reservation(
         entity_id=reservation.id,
         payload=payload | (context or {}),
     )
+    notifications.notify_owner(
+        session, reservation, NotificationKind.CANCELLED, actor_id=actor_id, now=now
+    )
 
 
 async def release_user_reservations(
@@ -575,6 +579,9 @@ async def approve_reservation(
     reservation.decided_by = admin.id
     reservation.decided_at = now
     _record_decision(session, admin, reservation, "reservation.approved")
+    notifications.notify_owner(
+        session, reservation, NotificationKind.APPROVED, actor_id=admin.id, now=now
+    )
     await session.flush()
     return await load_reservation(session, reservation_id)
 
@@ -603,6 +610,9 @@ async def reject_reservation(
         .values(active=False)
     )
     _record_decision(session, admin, reservation, "reservation.rejected", reason=reason)
+    notifications.notify_owner(
+        session, reservation, NotificationKind.REJECTED, actor_id=admin.id, now=now
+    )
     await session.flush()
     return await load_reservation(session, reservation_id)
 
