@@ -298,3 +298,9 @@ class UserHasReservations(DomainError):
     kind = ErrorKind.CONFLICT
     type_slug = "user-has-reservations"
     title = "User has reservations"
+
+
+class InvalidAvailabilityWindow(DomainError):
+    kind = ErrorKind.INVALID
+    type_slug = "invalid-availability-window"
+    title = "Invalid availability window"

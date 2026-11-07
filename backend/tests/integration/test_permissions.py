@@ -132,6 +132,7 @@ MATRIX = [
     RouteCase("POST", "/auth/refresh", Access.REFRESH_COOKIE),
     RouteCase("POST", "/auth/logout", Access.AUTHENTICATED),
     RouteCase("GET", "/me", Access.AUTHENTICATED),
+    RouteCase("GET", "/me/quota", Access.AUTHENTICATED),
     RouteCase("PATCH", "/me", Access.AUTHENTICATED, body=lambda ctx: {"full_name": "Renamed"}),
     RouteCase(
         "PUT",
@@ -173,6 +174,9 @@ MATRIX = [
     RouteCase("DELETE", "/labs/{lab_id}", Access.ADMIN, path_params=_empty_lab),
     RouteCase("GET", "/servers", Access.AUTHENTICATED),
     RouteCase("GET", "/servers/{server_id}", Access.AUTHENTICATED, path_params=_server),
+    RouteCase(
+        "GET", "/servers/{server_id}/availability", Access.AUTHENTICATED, path_params=_server
+    ),
     RouteCase(
         "POST",
         "/servers",

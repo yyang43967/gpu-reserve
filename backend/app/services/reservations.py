@@ -16,7 +16,7 @@ No path takes these locks in the opposite order.
 
 import uuid
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Final
 from zoneinfo import ZoneInfo
 
@@ -28,6 +28,7 @@ from sqlalchemy.orm import contains_eager, selectinload
 from app.core.exceptions import (
     AllocationContention,
     GpuUnavailable,
+    InvalidAvailabilityWindow,
     InvalidReservationState,
     InvalidToken,
     ReservationNotFound,
@@ -50,7 +51,7 @@ from app.models.lab import DEFAULT_LAB_TIMEZONE
 from app.models.reservation import HOLDING_STATUSES, QUOTA_STATUSES
 from app.services import audit, booking_rules, locks
 from app.services.booking_rules import Booking, Interval
-from app.services.servers import visibility_conditions
+from app.services.servers import get_server, visibility_conditions
 
 MAX_ACTIVE_RESERVATIONS: Final = 4
 MAX_ALLOCATION_ATTEMPTS: Final = 3
@@ -605,4 +606,108 @@ def _record_decision(
         entity_type=ENTITY_RESERVATION,
         entity_id=reservation.id,
         payload=payload,
+    )
+
+
+# --- availability and quota status ---
+
+DEFAULT_AVAILABILITY_WINDOW: Final = timedelta(days=7)
+MAX_AVAILABILITY_WINDOW: Final = timedelta(days=14)
+
+
+@dataclass(frozen=True)
+class FreeRun:
+    """Consecutive grid slots with the same number of free GPUs."""
+
+    starts_at: datetime
+    ends_at: datetime
+    free: int
+
+
+@dataclass(frozen=True)
+class Availability:
+    server: Server
+    window: Interval
+    runs: list[FreeRun]
+
+
+async def server_availability(
+    session: AsyncSession,
+    viewer: User,
+    server_id: uuid.UUID,
+    *,
+    starts_at: datetime | None,
+    ends_at: datetime | None,
+    now: datetime,
+) -> Availability:
+    """Free GPUs per 30-minute slot of the UTC grid, merged into runs.
+
+    The window defaults to the next seven days and is widened to whole slots. Pending
+    and approved reservations both hold their GPUs. Nothing about who booked is
+    returned.
+    """
+    start = starts_at or booking_rules.floor_to_grid(now)
+    end = ends_at or start + DEFAULT_AVAILABILITY_WINDOW
+    if end <= start:
+        raise InvalidAvailabilityWindow("`to` must be after `from`.")
+    if end - start > MAX_AVAILABILITY_WINDOW:
+        raise InvalidAvailabilityWindow(
+            f"The window can be at most {MAX_AVAILABILITY_WINDOW.days} days long."
+        )
+    window = Interval(
+        booking_rules.floor_to_grid(start.astimezone(UTC)),
+        booking_rules.ceil_to_grid(end.astimezone(UTC)),
+    )
+    server = await get_server(session, viewer, server_id)
+
+    busy_rows = await session.execute(
+        select(GpuAllocation.gpu_id, GpuAllocation.starts_at, GpuAllocation.ends_at)
+        .join(Gpu, Gpu.id == GpuAllocation.gpu_id)
+        .where(
+            Gpu.server_id == server.id,
+            Gpu.removed_at.is_(None),
+            GpuAllocation.active.is_(True),
+            GpuAllocation.starts_at < window.end,
+            GpuAllocation.ends_at > window.start,
+        )
+    )
+    busy = [Interval(row.starts_at, row.ends_at) for row in busy_rows]
+
+    runs: list[FreeRun] = []
+    slot_start = window.start
+    while slot_start < window.end:
+        slot = Interval(slot_start, slot_start + booking_rules.SLOT)
+        # An active GPU has at most one active allocation per instant, so counting
+        # overlapping allocations counts busy GPUs.
+        free = server.gpu_count - sum(1 for b in busy if b.overlap_minutes(slot) > 0)
+        if runs and runs[-1].free == free:
+            runs[-1] = FreeRun(runs[-1].starts_at, slot.end, free)
+        else:
+            runs.append(FreeRun(slot.start, slot.end, free))
+        slot_start = slot.end
+    return Availability(server=server, window=window, runs=runs)
+
+
+@dataclass(frozen=True)
+class QuotaStatus:
+    week: Interval
+    timezone: str
+    used_minutes: int
+    quota_minutes: int
+
+    @property
+    def remaining_minutes(self) -> int:
+        return max(0, self.quota_minutes - self.used_minutes)
+
+
+async def quota_status(session: AsyncSession, user: User, *, now: datetime) -> QuotaStatus:
+    """The user's GPU time in the current quota week, counted with the same functions
+    the booking check uses."""
+    week = booking_rules.week_containing(now, QUOTA_TIMEZONE)
+    bookings = await _load_quota_bookings(session, user.id, week)
+    return QuotaStatus(
+        week=week,
+        timezone=QUOTA_TIMEZONE.key,
+        used_minutes=booking_rules.used_gpu_minutes(week, bookings),
+        quota_minutes=user.weekly_gpu_hour_quota * booking_rules.MINUTES_PER_HOUR,
     )

@@ -99,3 +99,32 @@ class ReservationReject(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     reason: DecisionReason
+
+
+class FreeRunRead(BaseModel):
+    starts_at: datetime
+    ends_at: datetime
+    free: int
+
+
+class AvailabilityRead(BaseModel):
+    server_id: uuid.UUID
+    # The lab's zone, for display.
+    timezone: str
+    gpu_count: int
+    slot_minutes: int
+    starts_at: datetime
+    ends_at: datetime
+    runs: list[FreeRunRead]
+
+
+class QuotaRead(BaseModel):
+    """GPU-hours in the current quota week. Hours can be fractional (bookings are in
+    half hours), so they are numbers, not integers."""
+
+    week_start: datetime
+    week_end: datetime
+    timezone: str
+    used_hours: float
+    quota_hours: float
+    remaining_hours: float
