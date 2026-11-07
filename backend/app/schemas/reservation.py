@@ -5,7 +5,7 @@ from typing import Annotated, Self
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, StringConstraints
 
 from app.models import CreatedVia, GpuModel, Reservation, ReservationStatus
-from app.models.reservation import PURPOSE_MAX_LENGTH
+from app.models.reservation import DECISION_REASON_MAX_LENGTH, PURPOSE_MAX_LENGTH
 from app.models.server import MAX_GPUS_PER_SERVER
 
 Purpose = Annotated[
@@ -87,3 +87,15 @@ class ReservationRead(BaseModel):
             ),
             gpu_indexes=sorted(allocation.gpu.index for allocation in reservation.allocations),
         )
+
+
+DecisionReason = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, min_length=1, max_length=DECISION_REASON_MAX_LENGTH),
+]
+
+
+class ReservationReject(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reason: DecisionReason

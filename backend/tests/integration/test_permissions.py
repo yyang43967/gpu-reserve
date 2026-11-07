@@ -6,7 +6,7 @@ here, so new routes cannot skip a permission decision.
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Any
 
@@ -16,8 +16,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
 from app.main import create_app
-from app.models import GpuModel, Lab, Server, User, UserRole
-from app.services import labs, servers, users
+from app.models import GpuModel, Lab, Reservation, Server, User, UserRole
+from app.services import labs, reservations, servers, users
 from tests.integration.reservation_helpers import booking_body, next_saturday
 
 pytestmark = pytest.mark.integration
@@ -31,6 +31,8 @@ class Access(StrEnum):
     # Authenticated by the refresh cookie, not an access token.
     REFRESH_COOKIE = "refresh_cookie"
     AUTHENTICATED = "authenticated"
+    # The owner of the record or an admin; anyone else gets 404.
+    OWNER = "owner"
     ADMIN = "admin"
 
 
@@ -43,6 +45,9 @@ class Targets:
     # A lab with no servers, so deleting it succeeds.
     empty_lab: Lab
     server: Server
+    # Upcoming reservations of the student caller: one approved, one pending.
+    reservation: Reservation
+    pending: Reservation
 
 
 @dataclass(frozen=True)
@@ -52,6 +57,8 @@ class Context:
     lab: Lab
     empty_lab: Lab
     server: Server
+    reservation: Reservation
+    pending: Reservation
 
     @classmethod
     def of(cls, caller: User, targets: Targets) -> "Context":
@@ -61,6 +68,8 @@ class Context:
             lab=targets.lab,
             empty_lab=targets.empty_lab,
             server=targets.server,
+            reservation=targets.reservation,
+            pending=targets.pending,
         )
 
 
@@ -95,6 +104,14 @@ def _empty_lab(ctx: Context) -> dict[str, str]:
 
 def _server(ctx: Context) -> dict[str, str]:
     return {"server_id": str(ctx.server.id)}
+
+
+def _reservation(ctx: Context) -> dict[str, str]:
+    return {"reservation_id": str(ctx.reservation.id)}
+
+
+def _pending(ctx: Context) -> dict[str, str]:
+    return {"reservation_id": str(ctx.pending.id)}
 
 
 MATRIX = [
@@ -183,6 +200,19 @@ MATRIX = [
         Access.AUTHENTICATED,
         body=lambda ctx: booking_body(ctx.server.id, next_saturday(datetime.now(UTC))),
     ),
+    RouteCase("GET", "/reservations", Access.AUTHENTICATED),
+    RouteCase("GET", "/reservations/{reservation_id}", Access.OWNER, path_params=_reservation),
+    RouteCase(
+        "POST", "/reservations/{reservation_id}/cancel", Access.OWNER, path_params=_reservation
+    ),
+    RouteCase("POST", "/reservations/{reservation_id}/approve", Access.ADMIN, path_params=_pending),
+    RouteCase(
+        "POST",
+        "/reservations/{reservation_id}/reject",
+        Access.ADMIN,
+        body=lambda ctx: {"reason": "Booked for a class"},
+        path_params=_pending,
+    ),
     # Open to every signed-in user for avatars. Server images are admin-only; that rule
     # lives in the uploads service and is tested in test_uploads_api.
     RouteCase(
@@ -193,10 +223,14 @@ MATRIX = [
     ),
 ]
 
-PROTECTED = [case for case in MATRIX if case.access in {Access.AUTHENTICATED, Access.ADMIN}]
+PROTECTED = [
+    case for case in MATRIX if case.access in {Access.AUTHENTICATED, Access.OWNER, Access.ADMIN}
+]
+OWNER_ONLY = [case for case in MATRIX if case.access is Access.OWNER]
 ADMIN_ONLY = [case for case in MATRIX if case.access is Access.ADMIN]
+# The student caller owns the target reservations.
 CALLABLE_BY_STUDENT = [
-    case for case in MATRIX if case.access in {Access.PUBLIC, Access.AUTHENTICATED}
+    case for case in MATRIX if case.access in {Access.PUBLIC, Access.AUTHENTICATED, Access.OWNER}
 ]
 
 
@@ -269,7 +303,7 @@ async def _lab_named(db: AsyncSession, name: str) -> Lab:
 
 
 @pytest.fixture
-async def targets(db_session: AsyncSession) -> Targets:
+async def targets(db_session: AsyncSession, student: Caller) -> Targets:
     lab = await _lab_named(db_session, "Vision Lab")
     server = await servers.create_server(
         db_session,
@@ -281,13 +315,52 @@ async def targets(db_session: AsyncSession) -> Targets:
         ram_gb=512,
     )
     await db_session.commit()
+    # Reservations live on their own servers, so the server routes above can still
+    # shrink and delete theirs.
+    reservation = await _student_booking(db_session, student.user, lab, "booked-node-01")
+    pending = await _student_booking(
+        db_session, student.user, lab, "h100-node-01", requires_approval=True
+    )
     return Targets(
         # Another account that user-management routes act on.
         user=await _create(db_session, "target@example.edu", UserRole.STUDENT),
         lab=lab,
         empty_lab=await _lab_named(db_session, "Empty Lab"),
         server=server,
+        reservation=reservation,
+        pending=pending,
     )
+
+
+async def _student_booking(
+    db: AsyncSession, user: User, lab: Lab, hostname: str, *, requires_approval: bool = False
+) -> Reservation:
+    server = await servers.create_server(
+        db,
+        lab_id=lab.id,
+        hostname=hostname,
+        gpu_model=GpuModel.A100_80GB,
+        gpu_count=1,
+        cpu_cores=64,
+        ram_gb=512,
+        requires_approval=requires_approval,
+    )
+    now = datetime.now(UTC)
+    start = next_saturday(now)
+    reservation = await reservations.create_reservation(
+        db,
+        user,
+        reservations.NewReservation(
+            server_id=server.id,
+            gpu_count=1,
+            starts_at=start,
+            ends_at=start + timedelta(hours=2),
+            purpose="Training",
+        ),
+        now=now,
+    )
+    await db.commit()
+    return reservation
 
 
 async def call(
@@ -352,6 +425,18 @@ async def test_student_is_forbidden_on_admin_routes(
     response = await call(api_client, case, Context.of(student.user, targets), student.headers)
 
     assert_problem(response, 403, "forbidden")
+
+
+@pytest.mark.parametrize("case", OWNER_ONLY, ids=_ids(OWNER_ONLY))
+async def test_other_students_get_not_found_on_owner_routes(
+    api_client: AsyncClient, db_session: AsyncSession, targets: Targets, case: RouteCase
+) -> None:
+    """Someone else's reservation looks missing, not forbidden."""
+    stranger = await _caller(api_client, db_session, "stranger@example.edu", UserRole.STUDENT)
+
+    response = await call(api_client, case, Context.of(stranger.user, targets), stranger.headers)
+
+    assert_problem(response, 404, "reservation-not-found")
 
 
 @pytest.mark.parametrize("case", CALLABLE_BY_STUDENT, ids=_ids(CALLABLE_BY_STUDENT))

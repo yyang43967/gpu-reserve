@@ -5,6 +5,7 @@ shows the race actually happens. The controls hold every participant at the race
 window with a barrier, so they fail deterministically rather than by chance.
 """
 
+import asyncio
 import uuid
 from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime, timedelta
@@ -25,15 +26,22 @@ from app.core.exceptions import (
     AllocationContention,
     GpusInUse,
     GpuUnavailable,
+    InvalidReservationState,
     InvalidToken,
     QuotaExceeded,
 )
-from app.models import GpuAllocation, Reservation, Server, User, UserRole
+from app.models import GpuAllocation, Reservation, ReservationStatus, Server, User, UserRole
 from app.models.reservation import ALLOCATION_OVERLAP_CONSTRAINT
 from app.services import reservations, servers, users
 from app.services.booking_rules import Interval
 from app.services.reservations import NewReservation, create_reservation
-from tests.integration.concurrency import Gate, PairOutcome, race_pair, run_together
+from tests.integration.concurrency import (
+    LOCK_WAIT_TIMEOUT,
+    Gate,
+    PairOutcome,
+    race_pair,
+    run_together,
+)
 from tests.integration.db_utils import truncate_all
 from tests.integration.reservation_helpers import add_lab, add_server, add_user
 
@@ -484,3 +492,173 @@ async def test_booking_waits_for_a_deactivation_and_is_refused(
 
     assert outcome.blocked
     assert isinstance(outcome.error, InvalidToken)
+
+
+# --- 5. concurrent transitions on one reservation ---
+
+
+async def _pending_reservation(
+    factory: async_sessionmaker[AsyncSession],
+) -> tuple[Reservation, User, User]:
+    async with factory() as db:
+        lab = await add_lab(db)
+        restricted = await add_server(db, lab, "h100-node-01", requires_approval=True)
+        student = await add_user(db, "student@example.edu")
+        admin = await add_user(db, "admin@example.edu", role=UserRole.ADMIN)
+        pending = await create_reservation(db, student, _one_gpu(restricted), now=NOW)
+        await db.commit()
+    return pending, student, admin
+
+
+async def _final_state(
+    factory: async_sessionmaker[AsyncSession], reservation_id: uuid.UUID
+) -> tuple[ReservationStatus, list[bool]]:
+    async with factory() as db:
+        status = await db.scalar(select(Reservation.status).where(Reservation.id == reservation_id))
+        active = list(
+            await db.scalars(
+                select(GpuAllocation.active).where(GpuAllocation.reservation_id == reservation_id)
+            )
+        )
+    assert status is not None
+    return status, active
+
+
+def _decide(admin: User, reservation_id: uuid.UUID) -> Callable[[AsyncSession, int], Any]:
+    async def decide(session: AsyncSession, i: int) -> Reservation:
+        if i == 0:
+            return await reservations.approve_reservation(session, admin, reservation_id, now=NOW)
+        return await reservations.reject_reservation(
+            session, admin, reservation_id, reason="Class booking", now=NOW
+        )
+
+    return decide
+
+
+async def test_concurrent_approve_and_reject_one_wins(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    pending, _, admin = await _pending_reservation(factory)
+
+    results = await run_together(factory, 2, _decide(admin, pending.id))
+
+    successes, failures = _outcomes(results)
+    assert len(successes) == 1
+    assert len(failures) == 1 and isinstance(failures[0], InvalidReservationState)
+    status, active = await _final_state(factory, pending.id)
+    assert active == [status is ReservationStatus.APPROVED]
+
+
+async def test_control_without_the_row_lock_both_decisions_succeed(
+    factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Negative control: without FOR UPDATE, both transactions read `pending` and both
+    write their decision. The last write wins, and an approval can end up with the
+    released allocations of the rejection."""
+    pending, _, admin = await _pending_reservation(factory)
+    gate = Gate(2)
+
+    async def read_then_wait(
+        session: AsyncSession, viewer: User, reservation_id: uuid.UUID
+    ) -> Reservation:
+        reservation = await session.scalar(
+            select(Reservation)
+            .where(Reservation.id == reservation_id)
+            .execution_options(populate_existing=True)
+        )
+        assert reservation is not None
+        await gate.wait()
+        return reservation
+
+    monkeypatch.setattr(reservations, "_lock_reservation", read_then_wait)
+
+    results = await run_together(factory, 2, _decide(admin, pending.id))
+
+    successes, _ = _outcomes(results)
+    assert len(successes) == 2
+
+
+async def test_concurrent_approve_and_cancel_stay_consistent(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Approve then cancel both succeed (cancelled); cancel then approve refuses the
+    approval. Either way the allocations match the final status."""
+    pending, student, admin = await _pending_reservation(factory)
+
+    async def act(session: AsyncSession, i: int) -> Reservation:
+        if i == 0:
+            return await reservations.approve_reservation(session, admin, pending.id, now=NOW)
+        return await reservations.cancel_reservation(session, student, pending.id, now=NOW)
+
+    results = await run_together(factory, 2, act)
+
+    _, failures = _outcomes(results)
+    assert all(isinstance(f, InvalidReservationState) for f in failures)
+    status, active = await _final_state(factory, pending.id)
+    assert status is ReservationStatus.CANCELLED
+    assert active == [False]
+
+
+async def test_approve_waits_for_a_deactivation_and_is_refused(
+    factory: async_sessionmaker[AsyncSession], race_engine: AsyncEngine
+) -> None:
+    """Deactivation locks the user, then the user's reservation rows. An approval of one
+    of them waits for the row lock and then sees it cancelled."""
+    pending, student, admin = await _pending_reservation(factory)
+
+    async with factory() as admin_session, factory() as approve_session:
+        await users.update_user(admin_session, admin, student.id, is_active=False, now=NOW)
+        outcome = await race_pair(
+            race_engine,
+            admin_session,
+            approve_session,
+            lambda: reservations.approve_reservation(approve_session, admin, pending.id, now=NOW),
+        )
+
+    assert outcome.blocked
+    assert isinstance(outcome.error, InvalidReservationState)
+    assert await _final_state(factory, pending.id) == (ReservationStatus.CANCELLED, [False])
+
+
+async def test_control_approve_and_cancel_without_the_row_lock_lose_an_update(
+    factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Negative control for approve vs cancel. Without FOR UPDATE, the approval reads
+    `pending` and is held there while the cancel runs and commits. The approval then
+    writes from its stale read: both succeed, the cancel is lost, and the reservation
+    is `approved` while its allocations were released by the cancel."""
+    pending, student, admin = await _pending_reservation(factory)
+    approval_has_read = asyncio.Event()
+    cancel_committed = asyncio.Event()
+
+    async def read_without_lock(
+        session: AsyncSession, viewer: User, reservation_id: uuid.UUID
+    ) -> Reservation:
+        reservation = await session.scalar(
+            select(Reservation)
+            .where(Reservation.id == reservation_id)
+            .execution_options(populate_existing=True)
+        )
+        assert reservation is not None
+        if viewer.id == admin.id:
+            approval_has_read.set()
+            await asyncio.wait_for(cancel_committed.wait(), LOCK_WAIT_TIMEOUT)
+        return reservation
+
+    monkeypatch.setattr(reservations, "_lock_reservation", read_without_lock)
+
+    async def approve() -> Reservation:
+        async with factory() as session:
+            approved = await reservations.approve_reservation(session, admin, pending.id, now=NOW)
+            await session.commit()
+            return approved
+
+    approval = asyncio.create_task(approve())
+    await asyncio.wait_for(approval_has_read.wait(), LOCK_WAIT_TIMEOUT)
+    async with factory() as session:
+        await reservations.cancel_reservation(session, student, pending.id, now=NOW)
+        await session.commit()
+    cancel_committed.set()
+    await asyncio.wait_for(approval, LOCK_WAIT_TIMEOUT)
+
+    assert await _final_state(factory, pending.id) == (ReservationStatus.APPROVED, [False])

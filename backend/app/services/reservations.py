@@ -44,6 +44,7 @@ from app.models import (
     Server,
     ServerStatus,
     User,
+    UserRole,
 )
 from app.models.lab import DEFAULT_LAB_TIMEZONE
 from app.models.reservation import HOLDING_STATUSES, QUOTA_STATUSES
@@ -425,3 +426,183 @@ async def release_user_reservations(
         changed += 1
     await session.flush()
     return changed
+
+
+# --- reading ---
+
+
+def _can_see(viewer: User, reservation_user_id: uuid.UUID) -> bool:
+    """Owners and admins. This does not depend on whether the viewer can still see the
+    server: a student keeps their own reservations on a server that has since been
+    retired or whose lab was deactivated."""
+    return viewer.role is UserRole.ADMIN or viewer.id == reservation_user_id
+
+
+async def get_reservation(
+    session: AsyncSession, viewer: User, reservation_id: uuid.UUID
+) -> Reservation:
+    reservation = await load_reservation(session, reservation_id)
+    if not _can_see(viewer, reservation.user_id):
+        raise ReservationNotFound(f"No reservation with id {reservation_id}.")
+    return reservation
+
+
+@dataclass(frozen=True)
+class ReservationFilters:
+    status: ReservationStatus | None = None
+    server_id: uuid.UUID | None = None
+    # Admins only; a student's list is always their own.
+    user_id: uuid.UUID | None = None
+    # Reservations overlapping [overlaps_from, overlaps_to).
+    overlaps_from: datetime | None = None
+    overlaps_to: datetime | None = None
+
+
+@dataclass(frozen=True)
+class ReservationListing:
+    items: list[Reservation]
+    total: int
+
+
+async def list_reservations(
+    session: AsyncSession,
+    viewer: User,
+    filters: ReservationFilters,
+    *,
+    offset: int,
+    limit: int,
+) -> ReservationListing:
+    """Newest start first. Related rows are loaded with one query per relationship,
+    so a page costs the same number of statements whatever its size."""
+    conditions = []
+    if viewer.role is not UserRole.ADMIN:
+        conditions.append(Reservation.user_id == viewer.id)
+    elif filters.user_id is not None:
+        conditions.append(Reservation.user_id == filters.user_id)
+    if filters.status is not None:
+        conditions.append(Reservation.status == filters.status)
+    if filters.server_id is not None:
+        conditions.append(Reservation.server_id == filters.server_id)
+    if filters.overlaps_to is not None:
+        conditions.append(Reservation.starts_at < filters.overlaps_to)
+    if filters.overlaps_from is not None:
+        conditions.append(Reservation.ends_at > filters.overlaps_from)
+
+    total = await session.scalar(select(func.count()).select_from(Reservation).where(*conditions))
+    rows = await session.scalars(
+        select(Reservation)
+        .where(*conditions)
+        .options(
+            selectinload(Reservation.server).selectinload(Server.lab),
+            selectinload(Reservation.user),
+            selectinload(Reservation.allocations).selectinload(GpuAllocation.gpu),
+        )
+        .order_by(Reservation.starts_at.desc(), Reservation.id)
+        .offset(offset)
+        .limit(limit)
+    )
+    return ReservationListing(items=list(rows), total=total or 0)
+
+
+# --- transitions ---
+
+
+async def _lock_reservation(
+    session: AsyncSession, viewer: User, reservation_id: uuid.UUID
+) -> Reservation:
+    """The reservation with its row locked FOR UPDATE until the transaction ends.
+
+    Every transition takes this lock and nothing else, so two transitions on one
+    reservation run one after the other and the second sees the first's result. Paths
+    that also need the user's advisory lock (deactivation) take it before this one.
+    """
+    reservation = await session.scalar(
+        select(Reservation)
+        .where(Reservation.id == reservation_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if reservation is None or not _can_see(viewer, reservation.user_id):
+        raise ReservationNotFound(f"No reservation with id {reservation_id}.")
+    return reservation
+
+
+async def cancel_reservation(
+    session: AsyncSession, actor: User, reservation_id: uuid.UUID, *, now: datetime
+) -> Reservation:
+    """Cancel, or end early if running. Owners and admins; see finish_reservation."""
+    reservation = await _lock_reservation(session, actor, reservation_id)
+    await finish_reservation(session, reservation, now=now, actor_id=actor.id)
+    await session.flush()
+    return await load_reservation(session, reservation_id)
+
+
+async def approve_reservation(
+    session: AsyncSession, admin: User, reservation_id: uuid.UUID, *, now: datetime
+) -> Reservation:
+    """Approve a pending reservation that has not started. Its GPUs are already held."""
+    reservation = await _lock_reservation(session, admin, reservation_id)
+    if reservation.status is not ReservationStatus.PENDING:
+        raise InvalidReservationState(
+            f"Only pending reservations can be approved; this one is {reservation.status.value}."
+        )
+    if reservation.starts_at <= now:
+        raise InvalidReservationState("This reservation has already started.")
+    reservation.status = ReservationStatus.APPROVED
+    reservation.decided_by = admin.id
+    reservation.decided_at = now
+    _record_decision(session, admin, reservation, "reservation.approved")
+    await session.flush()
+    return await load_reservation(session, reservation_id)
+
+
+async def reject_reservation(
+    session: AsyncSession,
+    admin: User,
+    reservation_id: uuid.UUID,
+    *,
+    reason: str,
+    now: datetime,
+) -> Reservation:
+    """Reject a pending reservation and release its GPUs."""
+    reservation = await _lock_reservation(session, admin, reservation_id)
+    if reservation.status is not ReservationStatus.PENDING:
+        raise InvalidReservationState(
+            f"Only pending reservations can be rejected; this one is {reservation.status.value}."
+        )
+    reservation.status = ReservationStatus.REJECTED
+    reservation.decided_by = admin.id
+    reservation.decided_at = now
+    reservation.decision_reason = reason
+    await session.execute(
+        update(GpuAllocation)
+        .where(GpuAllocation.reservation_id == reservation.id)
+        .values(active=False)
+    )
+    _record_decision(session, admin, reservation, "reservation.rejected", reason=reason)
+    await session.flush()
+    return await load_reservation(session, reservation_id)
+
+
+def _record_decision(
+    session: AsyncSession,
+    admin: User,
+    reservation: Reservation,
+    action: str,
+    *,
+    reason: str | None = None,
+) -> None:
+    payload = {
+        "from_status": ReservationStatus.PENDING.value,
+        "to_status": reservation.status.value,
+    }
+    if reason is not None:
+        payload["reason"] = reason
+    audit.record(
+        session,
+        actor_id=admin.id,
+        action=action,
+        entity_type=ENTITY_RESERVATION,
+        entity_id=reservation.id,
+        payload=payload,
+    )
