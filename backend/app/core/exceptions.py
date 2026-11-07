@@ -240,3 +240,37 @@ class QuotaExceeded(DomainError):
     kind = ErrorKind.CONFLICT
     type_slug = "quota-exceeded"
     title = "Weekly quota exceeded"
+
+
+class ServerUnavailable(DomainError):
+    """The server is in maintenance or retired, or its lab is inactive."""
+
+    kind = ErrorKind.CONFLICT
+    type_slug = "server-unavailable"
+    title = "Server not available for booking"
+
+
+class TooManyReservations(DomainError):
+    kind = ErrorKind.CONFLICT
+    type_slug = "too-many-reservations"
+    title = "Too many active reservations"
+
+
+class GpuUnavailable(DomainError):
+    kind = ErrorKind.CONFLICT
+    type_slug = "gpu-unavailable"
+    title = "GPUs unavailable"
+
+
+class AllocationContention(DomainError):
+    """Other bookings kept taking the chosen GPUs; the client may try again."""
+
+    kind = ErrorKind.CONFLICT
+    type_slug = "allocation-contention"
+    title = "GPUs are in high demand"
+
+
+class ReservationNotFound(DomainError):
+    kind = ErrorKind.NOT_FOUND
+    type_slug = "reservation-not-found"
+    title = "Reservation not found"

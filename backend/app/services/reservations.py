@@ -1,0 +1,320 @@
+"""Reservations: creating them with GPU allocation, quota, and every booking rule.
+
+Concurrency model for creating a reservation, in lock order:
+1. A transaction-scoped advisory lock on the user serializes that user's bookings, so
+   the active-reservation count and the weekly quota are checked against a stable
+   picture of their own reservations. Admin quota changes take the same lock.
+2. FOR SHARE on the server row. Changes to a server (gpu_count, status, limits) and
+   deletes take FOR UPDATE on the same row, so a booking always sees one consistent
+   version of the server and its active GPUs. Bookings on the same server share the
+   lock and do not block each other.
+3. The exclusion constraint on gpu_allocations decides between bookings that picked the
+   same GPU at the same time. The loser rolls back to a savepoint and tries again with
+   fresh availability.
+No path takes these locks in the opposite order.
+"""
+
+import uuid
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Final
+from zoneinfo import ZoneInfo
+
+from sqlalchemy import exists, func, select
+from sqlalchemy.exc import DBAPIError
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import contains_eager, selectinload
+
+from app.core.exceptions import (
+    AllocationContention,
+    GpuUnavailable,
+    ReservationNotFound,
+    ServerNotFound,
+    ServerUnavailable,
+    TooManyReservations,
+)
+from app.models import (
+    CreatedVia,
+    Gpu,
+    GpuAllocation,
+    Reservation,
+    ReservationStatus,
+    Server,
+    ServerStatus,
+    User,
+)
+from app.models.lab import DEFAULT_LAB_TIMEZONE
+from app.models.reservation import HOLDING_STATUSES, QUOTA_STATUSES
+from app.services import audit, booking_rules, locks
+from app.services.booking_rules import Booking, Interval
+from app.services.servers import visibility_conditions
+
+MAX_ACTIVE_RESERVATIONS: Final = 4
+MAX_ALLOCATION_ATTEMPTS: Final = 3
+# Weekly quotas are counted in one fixed zone, whichever lab a booking is in.
+QUOTA_TIMEZONE: Final = ZoneInfo(DEFAULT_LAB_TIMEZONE)
+
+# exclusion_violation: another transaction took one of the chosen GPUs.
+EXCLUSION_VIOLATION: Final = "23P01"
+# deadlock_detected: not expected, because allocations are inserted in GPU order (see
+# _insert_allocations), but retrying is the right response if it ever happens.
+DEADLOCK_DETECTED: Final = "40P01"
+RETRYABLE_SQLSTATES: Final = frozenset({EXCLUSION_VIOLATION, DEADLOCK_DETECTED})
+
+ENTITY_RESERVATION: Final = "reservation"
+
+
+def sqlstate(exc: DBAPIError) -> str | None:
+    """The Postgres error code of a database error."""
+    code = getattr(exc.orig, "sqlstate", None)
+    return code if isinstance(code, str) else None
+
+
+# --- loading ---
+
+
+async def load_reservation(session: AsyncSession, reservation_id: uuid.UUID) -> Reservation:
+    """A reservation with its server, lab, user, and allocated GPUs."""
+    reservation = await session.scalar(
+        select(Reservation)
+        .where(Reservation.id == reservation_id)
+        .options(
+            selectinload(Reservation.server).selectinload(Server.lab),
+            selectinload(Reservation.user),
+            selectinload(Reservation.allocations).selectinload(GpuAllocation.gpu),
+        )
+        .execution_options(populate_existing=True)
+    )
+    if reservation is None:
+        raise ReservationNotFound(f"No reservation with id {reservation_id}.")
+    return reservation
+
+
+# --- locks and reads used by create_reservation ---
+
+
+async def _lock_user_bookings(session: AsyncSession, user_id: uuid.UUID) -> None:
+    await locks.lock_user_bookings(session, user_id)
+
+
+async def _current_quota(session: AsyncSession, user_id: uuid.UUID) -> int:
+    """The quota as of now, read after the user lock. The caller's User object was
+    loaded before the lock, and an admin may have changed the quota since."""
+    quota = await session.scalar(select(User.weekly_gpu_hour_quota).where(User.id == user_id))
+    return quota or 0
+
+
+async def _lock_server_shared(session: AsyncSession, viewer: User, server_id: uuid.UUID) -> Server:
+    """The server and its lab, with the server row locked FOR SHARE.
+
+    Servers the viewer cannot see look missing, as on the browse endpoints.
+    """
+    server = await session.scalar(
+        select(Server)
+        .join(Server.lab)
+        .where(Server.id == server_id, *visibility_conditions(viewer))
+        .options(contains_eager(Server.lab))
+        .with_for_update(read=True, of=Server)
+        .execution_options(populate_existing=True)
+    )
+    if server is None:
+        raise ServerNotFound(f"No server with id {server_id}.")
+    return server
+
+
+async def _count_active_reservations(
+    session: AsyncSession, user_id: uuid.UUID, now: datetime
+) -> int:
+    count = await session.scalar(
+        select(func.count())
+        .select_from(Reservation)
+        .where(
+            Reservation.user_id == user_id,
+            Reservation.status.in_(HOLDING_STATUSES),
+            Reservation.ends_at > now,
+        )
+    )
+    return count or 0
+
+
+async def _load_quota_bookings(
+    session: AsyncSession, user_id: uuid.UUID, span: Interval
+) -> list[Booking]:
+    """The user's reservations that count toward the quota and overlap `span`."""
+    rows = await session.execute(
+        select(Reservation.starts_at, Reservation.ends_at, Reservation.gpu_count).where(
+            Reservation.user_id == user_id,
+            Reservation.status.in_(QUOTA_STATUSES),
+            Reservation.starts_at < span.end,
+            Reservation.ends_at > span.start,
+        )
+    )
+    return [Booking(Interval(row.starts_at, row.ends_at), row.gpu_count) for row in rows]
+
+
+async def _select_free_gpus(
+    session: AsyncSession, server_id: uuid.UUID, interval: Interval
+) -> list[Gpu]:
+    """Active GPUs of the server with no active allocation overlapping `interval`,
+    lowest number first."""
+    busy = (
+        select(GpuAllocation.id)
+        .where(
+            GpuAllocation.gpu_id == Gpu.id,
+            GpuAllocation.active.is_(True),
+            GpuAllocation.starts_at < interval.end,
+            GpuAllocation.ends_at > interval.start,
+        )
+        .correlate(Gpu)
+    )
+    rows = await session.scalars(
+        select(Gpu)
+        .where(Gpu.server_id == server_id, Gpu.removed_at.is_(None), ~exists(busy))
+        .order_by(Gpu.index)
+    )
+    return list(rows)
+
+
+def _insert_allocations(
+    session: AsyncSession, reservation: Reservation, gpus: list[Gpu], interval: Interval
+) -> None:
+    """Add one active allocation per GPU, in ascending GPU number.
+
+    The order matters. An insert that conflicts with an uncommitted allocation waits
+    for that transaction. If every transaction inserts in the same order, a transaction
+    can only wait for one that is already past that GPU, so waits can never form a
+    cycle. The unit of work keeps the order in which objects were added.
+    """
+    for gpu in sorted(gpus, key=lambda g: g.index):
+        session.add(
+            GpuAllocation(
+                reservation_id=reservation.id,
+                gpu_id=gpu.id,
+                starts_at=interval.start,
+                ends_at=interval.end,
+                active=True,
+            )
+        )
+
+
+def _gpu_unavailable(hostname: str, free: int, wanted: int) -> GpuUnavailable:
+    verb = "is" if free == 1 else "are"
+    return GpuUnavailable(
+        f"Only {free} of {wanted} requested GPUs {verb} free on {hostname} for that time."
+    )
+
+
+# --- create ---
+
+
+@dataclass(frozen=True)
+class NewReservation:
+    server_id: uuid.UUID
+    gpu_count: int
+    starts_at: datetime
+    ends_at: datetime
+    purpose: str
+    created_via: CreatedVia = CreatedVia.WEB
+
+
+async def create_reservation(
+    session: AsyncSession, actor: User, request: NewReservation, *, now: datetime
+) -> Reservation:
+    """Book `gpu_count` GPUs on a server for [starts_at, ends_at).
+
+    Raises a DomainError for any rule the request breaks. The caller commits.
+    """
+    # Only the shape of the request is checked before taking locks. Every rule that
+    # reads server or lab data runs after the server lock, so it sees the version of
+    # the server that the allocation is made against.
+    interval = booking_rules.normalize_range(request.starts_at, request.ends_at)
+    booking = Booking(interval, request.gpu_count)
+
+    await _lock_user_bookings(session, actor.id)
+    server = await _lock_server_shared(session, actor, request.server_id)
+    zone = ZoneInfo(server.lab.timezone)
+
+    booking_rules.check_times(interval, now=now, max_booking_hours=server.max_booking_hours)
+    booking_rules.check_gpu_count(
+        request.gpu_count, available=server.gpu_count, hostname=server.hostname
+    )
+    booking_rules.check_peak_hours(booking, zone)
+    if server.status is not ServerStatus.AVAILABLE or not server.lab.is_active:
+        raise ServerUnavailable(f"{server.hostname} is not open for booking right now.")
+
+    if await _count_active_reservations(session, actor.id, now) >= MAX_ACTIVE_RESERVATIONS:
+        raise TooManyReservations(
+            f"You can hold at most {MAX_ACTIVE_RESERVATIONS} upcoming or running reservations."
+        )
+    weeks = booking_rules.weeks_overlapping(interval, QUOTA_TIMEZONE)
+    existing = await _load_quota_bookings(
+        session, actor.id, Interval(weeks[0].start, weeks[-1].end)
+    )
+    booking_rules.check_quota(
+        booking,
+        existing,
+        quota_hours=await _current_quota(session, actor.id),
+        zone=QUOTA_TIMEZONE,
+    )
+
+    status = ReservationStatus.PENDING if server.requires_approval else ReservationStatus.APPROVED
+    reservation_id = await _allocate(session, actor, server, request, interval, status=status)
+    audit.record(
+        session,
+        actor_id=actor.id,
+        action="reservation.created",
+        entity_type=ENTITY_RESERVATION,
+        entity_id=reservation_id,
+        payload={
+            "server_id": str(server.id),
+            "gpu_count": request.gpu_count,
+            "starts_at": interval.start.isoformat(),
+            "ends_at": interval.end.isoformat(),
+            "status": status.value,
+        },
+    )
+    await session.flush()
+    return await load_reservation(session, reservation_id)
+
+
+async def _allocate(
+    session: AsyncSession,
+    actor: User,
+    server: Server,
+    request: NewReservation,
+    interval: Interval,
+    *,
+    status: ReservationStatus,
+) -> uuid.UUID:
+    """Insert the reservation and its allocations, retrying when another booking takes
+    a chosen GPU first. Returns the new reservation's id."""
+    for _attempt in range(MAX_ALLOCATION_ATTEMPTS):
+        try:
+            async with session.begin_nested():
+                free = await _select_free_gpus(session, server.id, interval)
+                if len(free) < request.gpu_count:
+                    raise _gpu_unavailable(server.hostname, len(free), request.gpu_count)
+                # New objects on every attempt: anything added in a rolled-back
+                # savepoint is discarded with it.
+                reservation = Reservation(
+                    user_id=actor.id,
+                    server_id=server.id,
+                    gpu_count=request.gpu_count,
+                    starts_at=interval.start,
+                    ends_at=interval.end,
+                    status=status,
+                    purpose=request.purpose,
+                    created_via=request.created_via,
+                )
+                session.add(reservation)
+                await session.flush()
+                _insert_allocations(session, reservation, free[: request.gpu_count], interval)
+                await session.flush()
+                return reservation.id
+        except DBAPIError as exc:
+            # Rolled back to the savepoint; the user and server locks are still held.
+            if sqlstate(exc) not in RETRYABLE_SQLSTATES:
+                raise
+    raise AllocationContention(
+        f"The GPUs on {server.hostname} were taken while booking. Please try again."
+    )

@@ -90,7 +90,7 @@ class ServerListing:
     total: int
 
 
-def _visibility(viewer: User) -> list[ColumnElement[bool]]:
+def visibility_conditions(viewer: User) -> list[ColumnElement[bool]]:
     """Students see servers that are not retired, in active labs. Admins see all."""
     if can_see_inactive(viewer):
         return []
@@ -106,7 +106,7 @@ async def list_servers(
     limit: int,
 ) -> ServerListing:
     """Servers the viewer may see, ordered by lab name and hostname."""
-    conditions = _visibility(viewer)
+    conditions = visibility_conditions(viewer)
     if filters.lab_id is not None:
         conditions.append(Server.lab_id == filters.lab_id)
     if filters.gpu_model is not None:
@@ -134,7 +134,7 @@ async def get_server(session: AsyncSession, viewer: User, server_id: uuid.UUID) 
     server = await session.scalar(
         select(Server)
         .join(Server.lab)
-        .where(Server.id == server_id, *_visibility(viewer))
+        .where(Server.id == server_id, *visibility_conditions(viewer))
         .options(contains_eager(Server.lab))
     )
     if server is None:

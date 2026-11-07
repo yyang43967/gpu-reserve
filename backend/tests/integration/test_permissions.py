@@ -6,6 +6,7 @@ here, so new routes cannot skip a permission decision.
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
 
@@ -17,6 +18,7 @@ from app.core.config import Settings
 from app.main import create_app
 from app.models import GpuModel, Lab, Server, User, UserRole
 from app.services import labs, servers, users
+from tests.integration.reservation_helpers import booking_body, next_saturday
 
 pytestmark = pytest.mark.integration
 
@@ -175,6 +177,12 @@ MATRIX = [
         path_params=_server,
     ),
     RouteCase("DELETE", "/servers/{server_id}", Access.ADMIN, path_params=_server),
+    RouteCase(
+        "POST",
+        "/reservations",
+        Access.AUTHENTICATED,
+        body=lambda ctx: booking_body(ctx.server.id, next_saturday(datetime.now(UTC))),
+    ),
     # Open to every signed-in user for avatars. Server images are admin-only; that rule
     # lives in the uploads service and is tested in test_uploads_api.
     RouteCase(

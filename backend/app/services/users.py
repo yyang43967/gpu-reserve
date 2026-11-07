@@ -13,7 +13,7 @@ from app.core.exceptions import (
 )
 from app.models import User, UserRole
 from app.models.user import DEFAULT_WEEKLY_GPU_HOUR_QUOTA
-from app.services import passwords, sessions
+from app.services import locks, passwords, sessions
 from app.services.storage import ObjectStorage
 from app.services.uploads import UploadPurpose, verify_upload
 
@@ -177,7 +177,9 @@ async def update_user(
         user.role = role
     if is_active is not None:
         user.is_active = is_active
-    if weekly_gpu_hour_quota is not None:
+    if weekly_gpu_hour_quota is not None and weekly_gpu_hour_quota != user.weekly_gpu_hour_quota:
+        # Wait for the user's in-flight bookings, which check against the old quota.
+        await locks.lock_user_bookings(session, user.id)
         user.weekly_gpu_hour_quota = weekly_gpu_hour_quota
     if role_changes or deactivates:
         await sessions.revoke_all_sessions(session, user.id)
