@@ -245,6 +245,7 @@ Each entry records the context, the decision, and why. Newest phases at the bott
   - `servers.gpu_count` always equals the number of active rows. Tests check this after every path.
 - **Concurrency:** Updating or deleting a server first takes `SELECT … FOR UPDATE` on the server row. Two concurrent `gpu_count` changes are applied one after the other, each seeing the other's result. A test sends twelve concurrent changes and checks the invariant; with the lock removed, it fails.
 - **Allocations (Phase 4):** Reducing `gpu_count` must be refused when the GPUs being removed have future active allocations, and deleting a server when it has future active reservations. Allocations do not exist yet, so for now every reduction and deletion is allowed. Both checks have a single home, `_ensure_gpus_removable` and `_ensure_server_deletable`, which are called on every path and currently do nothing.
+  - **Outcome:** filled in during Phase 4. See "Reducing, retiring, and deleting servers with reservations".
 - **Phase 4 locking note:** With hard deletes, the foreign key from allocations to GPUs would have serialized an allocation against a concurrent removal, since an FK check takes a `KEY SHARE` lock that conflicts with `DELETE`. Soft removal is an `UPDATE` of a non-key column, which does not conflict with `KEY SHARE`. So allocation has to lock the server row `FOR SHARE` (which conflicts with the `FOR UPDATE` taken here) and select only GPUs with `removed_at IS NULL`.
 
 ### Who sees which labs and servers
@@ -279,3 +280,181 @@ Each entry records the context, the decision, and why. Newest phases at the bott
 ### Known gaps for Phase 5
 - **Orphaned uploads:** Uploads that are never saved on a record, and objects whose delete failed, stay in the bucket. Options: an S3 lifecycle rule on a pending prefix, with keys moved on save, or an ARQ job that lists objects and removes those no record refers to and that are older than the upload URL lifetime.
 - **Presign rate limiting:** `POST /uploads/presign` has no rate limit. Any signed-in user can request many upload URLs and fill the bucket within the per-file limit. The fix is a per-user fixed-window counter in Redis, like the login limits, plus a cap on stored bytes per user if abuse shows up.
+
+## Phase 4 — Reservations
+
+### Tables
+- **Context:** A reservation books `gpu_count` GPUs on one server for a time range. The database has to be the final authority on double-booking, not application code.
+- **Decision:**
+  - `reservations` holds the request: user, server, GPU count, `[starts_at, ends_at)`, status, purpose, the decision fields, and `created_via`.
+  - `gpu_allocations` holds one row per GPU held, with its own copy of the time range and an `active` flag.
+  - `active` is true only while the reservation is `pending` or `approved`. Every status change clears it in the same transaction.
+  - An exclusion constraint forbids overlapping active allocations of the same GPU:
+    ```sql
+    EXCLUDE USING gist (gpu_id WITH =, tstzrange(starts_at, ends_at, '[)') WITH &&) WHERE (active)
+    ```
+  - `active` is `NOT NULL` with a default of true. `WHERE (active)` skips NULL rows, so a nullable flag would let a row escape the constraint.
+  - Ranges are half-open, so one booking can start exactly when another ends.
+- **Foreign keys:**
+  - `reservations.user_id` and `reservations.server_id` are `RESTRICT`. Users and servers with booking history are deactivated or retired, never deleted.
+  - `gpu_allocations.gpu_id` is `RESTRICT`. GPU rows are soft-removed in any case.
+  - `decided_by` is `SET NULL`, so deleting an admin who decided some reservations does not fail. The audit log keeps the actor's id without a foreign key.
+- **The GPU number is not copied onto allocations.** The read model joins `gpus` for it. A copy would have nothing keeping it equal to `gpus.index`, and the join is cheap.
+- **Migration check:** the migration drift check does not compare exclusion constraints. A test asserts the exact `pg_get_constraintdef` of the migrated constraint instead.
+
+### GPU allocation and double-booking prevention
+- **Options considered:**
+  1. SERIALIZABLE isolation. Correct, but any serialization failure needs a retry of the whole request. Unrelated bookings on the same pages can also abort each other, and the guarantee lives in the isolation level rather than in a visible rule.
+  2. `SELECT … FOR UPDATE` on the free GPU rows, optionally with `SKIP LOCKED`. This serializes bookings per GPU without retries. But a lock on a GPU row says nothing about time: two bookings for different, non-overlapping times on the same GPU would wait for each other, and correctness would depend on every writer remembering to lock.
+  3. A per-server advisory lock around allocation. Simple and retry-free, but every booking on a server waits for every other, even for different GPUs or times.
+  4. The exclusion constraint, with optimistic retry (chosen).
+- **Decision:**
+  - In one transaction, select the server's active GPUs with no overlapping active allocation, ordered by number.
+  - Take the lowest `k` and insert the reservation and `k` allocations.
+  - If the constraint fires, retry with fresh availability.
+  - If fewer than `k` GPUs are free, return 409 `gpu-unavailable`. After three failed attempts, return 409 `allocation-contention`.
+- **Why it is correct:** the constraint holds no matter how a row is written. Under READ COMMITTED, an insert that overlaps an uncommitted allocation waits for that transaction, then fails once it commits. The retry therefore always sees the winner.
+- **Retry details:**
+  - Each attempt runs in a savepoint (`begin_nested`). A failed attempt rolls back only its own inserts. The user and server locks taken before the savepoint stay held.
+  - Each attempt builds new `Reservation` and `GpuAllocation` objects. Nothing from a rolled-back savepoint is reused.
+  - The retryable error is recognized by SQLSTATE, not by message text: `23P01` (exclusion violation) and `40P01` (deadlock detected). Any other database error, such as a foreign key violation, propagates on the first attempt. A test checks that.
+  - Allocations are inserted in ascending GPU number. An insert that conflicts waits for the other transaction. If every transaction inserts in the same order, a transaction only ever waits for one that has already passed that GPU number, so waits cannot form a cycle. `40P01` is retried only as a defensive measure; this ordering should prevent it.
+- **Weakness — lowest-k herding:** concurrent requests all aim at the same lowest free GPUs. Under heavy contention, one request wins per round and the rest retry. A request can therefore run out of attempts while GPUs are still free. A test with 50 concurrent requests for the last 2 GPUs is fine, because the free GPUs run out before the attempts do. The upgrade paths are:
+  - choose randomly among the free GPUs on retries, which spreads contenders;
+  - take a short per-server advisory lock only after the first conflict;
+  - raise the attempt limit, with backoff.
+
+### Rule order and the server lock
+- Before any lock, only the shape of the request is checked: aware datetimes normalized to UTC, `ends_at > starts_at`, and `gpu_count >= 1`.
+- Then the user's advisory lock is taken, then the server row `FOR SHARE`.
+- Every rule that reads server or lab data runs after the server lock: grid, horizon, `max_booking_hours`, GPU count, peak hours, server status, and lab status. Every server change (gpu_count, status, limits, approval flag, delete) takes `FOR UPDATE` on the same row, so a booking sees exactly one version of the server.
+- A test holds a booking open and shows that a concurrent `max_booking_hours` edit waits for it.
+
+### Reducing, retiring, and deleting servers with reservations
+- **Reducing `gpu_count`:**
+  - Refused with 409 `gpus-in-use` while an active allocation with `ends_at > now` sits on a GPU being removed.
+  - Pending reservations count, because they hold their GPUs.
+  - The error names the GPU numbers and how many reservations hold them.
+- **Retiring:** refused the same way while any GPU is held. Students no longer see retired servers, so they would otherwise hold bookings on hardware they cannot find.
+- **Maintenance:** only stops new bookings. Existing ones stay.
+- **Deleting:**
+  - A server with any reservation, in any status, gets 409 `server-has-reservations` and the advice to retire it instead.
+  - The `servers → gpus` cascade still deletes the GPU rows of a server that was never booked.
+  - For a server with history, the `RESTRICT` foreign keys from reservations and allocations stop the cascade. A delete that races past the check therefore fails with SQLSTATE `23503`, which maps to the same error.
+- **Time:** all three checks run under the server's `FOR UPDATE` lock and use the time the caller passes in, never SQL `now()`, so tests can fix the clock.
+
+### GPU removal versus booking: two layers
+- **The problem:** removing GPUs is a soft removal, an UPDATE of `gpus.removed_at`. An UPDATE of a non-key column takes a lock that does not conflict with the `KEY SHARE` lock a foreign key check takes. So inserting an allocation on a GPU does not, by itself, stop that GPU from being removed at the same moment.
+- **Layer 1, `FOR SHARE` on the server row:** covers the window from reading which GPUs are free to inserting the reservation. Bookings share this lock, so they do not block each other. A reduction's `FOR UPDATE` excludes it.
+  - If the reduction comes first, the booking waits before it reads availability, then sees the removal.
+  - Without this lock, the booking would read GPUs 2 and 3 as active while the removal is uncommitted. It would block later, when inserting the reservation, with its choice already made, and then put an allocation on a removed GPU. A negative control shows exactly that.
+- **Layer 2, the foreign key from `reservations.server_id`:** inserting the reservation takes `KEY SHARE` on the server row, which conflicts with `FOR UPDATE`. From that insert until the booking commits, a reduction waits. Once the booking commits, the reduction's check sees the allocation.
+- **Why the booking-first control cannot fail:** if the booking goes first and `FOR SHARE` is removed, the reduction still waits on layer 2 and then gets `gpus-in-use`. Removing `FOR SHARE` alone cannot produce a race in that order. A test pins this down, so a later change that weakens layer 2 is noticed.
+
+### Quota enforcement under concurrency
+- **Options considered:**
+  1. A counter column per user and week, updated in the booking transaction. Fast reads, but it duplicates data that can drift, and moving or cancelling bookings has to maintain it.
+  2. Recomputing usage from reservations under a row lock on the user (`SELECT … FOR UPDATE` on `users`). It works, but it also blocks unrelated writes to the user row, such as profile changes, for the length of every booking.
+  3. Recomputing usage under a transaction-scoped advisory lock keyed on the user (chosen).
+- **Decision:**
+  - `pg_advisory_xact_lock(hashtext(user_id))`, then compute the usage and insert.
+  - `hashtext` gives 32 bits. Two users who share a hash only wait for each other a little; correctness does not depend on the key being unique.
+- **What the lock covers:**
+  - the user's own bookings (the active-reservation count and the quota);
+  - admin quota changes;
+  - deactivation.
+  The admin paths take the lock before updating the users row.
+- **Stale quota, found during implementation:** the booking read the quota from the `User` object loaded when the request was authenticated, before the lock. An admin lowering the quota at the same moment was therefore invisible to it. The booking now re-reads `is_active` and the quota after taking the lock. A deterministic test holds the admin's change uncommitted, confirms the booking is blocked, commits, and checks that the booking gets `quota-exceeded`. Removing either the lock on the admin side or the re-read makes the test fail.
+- **Which weeks are checked:** every quota week the new booking overlaps, not only the current one. Otherwise a booking that spills past Monday 00:00 could overfill next week.
+- **Fixed quota timezone:**
+  - The quota week runs from Monday 00:00 to the next Monday 00:00 in one fixed zone, the default lab zone, whichever lab a booking is in. Usage is summed across all labs.
+  - A per-lab week was rejected: one user's bookings would be counted in different week windows depending on the lab. Near a week boundary, hours booked in one lab just before its Monday and in another lab just after a later Monday land in different weeks. The user could then hold more than the quota within a single week of either zone.
+  - Weeks that contain a daylight saving change are 167 or 169 hours long.
+- **`/me/quota`** uses the same functions as the check (`_load_quota_bookings` and `used_gpu_minutes`), so the number shown is the number enforced. Hours are fractional, because bookings are in half hours.
+
+### Lock order
+- Bookings take the user lock, then the server row.
+- Deactivation takes the user lock, then the user's reservation rows.
+- Approve, reject, and cancel take only the reservation row.
+- Server changes take only the server row.
+- No path takes a reservation row and then the user lock, or the server row and then the user lock, so these paths cannot deadlock against each other.
+
+### Time grid and rules
+- **Granularity is checked in UTC:** `starts_at` and `ends_at` must be whole multiples of 30 minutes since the Unix epoch.
+  - This is the same as local :00 and :30 in every zone whose offset is a whole number of half hours.
+  - Zones with offsets such as +05:45, +08:45, and +12:45 are rejected for labs. The check looks at the offset on 1 January and 1 July of this year and next.
+  - Bookings stay on the grid even if a lab's time zone is changed later.
+  - Availability slots and the early-end rounding use the same grid.
+- **Local time where it matters:** peak hours use the lab's zone (weekdays 09:00–18:00, at most 4 GPU-hours per booking inside that window). Quota weeks use the fixed quota zone.
+- **422 vs 409:**
+  - Rules that depend only on the request and the server's settings return 422: grid, start in the past, more than 14 days ahead, too long, too many GPUs, peak-hours limit.
+  - Rules that depend on other bookings or on the server's state return 409: GPUs taken, quota, four active reservations, server or lab not open.
+- **`booking-too-short` cannot be reached through the API.** With both ends on the grid and the end after the start, every accepted range is at least 30 minutes. Shorter or misaligned ranges are reported as `invalid-time-grid` or `invalid-time-range`. The rule is kept as a defensive check and has a unit test with a raised minimum.
+
+### Cancelling and ending early
+- **Order of checks:** status first, then time.
+  - `pending`, before or after its start: `cancelled`.
+  - `approved` with `now <= starts_at`: `cancelled`. "Started" means strictly after the start.
+  - `approved` with `starts_at < now < ends_at`: `completed`, ended early.
+  - Already ended, or in a terminal status: 409 `invalid-reservation-state`.
+- **Students can end their own running reservation early**, not only admins. Ending early gives GPU time back to everyone and lowers the student's own quota use, and there is nothing to protect by forbidding it.
+- **The new end** is the first grid boundary at or after now. New bookings can only start on the grid and in the future, so that is exactly where the freed time begins. In the last half hour the boundary is the original end: the status still becomes `completed` and the end does not change. The original end is kept in the audit payload.
+- **Allocations become inactive on early end**, consistent with "active only while pending or approved", and their end is shortened too.
+  - The rest of the current half hour shows as free in availability.
+  - It cannot be booked, because a new booking must start on a later boundary.
+  - This is accepted. The alternative, keeping completed allocations active, would mix states.
+
+### Deactivating a user
+- **Decision:** deactivation takes the user lock and, in the same transaction:
+  - cancels the user's pending reservations and approved ones that have not started;
+  - ends running ones early with the cancel rule;
+  - writes an audit row for each, with the admin as actor and `reason: user_deactivated`.
+  Approved reservations that have already ended are left for the completion job.
+- **Why now rather than later:** an inactive account holding GPUs blocks other users until someone notices. The cancel logic already existed, so reusing it in the same transaction costs nothing.
+- **Bookings in flight:** a booking re-reads `is_active` after taking the user lock and refuses an inactive account with the same 401 the authentication layer gives. Tests cover:
+  - a booking that waits for an uncommitted deactivation and is then refused;
+  - an approval that waits for the reservation row and then finds the reservation cancelled.
+- **Reactivation** does not restore cancelled reservations.
+
+### Approve, reject, and cancel under concurrency
+- **Decision:** each transition locks the reservation row (`FOR UPDATE`) and reads the current status after the lock.
+- **Approve vs reject:** both require `pending`, so exactly one wins and the other gets `invalid-reservation-state`.
+- **Approve vs cancel:** both can succeed in sequence. Approve then cancel ends cancelled; cancel then approve refuses the approval. The guaranteed invariant is that a successful cancel is never lost, and the allocations match the final status.
+- **What the lock prevents:** without the row lock, an approval that read `pending` before a cancel committed would write `approved` over it. The negative control shows that result: an `approved` reservation whose allocations the cancel already released, holding no GPUs.
+
+### Reservation visibility
+- Reading, listing, and cancelling a reservation is allowed for its owner and for admins. Anyone else gets 404 `reservation-not-found`, not 403.
+- This does not depend on whether the server is visible. A student keeps seeing, and can still cancel, their own reservation on a server that was retired or whose lab was deactivated.
+- Creating a reservation and reading availability still apply the server visibility rules.
+
+### Listing and availability
+- **List filter:** `from` and `to` select reservations that overlap the window (`ends_at > from` and `starts_at < to`), as documented on the parameters.
+- **List loading:** related rows (server, lab, user, allocations, GPUs) are loaded with one query per relationship. A test checks that a page of 2 and a page of 12 cost the same number of statements.
+- **Availability:**
+  - The window is at most 14 days, defaults to the next 7, and is widened to whole slots.
+  - The response is `{server_id, timezone, gpu_count, slot_minutes, starts_at, ends_at, runs}`, where each run is a stretch of slots with the same number of free GPUs. Runs keep a week's response small when nothing changes for hours.
+  - Pending reservations count as busy. Nothing about who booked is returned.
+  - It is computed from one query of overlapping active allocations. Caching comes later.
+
+### Booking times in the browser
+- The booking dialog takes times in the lab's local time.
+- A local time that does not exist (the spring-forward gap) is rejected in the form.
+- An ambiguous local time (the fall-back hour) resolves to its first occurrence, and the dialog shows the zone abbreviation so the user can tell which one it is. The second occurrence cannot be booked from the dialog. The API accepts either, given an explicit offset.
+
+### Concurrency tests
+- **Separate connections:** every participant has its own session and connection, from an engine whose pool is larger than the number of participants. Participants start together behind a barrier.
+- **Bounded waits:** every barrier wait and every lock-wait poll has a timeout, so a broken protection fails the test instead of hanging it. Committed data is truncated explicitly afterwards.
+- **What they cover:**
+  - 50 bookings for the last two GPUs: exactly two succeed, and no active allocations overlap.
+  - Ten bookings that each fit the quota alone: exactly three succeed.
+  - Booking vs `gpu_count` reduction, in both orders.
+  - A booking vs a server edit.
+  - Quota change and deactivation vs a booking.
+  - Approve vs reject and approve vs cancel.
+- **Negative controls:** each protection has a control that removes it (drops the constraint, replaces a lock with a plain read) and holds the participants at the race window. That shows the race happens, deterministically, rather than hoping a race occurs by chance. The one exception is the booking-first reduction order, explained above.
+
+### Known gaps for Phase 5
+- **No expiry yet:** a pending reservation past its start keeps its allocations until the expiry job exists, and approved reservations past their end stay `approved` until the completion job.
+- **No notifications** on approve, reject, cancel, or deactivation.
+- **Lab deactivation and maintenance** leave existing bookings in place. Their owners can still see and cancel them, but nobody tells them.
+- **Approve does not check the server's state:** an admin can approve a pending reservation on a server that has since gone into maintenance.
