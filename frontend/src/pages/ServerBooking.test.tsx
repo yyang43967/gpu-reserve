@@ -2,15 +2,7 @@ import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
 import type { Reservation } from "@/lib/api-types";
-import {
-  fakeApi,
-  healthy,
-  makeServer,
-  on,
-  problem,
-  signedInAs,
-  type FakeRequest,
-} from "@/test/fake-api";
+import { fakeApi, makeServer, on, problem, signedInAs, type FakeRequest } from "@/test/fake-api";
 import { renderRoute } from "@/test/render";
 
 const SERVER_ID = "6f1c2a7e-3b9d-4c55-9a0e-2d8f1b7c4e10";
@@ -65,7 +57,6 @@ function created(body: Record<string, unknown>, status = "approved"): Reservatio
 function bookingApi(respond?: (request: FakeRequest) => Response) {
   return fakeApi(
     ...signedInAs("student"),
-    healthy,
     on("GET", `/servers/${SERVER_ID}`, () => Response.json(server)),
     on("GET", `/servers/${SERVER_ID}/availability`, () => Response.json(availability)),
     on("GET", "/me/quota", (request) => Response.json(quotaFor(request))),
@@ -321,7 +312,6 @@ describe("booking dialog", () => {
   it("does not offer booking on a server in maintenance", async () => {
     fakeApi(
       ...signedInAs("student"),
-      healthy,
       on("GET", `/servers/${SERVER_ID}`, () => Response.json({ ...server, status: "maintenance" })),
       on("GET", `/servers/${SERVER_ID}/availability`, () => Response.json(availability)),
     );

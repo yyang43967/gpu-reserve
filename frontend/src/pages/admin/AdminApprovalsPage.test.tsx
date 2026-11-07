@@ -2,7 +2,7 @@ import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { Reservation } from "@/lib/api-types";
-import { fakeApi, healthy, on, page, problem, signedInAs, type FakeRequest } from "@/test/fake-api";
+import { fakeApi, on, page, problem, signedInAs, type FakeRequest } from "@/test/fake-api";
 import { renderRoute } from "@/test/render";
 
 // Saturday 12 January 2030, 09:10 in Los Angeles.
@@ -52,7 +52,6 @@ function queueApi(initial: Reservation[], extra: Parameters<typeof fakeApi> = []
   const items = [...initial];
   const requests = fakeApi(
     ...signedInAs("admin"),
-    healthy,
     ...extra,
     on("GET", "/reservations", () =>
       Response.json(page(items.filter((r) => r.status === "pending"))),
@@ -107,7 +106,7 @@ describe("approval queue", () => {
   });
 
   it("keeps students out, like the other admin pages", async () => {
-    const requests = fakeApi(...signedInAs("student"), healthy);
+    const requests = fakeApi(...signedInAs("student"));
     const { router } = renderRoute("/admin/approvals");
 
     await screen.findByRole("heading", { name: "Dashboard" });
@@ -287,7 +286,6 @@ describe("approval queue", () => {
     let fail = true;
     fakeApi(
       ...signedInAs("admin"),
-      healthy,
       on("GET", "/reservations", () =>
         fail ? problem(500, "internal-error", { detail: "Down." }) : Response.json(page([])),
       ),

@@ -4,7 +4,6 @@ import { describe, expect, it } from "vitest";
 import type { User } from "@/lib/api-types";
 import {
   fakeApi,
-  healthy,
   makeUser,
   on,
   page,
@@ -105,7 +104,7 @@ describe("admin hub", () => {
   });
 
   it("keeps students out of user management", async () => {
-    const requests = fakeApi(...signedInAs("student"), healthy);
+    const requests = fakeApi(...signedInAs("student"));
     const { router } = renderRoute("/admin/users");
 
     await screen.findByRole("heading", { name: "Dashboard" });

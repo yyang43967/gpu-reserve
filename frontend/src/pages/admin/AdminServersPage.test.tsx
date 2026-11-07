@@ -4,7 +4,6 @@ import { describe, expect, it, vi } from "vitest";
 import type { PresignResponse, Server } from "@/lib/api-types";
 import {
   fakeApi,
-  healthy,
   makeLab,
   makeServer,
   on,
@@ -167,7 +166,7 @@ describe("admin hub", () => {
   });
 
   it("keeps students out of server management", async () => {
-    fakeApi(...signedInAs("student"), healthy);
+    fakeApi(...signedInAs("student"));
     const { router } = renderRoute("/admin/servers");
 
     await screen.findByRole("heading", { name: "Dashboard" });

@@ -2,16 +2,7 @@ import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
 import type { Lab } from "@/lib/api-types";
-import {
-  fakeApi,
-  healthy,
-  makeLab,
-  on,
-  page,
-  problem,
-  signedInAs,
-  type FakeRequest,
-} from "@/test/fake-api";
+import { fakeApi, makeLab, on, page, problem, signedInAs, type FakeRequest } from "@/test/fake-api";
 import { renderRoute } from "@/test/render";
 
 const vision = makeLab({
@@ -102,7 +93,7 @@ describe("admin hub", () => {
   });
 
   it("keeps students out of lab management", async () => {
-    const requests = fakeApi(...signedInAs("student"), healthy);
+    const requests = fakeApi(...signedInAs("student"));
     const { router } = renderRoute("/admin/labs");
 
     await screen.findByRole("heading", { name: "Dashboard" });

@@ -4,8 +4,8 @@ import { describe, expect, it } from "vitest";
 import { safeNextPath } from "@/auth/next-path";
 import { getAccessToken } from "@/lib/auth-token";
 import {
+  emptyDashboard,
   fakeApi,
-  healthy,
   makeUser,
   on,
   problem,
@@ -27,7 +27,7 @@ async function fillLogin(email: string, password: string) {
 
 describe("session bootstrap", () => {
   it("restores the session from the refresh cookie on load", async () => {
-    fakeApi(...signedInAs("student"), healthy);
+    fakeApi(...signedInAs("student"), emptyDashboard);
     renderRoute("/");
 
     expect(await screen.findByText("Ada Lovelace")).toBeInTheDocument();
@@ -60,7 +60,7 @@ describe("session bootstrap", () => {
   });
 
   it("sends signed-in users away from the login page", async () => {
-    fakeApi(...signedInAs("student"), healthy);
+    fakeApi(...signedInAs("student"));
     const { router } = renderRoute("/login?next=%2Freservations");
 
     await screen.findByRole("heading", { name: "My reservations" });
@@ -139,7 +139,6 @@ describe("registration", () => {
   it("creates an account and signs in", async () => {
     fakeApi(
       signedOut,
-      healthy,
       on("POST", "/auth/register", () => Response.json(tokenResponse(makeUser()), { status: 201 })),
     );
     const { router } = renderRoute("/register");
@@ -199,7 +198,7 @@ describe("registration", () => {
 
 describe("roles", () => {
   it("hides the admin link from students and keeps them out of /admin", async () => {
-    fakeApi(...signedInAs("student"), healthy);
+    fakeApi(...signedInAs("student"));
     const { router } = renderRoute("/admin");
 
     await screen.findByRole("heading", { name: "Dashboard" });
@@ -210,7 +209,7 @@ describe("roles", () => {
   });
 
   it("shows the admin area to admins", async () => {
-    fakeApi(...signedInAs("admin"), healthy);
+    fakeApi(...signedInAs("admin"));
     renderRoute("/admin");
 
     expect(await screen.findByRole("heading", { name: "Admin" })).toBeInTheDocument();
@@ -220,7 +219,7 @@ describe("roles", () => {
 
 describe("sign out and expiry", () => {
   it("signs out and returns to the login page", async () => {
-    const requests = fakeApi(...signedInAs("student"), healthy);
+    const requests = fakeApi(...signedInAs("student"));
     const { router } = renderRoute("/servers");
 
     fireEvent.click(await screen.findByRole("button", { name: "Sign out" }));
@@ -245,7 +244,7 @@ describe("sign out and expiry", () => {
           ? Response.json(tokenResponse(makeUser(), "short-lived"))
           : problem(401, "refresh-token-reused");
       }),
-      on("GET", "/health", () => problem(401, "invalid-token")),
+      on("GET", "/stats/overview", () => problem(401, "invalid-token")),
     );
     const { router } = renderRoute("/");
 

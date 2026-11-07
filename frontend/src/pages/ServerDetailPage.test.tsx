@@ -1,7 +1,7 @@
 import { fireEvent, screen, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
-import { fakeApi, healthy, makeServer, on, page, problem, signedInAs } from "@/test/fake-api";
+import { fakeApi, makeServer, on, page, problem, signedInAs } from "@/test/fake-api";
 import { renderRoute } from "@/test/render";
 
 const SERVER_ID = "6f1c2a7e-3b9d-4c55-9a0e-2d8f1b7c4e10";
@@ -30,7 +30,6 @@ describe("server detail page", () => {
   it("shows the server's specs, lab, and booking rules", async () => {
     fakeApi(
       ...signedInAs("student"),
-      healthy,
       on("GET", `/servers/${SERVER_ID}`, () => Response.json(server)),
     );
     renderRoute(`/servers/${SERVER_ID}`);
@@ -57,7 +56,6 @@ describe("server detail page", () => {
   it("uses the memory per GPU the API reports", async () => {
     fakeApi(
       ...signedInAs("student"),
-      healthy,
       on("GET", `/servers/${SERVER_ID}`, () =>
         Response.json({ ...server, gpu_memory_gb: 81, gpu_count: 2 }),
       ),
@@ -72,7 +70,6 @@ describe("server detail page", () => {
   it("marks servers that need approval and shows the image", async () => {
     fakeApi(
       ...signedInAs("student"),
-      healthy,
       on("GET", `/servers/${SERVER_ID}`, () =>
         Response.json({
           ...server,
@@ -103,7 +100,6 @@ describe("server detail page", () => {
   it("shows an inactive lab to admins", async () => {
     fakeApi(
       ...signedInAs("admin"),
-      healthy,
       on("GET", `/servers/${SERVER_ID}`, () =>
         Response.json({ ...server, lab: { ...server.lab, is_active: false } }),
       ),
@@ -116,7 +112,6 @@ describe("server detail page", () => {
   it("shows availability, one row per lab day with the slots returned", async () => {
     const requests = fakeApi(
       ...signedInAs("student"),
-      healthy,
       on("GET", `/servers/${SERVER_ID}`, () => Response.json(server)),
       on("GET", `/servers/${SERVER_ID}/availability`, () =>
         Response.json({
@@ -172,7 +167,6 @@ describe("server detail page", () => {
   it("draws the spring-forward day with 46 slots and marks the skipped hour", async () => {
     fakeApi(
       ...signedInAs("student"),
-      healthy,
       on("GET", `/servers/${SERVER_ID}`, () => Response.json(server)),
       on("GET", `/servers/${SERVER_ID}/availability`, () =>
         Response.json({
@@ -211,7 +205,6 @@ describe("server detail page", () => {
     let fail = true;
     fakeApi(
       ...signedInAs("student"),
-      healthy,
       on("GET", `/servers/${SERVER_ID}`, () => Response.json(server)),
       on("GET", `/servers/${SERVER_ID}/availability`, () =>
         fail
@@ -241,7 +234,6 @@ describe("server detail page", () => {
   it("shows a loading state first", async () => {
     fakeApi(
       ...signedInAs("student"),
-      healthy,
       on("GET", `/servers/${SERVER_ID}`, () => Response.json(server)),
     );
     renderRoute(`/servers/${SERVER_ID}`);
@@ -253,7 +245,6 @@ describe("server detail page", () => {
   it("says the server was not found on a 404", async () => {
     fakeApi(
       ...signedInAs("student"),
-      healthy,
       on("GET", `/servers/${MISSING_ID}`, () => problem(404, "server-not-found")),
     );
     renderRoute(`/servers/${MISSING_ID}`);
@@ -267,7 +258,7 @@ describe("server detail page", () => {
   });
 
   it("goes straight to not found for a malformed id, without a request", async () => {
-    const requests = fakeApi(...signedInAs("student"), healthy);
+    const requests = fakeApi(...signedInAs("student"));
     renderRoute("/servers/not-a-uuid");
 
     expect(await screen.findByText("Server not found")).toBeInTheDocument();
@@ -278,7 +269,6 @@ describe("server detail page", () => {
     let fail = true;
     fakeApi(
       ...signedInAs("student"),
-      healthy,
       on("GET", `/servers/${SERVER_ID}`, () =>
         fail
           ? problem(500, "internal-error", { detail: "The server failed." })
@@ -298,7 +288,6 @@ describe("server detail page", () => {
   it("is reached from a card on the servers page", async () => {
     fakeApi(
       ...signedInAs("student"),
-      healthy,
       on("GET", "/labs", () => Response.json(page([]))),
       on("GET", "/servers", () => Response.json(page([server]))),
       on("GET", `/servers/${SERVER_ID}`, () => Response.json(server)),

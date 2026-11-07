@@ -2,7 +2,7 @@ import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { Reservation } from "@/lib/api-types";
-import { fakeApi, healthy, on, page, problem, signedInAs, type FakeRequest } from "@/test/fake-api";
+import { fakeApi, on, page, problem, signedInAs, type FakeRequest } from "@/test/fake-api";
 import { renderRoute } from "@/test/render";
 
 // Saturday 12 January 2030, 09:10 in Los Angeles.
@@ -53,7 +53,6 @@ afterEach(() => {
 function api(list: () => Reservation[], extra: Parameters<typeof fakeApi> = []) {
   return fakeApi(
     ...signedInAs("student"),
-    healthy,
     on("GET", "/me/quota", () => Response.json(quota)),
     on("GET", "/reservations", () => Response.json(page(list()))),
     ...extra,
@@ -128,7 +127,6 @@ describe("my reservations page", () => {
   it("asks for only the signed-in admin's own reservations", async () => {
     const requests = fakeApi(
       ...signedInAs("admin", { id: "admin-1" }),
-      healthy,
       on("GET", "/me/quota", () => Response.json(quota)),
       on("GET", "/reservations", () => Response.json(page([]))),
     );
@@ -254,7 +252,6 @@ describe("my reservations page", () => {
     let fail = true;
     fakeApi(
       ...signedInAs("student"),
-      healthy,
       on("GET", "/me/quota", () => Response.json(quota)),
       on("GET", "/reservations", () =>
         fail
