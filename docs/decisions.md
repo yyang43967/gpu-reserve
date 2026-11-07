@@ -430,16 +430,42 @@ Each entry records the context, the decision, and why. Newest phases at the bott
 ### Listing and availability
 - **List filter:** `from` and `to` select reservations that overlap the window (`ends_at > from` and `starts_at < to`), as documented on the parameters.
 - **List loading:** related rows (server, lab, user, allocations, GPUs) are loaded with one query per relationship. A test checks that a page of 2 and a page of 12 cost the same number of statements.
+- **List order:** newest start first by default, which suits a history. `order=starts_at` gives soonest first, which the approval queue needs. Sorting a page in the browser instead would be wrong once the queue is longer than one page.
 - **Availability:**
   - The window is at most 14 days, defaults to the next 7, and is widened to whole slots.
   - The response is `{server_id, timezone, gpu_count, slot_minutes, starts_at, ends_at, runs}`, where each run is a stretch of slots with the same number of free GPUs. Runs keep a week's response small when nothing changes for hours.
   - Pending reservations count as busy. Nothing about who booked is returned.
   - It is computed from one query of overlapping active allocations. Caching comes later.
 
-### Booking times in the browser
-- The booking dialog takes times in the lab's local time.
-- A local time that does not exist (the spring-forward gap) is rejected in the form.
-- An ambiguous local time (the fall-back hour) resolves to its first occurrence, and the dialog shows the zone abbreviation so the user can tell which one it is. The second occurrence cannot be booked from the dialog. The API accepts either, given an explicit offset.
+### Lab time in the browser
+- **No date library:** wall times are converted with `Intl.DateTimeFormat#formatToParts`. A local time is resolved by trying the zone's offsets from a day before and a day after, and keeping each candidate that really shows that wall time in the zone. A zone-aware date library would add a dependency for one conversion and a few formatters.
+- **Every time shown is in the lab's zone, with its abbreviation**, never the browser's zone. A student in another time zone sees the times the lab sees. Some zones have no common abbreviation, and the browser shows those as "GMT+9".
+- **Nonexistent and ambiguous times:**
+  - A local time in the spring-forward gap is rejected in the form, on the field that has it.
+  - A local time in the fall-back hour resolves to its first occurrence, and the field says so with the zone abbreviation ("01:30 happens twice that day; this is the first one (PDT)"). The second occurrence cannot be booked from the dialog. The API accepts either, given an explicit offset.
+- **Time zone picker:** the lab form suggests only zones whose offsets are whole half hours, using the same rule as the API. The field is still free text, and the API's 422 is the authority; it shows under the field. The browser's zone list uses some older names (`Asia/Calcutta`); the API accepts both spellings.
+
+### Booking dialog
+- **Fields:** start date and time, end date and time. Times are half-hour options.
+- **End date:** it follows the start date until the person picks one. When the end time is at or before the start time on the same date, the end date moves to the next day. That makes overnight bookings and a 00:00 end work without extra steps. An end date the person picked stays where they put it.
+- **Errors by problem type:**
+  - Known types go under their field with the API's detail text: GPU conflicts and the peak-hours limit under GPUs, duration under the end time, the horizon and grid under the start.
+  - Quota, the active-reservation limit, server state, and any unknown type go in an alert above the form, again with the detail text.
+  - The API's details are written for people, so the client does not keep its own copy of each message, and a new rule shows something sensible without a client change.
+- **After booking or cancelling:** every reservation query is invalidated (availability, lists, quota). They share one key prefix.
+
+### Availability timeline
+- **One row per lab-local day, built from the slots the API returned.** A full day has 48 half hours, but 46 on a spring-forward day and 50 on a fall-back day. Rows are never forced to 48.
+- **Rows line up by time of day** under a shared hour axis. A partial first day is padded, and the scroller opens at today's first slot so a phone does not open on blank space.
+- **Daylight saving days** are drawn in time order. After the change such a row no longer matches the hour axis, so the change is marked with a divider and a note ("Clocks go back: 01:00–02:00 happens twice (PDT, then PST)"). The alternatives were worse: placing cells by time of day would overlap the repeated hour and leave a hole for the skipped one.
+- **Colors:** free, partly free, and full use green, amber, and slate, which stay distinct in both themes. A per-day sentence carries the same information for screen readers.
+- **Picking a slot:** clicking a free slot opens the booking dialog with that start.
+
+### Acting on stale data in the browser
+- The cancel button and the approve button are decided by the browser's clock and the last fetched status. Near a boundary, or when another admin acts first, the server can disagree.
+- **On a 409 from cancel,** the error appears on the reservation and the list is fetched again, so the row shows the server's status.
+- **On a 409 from approve or reject,** the error appears on the row and the queue is fetched again. When the refreshed queue no longer contains the request (another admin decided it), the row disappears, so its error moves above the list, naming whose request it was.
+- **Approving after the start** is disabled in the queue, with an explanation, because the API refuses it. Rejecting stays available, since it releases the GPUs.
 
 ### Concurrency tests
 - **Separate connections:** every participant has its own session and connection, from an engine whose pool is larger than the number of participants. Participants start together behind a barrier.

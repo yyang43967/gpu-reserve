@@ -146,6 +146,16 @@ sequenceDiagram
 
 Reasoning, alternatives, and the concurrency tests are in [decisions.md](decisions.md#phase-4--reservations).
 
+### Pages
+
+| Page | What it does |
+|---|---|
+| Server detail (`/servers/:id`) | Seven-day availability timeline in the lab's time zone, and the booking dialog; clicking a free half hour starts a booking there |
+| My reservations (`/reservations`) | Weekly quota bar, the signed-in user's reservations with a status filter, and cancel or end early |
+| Approvals (`/admin/approvals`) | Admins approve or reject pending requests, soonest start first |
+
+Times are converted between the lab's wall clock and UTC in the browser with `Intl` (`frontend/src/lib/lab-time.ts`). The API only ever sees UTC instants with an offset.
+
 ## Uploads
 
 The API never handles image bytes. It signs a form, the browser posts the file to storage, and the API checks the stored object before saving its key.
