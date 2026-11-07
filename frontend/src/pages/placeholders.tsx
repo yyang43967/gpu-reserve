@@ -18,10 +18,6 @@ export function FindSlotPage() {
   );
 }
 
-export function MyReservationsPage() {
-  return <ComingSoon title="My reservations" description="Upcoming and past reservations." />;
-}
-
 export function AssistantPage() {
   return (
     <ComingSoon title="Assistant" description="Ask about policies and find hardware for a job." />

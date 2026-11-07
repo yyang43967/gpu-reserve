@@ -31,6 +31,8 @@ export interface ReservationListParams {
   page: number;
   status: ReservationStatus | null;
   serverId?: string | null;
+  /** Admins see everyone's reservations unless they ask for one user's. */
+  userId?: string | null;
 }
 
 /** Every reservation query starts with this key, so one invalidation refreshes them all. */
@@ -56,6 +58,7 @@ export function listReservations(
   });
   if (params.status) query.set("status", params.status);
   if (params.serverId) query.set("server_id", params.serverId);
+  if (params.userId) query.set("user_id", params.userId);
   return apiFetch<Page<Reservation>>(`/reservations?${query.toString()}`, { signal });
 }
 

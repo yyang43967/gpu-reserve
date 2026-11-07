@@ -9,6 +9,17 @@ export function nextBookableStart(now: Date): Date {
   return new Date(Math.floor(now.getTime() / SLOT_MS) * SLOT_MS + SLOT_MS);
 }
 
+/** The first half-hour boundary at or after `at`: where an early end takes effect. */
+export function ceilToHalfHour(at: Date): Date {
+  return new Date(Math.ceil(at.getTime() / SLOT_MS) * SLOT_MS);
+}
+
+/** The end a running reservation gets if it is ended early at `now`. */
+export function earlyEnd(endsAt: Date, now: Date): Date {
+  const boundary = ceilToHalfHour(now);
+  return boundary < endsAt ? boundary : endsAt;
+}
+
 export type BookingField =
   "start_date" | "start_time" | "end_date" | "end_time" | "gpu_count" | "purpose";
 

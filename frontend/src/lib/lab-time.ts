@@ -198,3 +198,14 @@ export function addDaysToKey(key: string, days: number): string {
   const date = new Date(Date.UTC(year ?? 0, (month ?? 1) - 1, (day ?? 1) + days));
   return date.toISOString().slice(0, 10);
 }
+
+/** "Sat, Jan 12, 08:00 PST – 10:00 PST", or both dates when it crosses midnight. */
+export function formatLabRange(startsAt: string, endsAt: string, timeZone: string): string {
+  const start = new Date(startsAt);
+  const end = new Date(endsAt);
+  const endText =
+    labDateKey(start, timeZone) === labDateKey(end, timeZone)
+      ? `${labTimeOfDay(end, timeZone)} ${zoneAbbreviation(end, timeZone)}`
+      : formatInLab(end, timeZone);
+  return `${formatInLab(start, timeZone)} – ${endText}`;
+}

@@ -9,12 +9,8 @@ import { AdminServersPage } from "@/pages/admin/AdminServersPage";
 import { AdminUsersPage } from "@/pages/admin/AdminUsersPage";
 import { DashboardPage } from "@/pages/DashboardPage";
 import { LoginPage } from "@/pages/LoginPage";
-import {
-  AssistantPage,
-  FindSlotPage,
-  MyReservationsPage,
-  NotFoundPage,
-} from "@/pages/placeholders";
+import { MyReservationsPage } from "@/pages/MyReservationsPage";
+import { AssistantPage, FindSlotPage, NotFoundPage } from "@/pages/placeholders";
 import { RegisterPage } from "@/pages/RegisterPage";
 import { RouteErrorPage } from "@/pages/RouteErrorPage";
 import { ServerDetailPage } from "@/pages/ServerDetailPage";
