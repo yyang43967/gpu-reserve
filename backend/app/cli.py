@@ -1,6 +1,7 @@
 """Operational commands.
 
     python -m app.cli create-admin --email admin@example.edu --name "Grace Hopper"
+    python -m app.cli reset-database    # only with ENVIRONMENT=test
 
 The password comes from the ADMIN_PASSWORD environment variable or, if that is unset,
 an interactive prompt. It is never accepted as an argument, so it does not end up in
@@ -16,10 +17,12 @@ from collections.abc import Sequence
 from typing import Final
 
 from pydantic import EmailStr, TypeAdapter, ValidationError
+from sqlalchemy import text
 
-from app.core.config import Settings
+from app.core.config import Environment, Settings
 from app.core.exceptions import DomainError
 from app.core.security import PASSWORD_MIN_LENGTH
+from app.db.base import Base
 from app.db.session import create_engine, create_session_factory
 from app.schemas.auth import PASSWORD_MAX_LENGTH
 from app.services import users
@@ -76,6 +79,21 @@ async def create_admin(
     return f"{action} {result.user.email}."
 
 
+async def reset_database(settings: Settings) -> str:
+    """Empty every application table. Refused unless the environment is `test`, so it
+    cannot be pointed at development or production data by mistake."""
+    if settings.environment is not Environment.TEST:
+        raise CommandError("reset-database only runs with ENVIRONMENT=test.")
+    tables = ", ".join(f'"{table.name}"' for table in Base.metadata.sorted_tables)
+    engine = create_engine(settings)
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(text(f"TRUNCATE {tables} RESTART IDENTITY CASCADE"))
+    finally:
+        await engine.dispose()
+    return f"Emptied {len(Base.metadata.sorted_tables)} tables."
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python -m app.cli")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -85,17 +103,24 @@ def _parser() -> argparse.ArgumentParser:
     )
     create.add_argument("--email", required=True)
     create.add_argument("--name", help="Full name. Required when the account does not exist.")
+    commands.add_parser(
+        "reset-database",
+        help="Empty every table. Only with ENVIRONMENT=test (end-to-end tests).",
+    )
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
-        email = _validate_email(args.email)
-        password = read_password()
-        message = asyncio.run(
-            create_admin(Settings(), email=email, full_name=args.name, password=password)
-        )
+        if args.command == "reset-database":
+            message = asyncio.run(reset_database(Settings()))
+        else:
+            email = _validate_email(args.email)
+            password = read_password()
+            message = asyncio.run(
+                create_admin(Settings(), email=email, full_name=args.name, password=password)
+            )
     except (CommandError, DomainError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return EXIT_ERROR
