@@ -537,6 +537,24 @@ Each entry records the context, the decision, and why. Newest phases at the bott
   The statements are idempotent without the lock. The lock keeps two runs from queueing behind each other on the same rows and doing the same work twice.
 - **Late reminders:** a reminder is queued for approved reservations starting within the next hour. A booking made less than an hour before its start is picked up by the next run, so its reminder can arrive up to five minutes after the booking. Accepted: the person booked moments ago.
 
+### Delivering notifications: one row per transaction
+- **Options considered:**
+  1. Lock due rows with `FOR UPDATE SKIP LOCKED`, send, mark, and commit in one transaction (chosen, with one row per transaction).
+  2. Claim rows by setting an `in_flight` status with a lease expiry and committing, then send outside any transaction and record the result in a second one. Expired leases are reclaimed.
+  3. One dispatcher at a time behind an advisory lock.
+- **Decision:** a loop of short transactions. Each one does `SELECT … WHERE status = 'pending' AND next_attempt_at <= now ORDER BY next_attempt_at LIMIT 1 FOR UPDATE SKIP LOCKED`, prepares the email, sends it, marks the row `sent`, `skipped`, or a retry or failure, and commits. It stops when no row is due or after a per-tick cap (`batch_size`, 50).
+- **Why:**
+  - **Scale:** one instance and a low volume of email. The simplest design that is correct is enough.
+  - **Crash recovery is automatic.** Row locks die with the connection, so a crashed dispatcher leaves its row `pending` and the next tick picks it up. There is no lease to tune and no extra state.
+  - **The duplicate window is one email**, the same as with leases. Committing per row means a crash between the send and the commit can repeat only the message in flight, never a whole batch.
+  - **The lock held during the send blocks nobody.** Only the dispatcher touches notification rows. Holding one through an SMTP call costs one pooled connection for that long, nothing else.
+- **What each part does** (each has a test that removes it):
+  - `FOR UPDATE` is what prevents double sends. Without it, two dispatchers read the same row and both send it.
+  - `SKIP LOCKED` is what keeps dispatchers independent. Without it, a second dispatcher still never double-sends: it waits for the row, re-reads it, and finds it sent. But it waits behind a stuck send instead of delivering other rows.
+  - The per-job advisory lock used by the sweeping jobs is not used here. It would serialize dispatchers and make `SKIP LOCKED` pointless.
+- **When to change:** move to leases (option 2) if sends get slow enough to put pressure on the connection pool, or if the number of workers grows. That removes the connection held during the network call, at the cost of a lease length to choose and rows stuck until it expires after a crash.
+- **Accepted race, stale reminders:** the staleness check reads the reservation without locking it. A cancellation that commits between that read and the send can let one reminder for a cancelled booking through. Locking the reservation row during an SMTP call would block the user's own cancel for the length of the send, which is worse than one unneeded reminder.
+
 ### Email
 - **Transports:** an `EmailSender` interface with two implementations. `SmtpSender` uses the standard library's `smtplib` in a worker thread (Mailpit locally). `SesSender` uses the SES v2 API through boto3 with the instance role's credentials, so production needs no SMTP password. `EMAIL_BACKEND` picks one. No new dependencies.
 - **Bodies:** plain text and HTML, from `string.Template`. Every value placed in the HTML is passed through `html.escape`, because purposes and rejection reasons are typed by users. Names and hostnames are escaped too, rather than deciding field by field which ones are trusted. `string.Template` does not re-read substituted values, so a `$` in a purpose stays literal. Tests cover `<script>` in the purpose and the reason.

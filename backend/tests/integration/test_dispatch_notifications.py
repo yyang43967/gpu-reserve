@@ -15,8 +15,9 @@ from datetime import UTC, datetime, timedelta
 from typing import Final
 
 import pytest
-from sqlalchemy import select, update
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy import select, text, update
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+from sqlalchemy.sql.selectable import GenerativeSelect
 
 from app.models import (
     MAX_DELIVERY_ATTEMPTS,
@@ -29,6 +30,7 @@ from app.models import (
 )
 from app.services import jobs, reservations
 from app.services.email import OutgoingEmail
+from tests.integration.concurrency import BARRIER_TIMEOUT, LOCK_WAIT_TIMEOUT, POLL_INTERVAL, Gate
 from tests.integration.reservation_helpers import add_lab, add_server, add_user, book
 
 pytestmark = pytest.mark.integration
@@ -176,7 +178,9 @@ async def test_sent_rows_are_not_sent_again(job_factory: async_sessionmaker[Asyn
     assert len(sender.sent) == 1
 
 
-async def test_batch_size_limits_one_run(job_factory: async_sessionmaker[AsyncSession]) -> None:
+async def test_batch_size_caps_one_tick_and_the_next_tick_continues(
+    job_factory: async_sessionmaker[AsyncSession],
+) -> None:
     await _rows(job_factory, REPORT_KINDS[:3])
     sender = FakeSender()
 
@@ -348,3 +352,141 @@ async def test_inactive_recipients_still_receive_their_notification(
     sender = FakeSender()
 
     assert await _dispatch(job_factory, sender) == jobs.DispatchReport(sent=1)
+
+
+# --- what SKIP LOCKED and the row lock each contribute ---
+#
+# The controls below patch SQLAlchemy's with_for_update for the duration of the test,
+# so they apply to however dispatch builds its SELECT ... FOR UPDATE SKIP LOCKED.
+# They assume the query is built with select(...).with_for_update(...), not text().
+
+
+class HoldingSender(FakeSender):
+    """Holds the first message it is given until `release` is set, as a slow mail
+    server would; every later message goes through at once."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.holding = asyncio.Event()
+        self.release = asyncio.Event()
+        self._held = False
+
+    async def send(self, email: OutgoingEmail) -> None:
+        if not self._held:
+            self._held = True
+            self.holding.set()
+            await asyncio.wait_for(self.release.wait(), LOCK_WAIT_TIMEOUT)
+        await super().send(email)
+
+
+async def _lock_waiters(engine: AsyncEngine) -> int:
+    async with engine.connect() as conn:
+        count = await conn.scalar(
+            text(
+                "SELECT count(*) FROM pg_stat_activity "
+                "WHERE wait_event_type = 'Lock' AND datname = current_database()"
+            )
+        )
+    return count or 0
+
+
+async def _someone_waits_on_a_lock(engine: AsyncEngine) -> bool:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + LOCK_WAIT_TIMEOUT
+    while loop.time() < deadline:
+        if await _lock_waiters(engine):
+            return True
+        await asyncio.sleep(POLL_INTERVAL)
+    return False
+
+
+def _patch_for_update(monkeypatch: pytest.MonkeyPatch, **forced: bool) -> None:
+    original = GenerativeSelect.with_for_update
+
+    def patched(self: GenerativeSelect, **kwargs: object) -> GenerativeSelect:
+        return original(self, **(kwargs | forced))  # type: ignore[arg-type]
+
+    monkeypatch.setattr(GenerativeSelect, "with_for_update", patched)
+
+
+def _drop_row_lock(monkeypatch: pytest.MonkeyPatch) -> None:
+    def no_lock(self: GenerativeSelect, **_: object) -> GenerativeSelect:
+        return self
+
+    monkeypatch.setattr(GenerativeSelect, "with_for_update", no_lock)
+
+
+async def test_a_stuck_send_does_not_hold_up_another_dispatcher(
+    job_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """With SKIP LOCKED, while one dispatcher is stuck sending (holding its row lock),
+    another skips that row and delivers the next one."""
+    await _rows(job_factory, [NotificationKind.APPROVED], users=2)
+    sender = HoldingSender()
+    stuck = asyncio.create_task(_dispatch(job_factory, sender))
+    try:
+        await asyncio.wait_for(sender.holding.wait(), LOCK_WAIT_TIMEOUT)
+
+        other = await asyncio.wait_for(_dispatch(job_factory, sender), LOCK_WAIT_TIMEOUT)
+
+        assert other == jobs.DispatchReport(sent=1)
+        assert len(sender.sent) == 1  # delivered while the first send is still stuck
+    finally:
+        sender.release.set()
+        await asyncio.wait({stuck}, timeout=LOCK_WAIT_TIMEOUT)
+    assert stuck.result() == jobs.DispatchReport(sent=1)
+    assert len({e.to_address for e in sender.sent}) == len(sender.sent) == 2
+
+
+async def test_control_without_skip_locked_the_other_dispatcher_waits(
+    job_factory: async_sessionmaker[AsyncSession],
+    job_engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Negative control for SKIP LOCKED. Plain FOR UPDATE still never sends a row
+    twice: the waiting dispatcher re-checks the row after the lock is released and
+    finds it sent. What it loses is progress: the second dispatcher waits behind the
+    stuck send and delivers nothing meanwhile."""
+    await _rows(job_factory, [NotificationKind.APPROVED], users=2)
+    _patch_for_update(monkeypatch, skip_locked=False)
+    sender = HoldingSender()
+    stuck = asyncio.create_task(_dispatch(job_factory, sender))
+    other: asyncio.Task[jobs.DispatchReport] | None = None
+    try:
+        await asyncio.wait_for(sender.holding.wait(), LOCK_WAIT_TIMEOUT)
+        other = asyncio.create_task(_dispatch(job_factory, sender))
+
+        assert await _someone_waits_on_a_lock(job_engine)
+        assert sender.sent == []
+    finally:
+        sender.release.set()
+        pending = {t for t in (stuck, other) if t is not None}
+        await asyncio.wait(pending, timeout=LOCK_WAIT_TIMEOUT)
+    assert other is not None
+    # Serialized, not duplicated.
+    assert len({e.to_address for e in sender.sent}) == len(sender.sent) == 2
+
+
+async def test_control_without_the_row_lock_a_row_is_sent_twice(
+    job_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Negative control for FOR UPDATE itself. Without the lock, two dispatchers both
+    read the same due row; the sender holds both at a barrier so both have read it
+    before either marks it sent. The one email goes out twice."""
+    await _rows(job_factory, [NotificationKind.APPROVED])
+    _drop_row_lock(monkeypatch)
+    gate = Gate(2)
+
+    class MeetingSender(FakeSender):
+        async def send(self, email: OutgoingEmail) -> None:
+            await gate.wait()
+            await super().send(email)
+
+    sender = MeetingSender()
+
+    await asyncio.wait_for(
+        asyncio.gather(_dispatch(job_factory, sender), _dispatch(job_factory, sender)),
+        BARRIER_TIMEOUT,
+    )
+
+    assert [e.to_address for e in sender.sent] == ["student00@example.edu"] * 2
