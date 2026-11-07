@@ -12,6 +12,8 @@ from app.models.lab import DEFAULT_LAB_TIMEZONE
 from app.services import labs, servers
 
 LA = ZoneInfo(DEFAULT_LAB_TIMEZONE)
+# The quota zone the application uses by default; the tests count weeks in it.
+QUOTA_ZONE = ZoneInfo("America/Los_Angeles")
 SATURDAY = 5
 
 

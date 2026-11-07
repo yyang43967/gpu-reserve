@@ -142,7 +142,7 @@ export interface Availability {
   runs: FreeRun[];
 }
 
-/** GPU-hours in the current quota week. Hours can be fractional. */
+/** GPU-hours in one quota week (the current one unless another was asked for). Hours can be fractional. */
 export interface Quota {
   week_start: string;
   week_end: string;

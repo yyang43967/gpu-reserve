@@ -119,8 +119,9 @@ class AvailabilityRead(BaseModel):
 
 
 class QuotaRead(BaseModel):
-    """GPU-hours in the current quota week. Hours can be fractional (bookings are in
-    half hours), so they are numbers, not integers."""
+    """GPU-hours in one quota week (the current one unless another was asked for).
+    Hours can be fractional (bookings are in half hours), so they are numbers, not
+    integers."""
 
     week_start: datetime
     week_end: datetime

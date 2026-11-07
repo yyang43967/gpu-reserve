@@ -18,7 +18,7 @@ from app.core.config import Settings
 from app.main import create_app
 from app.models import GpuModel, Lab, Reservation, Server, User, UserRole
 from app.services import labs, reservations, servers, users
-from tests.integration.reservation_helpers import booking_body, next_saturday
+from tests.integration.reservation_helpers import QUOTA_ZONE, booking_body, next_saturday
 
 pytestmark = pytest.mark.integration
 
@@ -362,6 +362,7 @@ async def _student_booking(
             purpose="Training",
         ),
         now=now,
+        quota_zone=QUOTA_ZONE,
     )
     await db.commit()
     return reservation

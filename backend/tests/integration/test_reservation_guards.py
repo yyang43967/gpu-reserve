@@ -27,7 +27,13 @@ from app.models import (
 )
 from app.services import reservations, servers, users
 from app.services.reservations import NewReservation, create_reservation
-from tests.integration.reservation_helpers import add_lab, add_server, add_user, next_saturday
+from tests.integration.reservation_helpers import (
+    QUOTA_ZONE,
+    add_lab,
+    add_server,
+    add_user,
+    next_saturday,
+)
 from tests.integration.test_admin_users import assert_problem, bearer, create_user, login
 
 pytestmark = pytest.mark.integration
@@ -48,7 +54,9 @@ def _request(server: Server, start: datetime = SATURDAY, *, gpus: int = 1) -> Ne
 async def _book(
     db: AsyncSession, user: User, server: Server, start: datetime = SATURDAY, *, gpus: int = 1
 ) -> Reservation:
-    reservation = await create_reservation(db, user, _request(server, start, gpus=gpus), now=NOW)
+    reservation = await create_reservation(
+        db, user, _request(server, start, gpus=gpus), now=NOW, quota_zone=QUOTA_ZONE
+    )
     await db.commit()
     return reservation
 
@@ -139,7 +147,9 @@ async def test_finished_and_cancelled_reservations_do_not_block(
 async def test_gpus_in_use_through_the_api(
     api_client: AsyncClient, db_session: AsyncSession, student: User, server: Server
 ) -> None:
-    await create_reservation(db_session, student, _future_request(server), now=datetime.now(UTC))
+    await create_reservation(
+        db_session, student, _future_request(server), now=datetime.now(UTC), quota_zone=QUOTA_ZONE
+    )
     await db_session.commit()
     await create_user(db_session, "boss@example.edu", UserRole.ADMIN)
     headers = bearer(await login(api_client, "boss@example.edu"))
@@ -360,7 +370,9 @@ async def test_deactivation_through_the_api(
 ) -> None:
     target = await create_user(db_session, "target@example.edu")
     request = _future_request(server)
-    booked = await create_reservation(db_session, target, request, now=datetime.now(UTC))
+    booked = await create_reservation(
+        db_session, target, request, now=datetime.now(UTC), quota_zone=QUOTA_ZONE
+    )
     await db_session.commit()
     await create_user(db_session, "boss@example.edu", UserRole.ADMIN)
     headers = bearer(await login(api_client, "boss@example.edu"))
@@ -389,7 +401,9 @@ async def test_inactive_account_cannot_book(
     await db_session.commit()
 
     with pytest.raises(InvalidToken, match="not active"):
-        await create_reservation(db_session, stale, _request(server), now=NOW)
+        await create_reservation(
+            db_session, stale, _request(server), now=NOW, quota_zone=QUOTA_ZONE
+        )
 
 
 async def test_gpu_rows_unchanged_after_refused_reduction(

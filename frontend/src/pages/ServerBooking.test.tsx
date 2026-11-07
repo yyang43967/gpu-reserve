@@ -30,6 +30,19 @@ const availability = {
   ],
 };
 
+/** The quota week of `at`, faked for the week of Monday 7 January 2030 and later weeks. */
+function quotaFor(request: FakeRequest) {
+  const nextWeek = (request.query.get("at") ?? "") >= "2030-01-14T08:00:00Z";
+  return {
+    week_start: nextWeek ? "2030-01-14T08:00:00Z" : "2030-01-07T08:00:00Z",
+    week_end: nextWeek ? "2030-01-21T08:00:00Z" : "2030-01-14T08:00:00Z",
+    timezone: "America/Los_Angeles",
+    used_hours: nextWeek ? 40 : 6.5,
+    quota_hours: 48,
+    remaining_hours: nextWeek ? 8 : 41.5,
+  };
+}
+
 function created(body: Record<string, unknown>, status = "approved"): Reservation {
   return {
     id: "r-1",
@@ -55,7 +68,7 @@ function bookingApi(respond?: (request: FakeRequest) => Response) {
     healthy,
     on("GET", `/servers/${SERVER_ID}`, () => Response.json(server)),
     on("GET", `/servers/${SERVER_ID}/availability`, () => Response.json(availability)),
-    on("GET", "/me/quota", () => Response.json({})),
+    on("GET", "/me/quota", (request) => Response.json(quotaFor(request))),
     on("POST", "/reservations", (request) =>
       respond
         ? respond(request)
@@ -86,6 +99,28 @@ function posted(requests: FakeRequest[]) {
 }
 
 describe("booking dialog", () => {
+  it("shows GPU-hours for the week the chosen start falls in", async () => {
+    const requests = bookingApi();
+    renderRoute(`/servers/${SERVER_ID}`);
+    const dialog = await openDialog();
+
+    fill(dialog, { "Start date": "2030-01-11", "Start time": "22:00" });
+    expect(
+      await within(dialog).findByText(
+        /Week starting Mon, Jan 7, 00:00 PST: 6\.5 of 48 GPU-hours used, 41\.5 left\./,
+      ),
+    ).toBeInTheDocument();
+
+    fill(dialog, { "Start date": "2030-01-15", "Start time": "20:00" });
+    expect(
+      await within(dialog).findByText(
+        /Week starting Mon, Jan 14, 00:00 PST: 40 of 48 GPU-hours used, 8 left\./,
+      ),
+    ).toBeInTheDocument();
+    const asked = requests.filter((r) => r.path === "/me/quota").map((r) => r.query.get("at"));
+    expect(asked).toContain("2030-01-16T04:00:00.000Z");
+  });
+
   it("books an overnight reservation, moving the end date to the next day", async () => {
     const requests = bookingApi();
     renderRoute(`/servers/${SERVER_ID}`);

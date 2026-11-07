@@ -1,5 +1,5 @@
 import { zodResolver } from "@hookform/resolvers/zod";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { useForm, useWatch } from "react-hook-form";
 import { z } from "zod";
@@ -16,7 +16,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import type { Reservation, Server } from "@/lib/api-types";
-import { labDateKey, labLocalToUtc, labTimeOfDay } from "@/lib/lab-time";
+import { formatInLab, labDateKey, labLocalToUtc, labTimeOfDay } from "@/lib/lab-time";
 import {
   ambiguityNote,
   HALF_HOURS,
@@ -26,7 +26,9 @@ import {
 } from "@/reservations/booking";
 import {
   createReservation,
+  getQuota,
   PURPOSE_MAX_LENGTH,
+  quotaAtKey,
   reservationsKey,
 } from "@/reservations/reservations-api";
 
@@ -76,6 +78,33 @@ function makeSchema(timeZone: string, gpuCount: number) {
 }
 
 type BookingValues = z.infer<ReturnType<typeof makeSchema>>;
+
+/**
+ * Quota usage in the week the chosen start falls in. Next week's bookings are checked
+ * against next week, so the current week's numbers would mislead here.
+ */
+function WeekQuota({ start }: { start: Date | null }) {
+  const at = start?.toISOString() ?? null;
+  const quota = useQuery({
+    queryKey: quotaAtKey(at ?? ""),
+    queryFn: ({ signal }) => getQuota(signal, start ?? undefined),
+    enabled: at !== null,
+  });
+  if (at === null) return null;
+  let text: string;
+  if (quota.isPending) text = "Checking your GPU-hours for that week…";
+  else if (quota.isError) text = "Could not load your GPU-hours for that week.";
+  else {
+    const { used_hours: used, quota_hours: total, remaining_hours: left } = quota.data;
+    const week = formatInLab(quota.data.week_start, quota.data.timezone);
+    text = `Week starting ${week}: ${String(used)} of ${String(total)} GPU-hours used, ${String(left)} left.`;
+  }
+  return (
+    <p className="text-xs text-muted-foreground" aria-live="polite">
+      {text}
+    </p>
+  );
+}
 
 function defaults(server: Server, start: Date): BookingValues {
   const zone = server.lab.timezone;
@@ -135,6 +164,11 @@ function BookingForm({
     control,
     name: ["start_date", "start_time", "end_date", "end_time"],
   });
+
+  const plannedStart = useMemo(() => {
+    const result = labLocalToUtc(startDate, startTime, zone);
+    return result.ok ? result.utc : null;
+  }, [startDate, startTime, zone]);
 
   const submit = handleSubmit(async (values) => {
     setFormError(null);
@@ -226,6 +260,7 @@ function BookingForm({
         error={errors.gpu_count?.message}
         {...register("gpu_count", { valueAsNumber: true })}
       />
+      <WeekQuota start={plannedStart} />
       <TextareaField
         label="Purpose"
         rows={3}

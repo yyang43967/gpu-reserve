@@ -50,6 +50,11 @@ export function availabilityKey(serverId: string) {
 
 export const quotaKey = [...reservationsKey, "quota"] as const;
 
+/** The quota week containing `at` (an ISO instant), such as a planned booking's start. */
+export function quotaAtKey(at: string) {
+  return [...quotaKey, "at", at] as const;
+}
+
 export function listReservations(
   params: ReservationListParams,
   signal?: AbortSignal,
@@ -102,8 +107,13 @@ export function getAvailability(
   );
 }
 
-export function getQuota(signal?: AbortSignal): Promise<Quota> {
-  return apiFetch<Quota>("/me/quota", { signal });
+/**
+ * GPU-hours used and left in one quota week: the current week, or the week containing
+ * `at`. A booking is checked against every week it overlaps.
+ */
+export function getQuota(signal?: AbortSignal, at?: Date): Promise<Quota> {
+  const query = at ? `?${new URLSearchParams({ at: at.toISOString() }).toString()}` : "";
+  return apiFetch<Quota>(`/me/quota${query}`, { signal });
 }
 
 /** Whether the reservation can still be cancelled or ended early, judged at `now`. */

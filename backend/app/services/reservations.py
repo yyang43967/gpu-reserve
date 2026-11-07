@@ -48,7 +48,6 @@ from app.models import (
     User,
     UserRole,
 )
-from app.models.lab import DEFAULT_LAB_TIMEZONE
 from app.models.reservation import HOLDING_STATUSES, QUOTA_STATUSES
 from app.services import audit, booking_rules, locks
 from app.services.booking_rules import Booking, Interval
@@ -58,8 +57,6 @@ MAX_ACTIVE_RESERVATIONS: Final = 4
 # After the first attempt, retry up to this many times when another booking takes a
 # chosen GPU first.
 MAX_ALLOCATION_RETRIES: Final = 3
-# Weekly quotas are counted in one fixed zone, whichever lab a booking is in.
-QUOTA_TIMEZONE: Final = ZoneInfo(DEFAULT_LAB_TIMEZONE)
 
 # exclusion_violation: another transaction took one of the chosen GPUs.
 EXCLUSION_VIOLATION: Final = "23P01"
@@ -236,11 +233,18 @@ class NewReservation:
 
 
 async def create_reservation(
-    session: AsyncSession, actor: User, request: NewReservation, *, now: datetime
+    session: AsyncSession,
+    actor: User,
+    request: NewReservation,
+    *,
+    now: datetime,
+    quota_zone: ZoneInfo,
 ) -> Reservation:
     """Book `gpu_count` GPUs on a server for [starts_at, ends_at).
 
-    Raises a DomainError for any rule the request breaks. The caller commits.
+    `quota_zone` is the zone whose Monday-to-Monday weeks the quota is counted in,
+    whichever lab the server is in. Raises a DomainError for any rule the request
+    breaks. The caller commits.
     """
     # Only the shape of the request is checked before taking locks. Every rule that
     # reads server or lab data runs after the server lock, so it sees the version of
@@ -268,7 +272,7 @@ async def create_reservation(
         raise TooManyReservations(
             f"You can hold at most {MAX_ACTIVE_RESERVATIONS} upcoming or running reservations."
         )
-    weeks = booking_rules.weeks_overlapping(interval, QUOTA_TIMEZONE)
+    weeks = booking_rules.weeks_overlapping(interval, quota_zone)
     existing = await _load_quota_bookings(
         session, actor.id, Interval(weeks[0].start, weeks[-1].end)
     )
@@ -276,7 +280,7 @@ async def create_reservation(
         booking,
         existing,
         quota_hours=account.quota_hours,
-        zone=QUOTA_TIMEZONE,
+        zone=quota_zone,
     )
 
     status = ReservationStatus.PENDING if server.requires_approval else ReservationStatus.APPROVED
@@ -718,14 +722,17 @@ class QuotaStatus:
         return max(0, self.quota_minutes - self.used_minutes)
 
 
-async def quota_status(session: AsyncSession, user: User, *, now: datetime) -> QuotaStatus:
-    """The user's GPU time in the current quota week, counted with the same functions
-    the booking check uses."""
-    week = booking_rules.week_containing(now, QUOTA_TIMEZONE)
+async def quota_status(
+    session: AsyncSession, user: User, *, at: datetime, quota_zone: ZoneInfo
+) -> QuotaStatus:
+    """The user's GPU time in the quota week containing `at`, counted with the same
+    functions the booking check uses. Pass now for the current week, or a booking's
+    start to see the week it will be checked against."""
+    week = booking_rules.week_containing(at, quota_zone)
     bookings = await _load_quota_bookings(session, user.id, week)
     return QuotaStatus(
         week=week,
-        timezone=QUOTA_TIMEZONE.key,
+        timezone=quota_zone.key,
         used_minutes=booking_rules.used_gpu_minutes(week, bookings),
         quota_minutes=user.weekly_gpu_hour_quota * booking_rules.MINUTES_PER_HOUR,
     )

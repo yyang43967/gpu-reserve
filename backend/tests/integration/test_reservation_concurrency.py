@@ -43,7 +43,7 @@ from tests.integration.concurrency import (
     run_together,
 )
 from tests.integration.db_utils import truncate_all
-from tests.integration.reservation_helpers import add_lab, add_server, add_user
+from tests.integration.reservation_helpers import QUOTA_ZONE, add_lab, add_server, add_user
 
 pytestmark = pytest.mark.integration
 
@@ -103,7 +103,9 @@ async def _last_two_gpus(factory: async_sessionmaker[AsyncSession]) -> tuple[Ser
     async with factory() as db:
         server = await add_server(db, await add_lab(db), gpu_count=4)
         owner = await add_user(db, "owner@example.edu")
-        await create_reservation(db, owner, _one_gpu(server, gpus=2), now=NOW)
+        await create_reservation(
+            db, owner, _one_gpu(server, gpus=2), now=NOW, quota_zone=QUOTA_ZONE
+        )
         await db.commit()
         students = [await add_user(db, f"student{i:02}@example.edu") for i in range(BOOKERS)]
     return server, students
@@ -125,7 +127,9 @@ async def test_concurrent_bookings_for_the_last_free_gpus(
     server, students = await _last_two_gpus(factory)
 
     async def book(session: AsyncSession, i: int) -> Reservation:
-        return await create_reservation(session, students[i], _one_gpu(server), now=NOW)
+        return await create_reservation(
+            session, students[i], _one_gpu(server), now=NOW, quota_zone=QUOTA_ZONE
+        )
 
     successes, failures = _outcomes(await run_together(factory, BOOKERS, book))
 
@@ -157,7 +161,9 @@ async def test_control_without_the_exclusion_constraint_double_books(
     monkeypatch.setattr(reservations, "_select_free_gpus", read_then_wait)
 
     async def book(session: AsyncSession, i: int) -> Reservation:
-        return await create_reservation(session, students[i], _one_gpu(server), now=NOW)
+        return await create_reservation(
+            session, students[i], _one_gpu(server), now=NOW, quota_zone=QUOTA_ZONE
+        )
 
     async with race_engine.begin() as conn:
         definition = await conn.scalar(
@@ -231,7 +237,9 @@ async def test_concurrent_bookings_never_exceed_the_quota(
     student, servers = await _quota_race(factory)
 
     async def book(session: AsyncSession, i: int) -> Reservation:
-        return await create_reservation(session, student, _thirteen_hours(servers[i]), now=NOW)
+        return await create_reservation(
+            session, student, _thirteen_hours(servers[i]), now=NOW, quota_zone=QUOTA_ZONE
+        )
 
     successes, failures = _outcomes(await run_together(factory, QUOTA_RACERS, book))
 
@@ -261,7 +269,9 @@ async def test_control_without_the_user_lock_exceeds_the_quota(
     monkeypatch.setattr(reservations, "_load_quota_bookings", read_then_wait)
 
     async def book(session: AsyncSession, i: int) -> Reservation:
-        return await create_reservation(session, student, _thirteen_hours(servers[i]), now=NOW)
+        return await create_reservation(
+            session, student, _thirteen_hours(servers[i]), now=NOW, quota_zone=QUOTA_ZONE
+        )
 
     successes, _ = _outcomes(await run_together(factory, QUOTA_RACERS, book))
 
@@ -277,7 +287,9 @@ async def test_reservation_rows_match_allocations(
     server, students = await _last_two_gpus(factory)
 
     async def book(session: AsyncSession, i: int) -> Reservation:
-        return await create_reservation(session, students[i], _one_gpu(server), now=NOW)
+        return await create_reservation(
+            session, students[i], _one_gpu(server), now=NOW, quota_zone=QUOTA_ZONE
+        )
 
     await run_together(factory, BOOKERS, book)
 
@@ -312,7 +324,11 @@ async def test_booking_waits_for_a_quota_change_and_uses_the_new_quota(
             admin_session,
             booking_session,
             lambda: create_reservation(
-                booking_session, student, _thirteen_hours(servers_[0]), now=NOW
+                booking_session,
+                student,
+                _thirteen_hours(servers_[0]),
+                now=NOW,
+                quota_zone=QUOTA_ZONE,
             ),
         )
 
@@ -330,7 +346,9 @@ async def _reduction_race(factory: async_sessionmaker[AsyncSession]) -> tuple[Se
     async with factory() as db:
         server = await add_server(db, await add_lab(db), gpu_count=4)
         owner = await add_user(db, "owner@example.edu")
-        await create_reservation(db, owner, _one_gpu(server, gpus=2), now=NOW)
+        await create_reservation(
+            db, owner, _one_gpu(server, gpus=2), now=NOW, quota_zone=QUOTA_ZONE
+        )
         await db.commit()
         student = await add_user(db, "student@example.edu")
         admin = await add_user(db, "admin@example.edu", role=UserRole.ADMIN)
@@ -374,7 +392,9 @@ async def _reduction_first(
             engine,
             admin_session,
             booking_session,
-            lambda: create_reservation(booking_session, student, _one_gpu(server), now=NOW),
+            lambda: create_reservation(
+                booking_session, student, _one_gpu(server), now=NOW, quota_zone=QUOTA_ZONE
+            ),
         )
 
 
@@ -385,7 +405,9 @@ async def _booking_first(
     reduces gpu_count."""
     server, student, _admin = await _reduction_race(factory)
     async with factory() as booking_session, factory() as admin_session:
-        await create_reservation(booking_session, student, _one_gpu(server), now=NOW)
+        await create_reservation(
+            booking_session, student, _one_gpu(server), now=NOW, quota_zone=QUOTA_ZONE
+        )
         return await race_pair(
             engine,
             booking_session,
@@ -461,7 +483,9 @@ async def test_server_edits_wait_for_bookings_in_progress(
     max_booking_hours waits until a booking that read the old limit commits."""
     server, student, _ = await _reduction_race(factory)
     async with factory() as booking_session, factory() as admin_session:
-        await create_reservation(booking_session, student, _one_gpu(server), now=NOW)
+        await create_reservation(
+            booking_session, student, _one_gpu(server), now=NOW, quota_zone=QUOTA_ZONE
+        )
         outcome = await race_pair(
             race_engine,
             booking_session,
@@ -487,7 +511,9 @@ async def test_booking_waits_for_a_deactivation_and_is_refused(
             race_engine,
             admin_session,
             booking_session,
-            lambda: create_reservation(booking_session, student, _one_gpu(server), now=NOW),
+            lambda: create_reservation(
+                booking_session, student, _one_gpu(server), now=NOW, quota_zone=QUOTA_ZONE
+            ),
         )
 
     assert outcome.blocked
@@ -505,7 +531,9 @@ async def _pending_reservation(
         restricted = await add_server(db, lab, "h100-node-01", requires_approval=True)
         student = await add_user(db, "student@example.edu")
         admin = await add_user(db, "admin@example.edu", role=UserRole.ADMIN)
-        pending = await create_reservation(db, student, _one_gpu(restricted), now=NOW)
+        pending = await create_reservation(
+            db, student, _one_gpu(restricted), now=NOW, quota_zone=QUOTA_ZONE
+        )
         await db.commit()
     return pending, student, admin
 

@@ -26,6 +26,7 @@ from app.services import labs, reservations, servers
 from app.services.booking_rules import Interval, used_gpu_minutes
 from app.services.reservations import NewReservation, create_reservation
 from tests.integration.reservation_helpers import (
+    QUOTA_ZONE,
     add_lab,
     add_server,
     add_user,
@@ -56,7 +57,9 @@ def _request(server: Server, start: datetime = SATURDAY, hours: int = 2) -> NewR
 async def _book(
     db: AsyncSession, user: User, server: Server, start: datetime = SATURDAY, hours: int = 2
 ) -> Reservation:
-    reservation = await create_reservation(db, user, _request(server, start, hours), now=NOW)
+    reservation = await create_reservation(
+        db, user, _request(server, start, hours), now=NOW, quota_zone=QUOTA_ZONE
+    )
     await db.commit()
     return reservation
 
@@ -178,7 +181,7 @@ async def test_ended_early_time_is_free_again(
 
     later = SATURDAY + H + timedelta(minutes=30)
     rebooked = await create_reservation(
-        db_session, other, _request(server, later, hours=1), now=now
+        db_session, other, _request(server, later, hours=1), now=now, quota_zone=QUOTA_ZONE
     )
 
     assert [a.gpu.index for a in rebooked.allocations] == [0]

@@ -6,7 +6,7 @@ from fastapi import APIRouter, Query, status
 from pydantic import AwareDatetime
 
 from app.api import problem_responses
-from app.api.deps import AdminUser, CurrentUser, SessionDep
+from app.api.deps import AdminUser, CurrentUser, SessionDep, SettingsDep
 from app.models import ReservationStatus
 from app.schemas.pagination import Page, PageParamsDep
 from app.schemas.reservation import ReservationCreate, ReservationRead, ReservationReject
@@ -30,7 +30,7 @@ _INVALID = problem_responses(status.HTTP_422_UNPROCESSABLE_CONTENT)
     responses={**_NOT_FOUND, **_CONFLICT, **_INVALID},
 )
 async def create_reservation(
-    body: ReservationCreate, user: CurrentUser, session: SessionDep
+    body: ReservationCreate, user: CurrentUser, session: SessionDep, settings: SettingsDep
 ) -> ReservationRead:
     """Book GPUs on a server. Reservations on servers that require approval start as
     `pending`; others are `approved` immediately. Rule violations that depend only on
@@ -41,6 +41,7 @@ async def create_reservation(
         user,
         reservations.NewReservation(**body.model_dump()),
         now=datetime.now(UTC),
+        quota_zone=settings.quota_zone,
     )
     return ReservationRead.build(reservation)
 

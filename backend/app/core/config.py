@@ -1,9 +1,12 @@
 from enum import StrEnum
 from functools import lru_cache
 from typing import Annotated, Final
+from zoneinfo import ZoneInfo
 
 from pydantic import Field, PostgresDsn, RedisDsn, SecretStr, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
+from app.core.timezones import valid_timezone
 
 # HS256 keys shorter than the hash output weaken the signature.
 JWT_SECRET_MIN_BYTES: Final = 32
@@ -71,6 +74,11 @@ class Settings(BaseSettings):
     # How long a presigned upload stays usable.
     upload_url_ttl_seconds: int = Field(default=300, gt=0)
 
+    # Weekly GPU-hour quotas run Monday 00:00 to Monday 00:00 in this one zone, for
+    # every lab. It is set on its own, not taken from the lab default, so changing the
+    # default for new labs can never move existing quota weeks.
+    quota_timezone: str = "America/Los_Angeles"
+
     @field_validator(
         "s3_endpoint_url",
         "s3_public_endpoint_url",
@@ -95,12 +103,21 @@ class Settings(BaseSettings):
             return [origin.strip() for origin in value.split(",") if origin.strip()]
         return value
 
+    @field_validator("quota_timezone")
+    @classmethod
+    def quota_timezone_supported(cls, value: str) -> str:
+        return valid_timezone(value)
+
     @field_validator("jwt_secret")
     @classmethod
     def jwt_secret_long_enough(cls, value: SecretStr) -> SecretStr:
         if len(value.get_secret_value().encode()) < JWT_SECRET_MIN_BYTES:
             raise ValueError(f"must be at least {JWT_SECRET_MIN_BYTES} bytes")
         return value
+
+    @property
+    def quota_zone(self) -> ZoneInfo:
+        return ZoneInfo(self.quota_timezone)
 
 
 @lru_cache
