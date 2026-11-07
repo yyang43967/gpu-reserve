@@ -12,20 +12,37 @@ The sweeping statements are idempotent anyway; the lock keeps two runs from doin
 same work twice and from blocking each other on the same rows.
 """
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import StrEnum
 from typing import Final
 
-from sqlalchemy import BindParameter, DateTime, bindparam, text
+from sqlalchemy import BindParameter, DateTime, bindparam, select, text, update
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.models import (
+    MAX_DELIVERY_ATTEMPTS,
+    GpuAllocation,
+    Notification,
+    NotificationKind,
+    NotificationStatus,
+    Reservation,
+    ReservationStatus,
+)
+from app.services import audit, notifications
 from app.services.email import EmailSender
+
+logger = logging.getLogger(__name__)
 
 # The first key of the two-key advisory locks the jobs take.
 JOB_LOCK_NAMESPACE: Final = 1
 REMINDER_LEAD: Final = timedelta(minutes=60)
 DISPATCH_BATCH_SIZE: Final = 50
+# Long transport errors are cut to this length before being stored.
+LAST_ERROR_MAX_LENGTH: Final = 1000
+ENTITY_RESERVATION: Final = "reservation"
 
 
 class Job(StrEnum):
@@ -67,7 +84,65 @@ async def expire_pending(session: AsyncSession, *, now: datetime) -> int | None:
     A concurrent approval must never leave an approved reservation without active
     allocations, or an expired one with active allocations.
     """
-    raise NotImplementedError("expire_pending is not implemented yet")
+    if not await try_job_lock(session, Job.EXPIRE_PENDING):
+        return None
+
+    # The UPDATE locks each row it changes. A row an approval holds is waited for and
+    # then re-checked against the WHERE clause (READ COMMITTED), so a reservation
+    # approved in the meantime is no longer pending and is left alone.
+    expired = (
+        await session.execute(
+            update(Reservation)
+            .where(
+                Reservation.status == ReservationStatus.PENDING,
+                Reservation.starts_at <= now,
+            )
+            .values(status=ReservationStatus.EXPIRED)
+            .returning(Reservation.id, Reservation.user_id)
+            .execution_options(synchronize_session=False)
+        )
+    ).all()
+    if not expired:
+        return 0
+    ids = [row.id for row in expired]
+
+    await session.execute(
+        update(GpuAllocation)
+        .where(GpuAllocation.reservation_id.in_(ids), GpuAllocation.active.is_(True))
+        .values(active=False)
+        .execution_options(synchronize_session=False)
+    )
+    for reservation_id in ids:
+        audit.record(
+            session,
+            actor_id=None,
+            action="reservation.expired",
+            entity_type=ENTITY_RESERVATION,
+            entity_id=reservation_id,
+            payload={
+                "from_status": ReservationStatus.PENDING.value,
+                "to_status": ReservationStatus.EXPIRED.value,
+            },
+        )
+    # ON CONFLICT is a second guard: only rows this statement expired get here, and a
+    # reservation expires once, so a conflict would mean a bug elsewhere, not a resend.
+    await session.execute(
+        insert(Notification)
+        .values(
+            [
+                {
+                    "reservation_id": row.id,
+                    "recipient_user_id": row.user_id,
+                    "kind": NotificationKind.EXPIRED,
+                    "next_attempt_at": now,
+                }
+                for row in expired
+            ]
+        )
+        .on_conflict_do_nothing(constraint="uq_notifications_reservation_kind")
+    )
+    await session.flush()
+    return len(ids)
 
 
 # --- completing finished reservations ---
@@ -160,8 +235,10 @@ async def dispatch_notifications(
 ) -> DispatchReport:
     """Deliver due notifications: status pending and next_attempt_at <= now.
 
-    Opens its own sessions from `factory` and commits them itself, because whether
-    the send happens inside or between transactions is part of the design.
+    One short transaction per row, from `factory`: claim the oldest due row with
+    FOR UPDATE SKIP LOCKED, send it, record the outcome, commit. It stops when nothing
+    is due or after `batch_size` rows. A crash between the send and the commit leaves
+    the row pending, so at most that one email is sent again.
 
     For each due row:
     - notifications.prepare_email returns None for a stale reminder: mark it skipped.
@@ -176,4 +253,96 @@ async def dispatch_notifications(
 
     Returns the counts of what happened to each row it handled.
     """
-    raise NotImplementedError("dispatch_notifications is not implemented yet")
+    report = _Counts()
+    for _ in range(batch_size):
+        async with factory() as session:
+            note = await _claim_next_due(session, now)
+            if note is None:
+                break
+            await _deliver(session, sender, note, now=now, frontend_url=frontend_url, counts=report)
+            await session.commit()
+    return report.freeze()
+
+
+@dataclass
+class _Counts:
+    sent: int = 0
+    skipped: int = 0
+    retried: int = 0
+    failed: int = 0
+
+    def freeze(self) -> DispatchReport:
+        return DispatchReport(self.sent, self.skipped, self.retried, self.failed)
+
+
+async def _claim_next_due(session: AsyncSession, now: datetime) -> Notification | None:
+    """The oldest due row, locked until this transaction ends.
+
+    FOR UPDATE is what stops two dispatchers from both sending a row: the second
+    cannot read it as pending while the first holds it. SKIP LOCKED makes the second
+    move on to the next row instead of waiting behind a slow send.
+    """
+    return await session.scalar(
+        select(Notification)
+        .where(
+            Notification.status == NotificationStatus.PENDING,
+            Notification.next_attempt_at <= now,
+        )
+        .order_by(Notification.next_attempt_at, Notification.id)
+        .limit(1)
+        .with_for_update(skip_locked=True)
+    )
+
+
+async def _deliver(
+    session: AsyncSession,
+    sender: EmailSender,
+    note: Notification,
+    *,
+    now: datetime,
+    frontend_url: str,
+    counts: _Counts,
+) -> None:
+    """Send one locked row and record the outcome on it. The caller commits."""
+    try:
+        email = await notifications.prepare_email(session, note, now=now, frontend_url=frontend_url)
+        if email is None:
+            note.status = NotificationStatus.SKIPPED
+            counts.skipped += 1
+            return
+        await sender.send(email)
+    except Exception as error:
+        # Any failure, including a bug while preparing the message, counts as an
+        # attempt. A row that always fails is given up on after the last attempt
+        # instead of stopping every tick at the same place.
+        _record_failure(note, error, now=now, counts=counts)
+        return
+    note.status = NotificationStatus.SENT
+    note.sent_at = now
+    counts.sent += 1
+
+
+def _record_failure(
+    note: Notification, error: Exception, *, now: datetime, counts: _Counts
+) -> None:
+    note.attempts += 1
+    note.last_error = (str(error) or type(error).__name__)[:LAST_ERROR_MAX_LENGTH]
+    if note.attempts >= MAX_DELIVERY_ATTEMPTS:
+        note.status = NotificationStatus.FAILED
+        counts.failed += 1
+        logger.error(
+            "Gave up on notification %s after %d attempts: %s",
+            note.id,
+            note.attempts,
+            note.last_error,
+        )
+    else:
+        note.next_attempt_at = now + notifications.retry_delay(note.attempts)
+        counts.retried += 1
+        logger.warning(
+            "Notification %s failed (attempt %d), retrying at %s: %s",
+            note.id,
+            note.attempts,
+            note.next_attempt_at.isoformat(),
+            note.last_error,
+        )

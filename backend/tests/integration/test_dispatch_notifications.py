@@ -28,7 +28,7 @@ from app.models import (
     User,
     UserRole,
 )
-from app.services import jobs, reservations
+from app.services import jobs, notifications, reservations
 from app.services.email import OutgoingEmail
 from tests.integration.concurrency import BARRIER_TIMEOUT, LOCK_WAIT_TIMEOUT, POLL_INTERVAL, Gate
 from tests.integration.reservation_helpers import add_lab, add_server, add_user, book
@@ -490,3 +490,28 @@ async def test_control_without_the_row_lock_a_row_is_sent_twice(
     )
 
     assert [e.to_address for e in sender.sent] == ["student00@example.edu"] * 2
+
+
+async def test_a_row_that_cannot_be_prepared_counts_as_a_failed_attempt(
+    job_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A bug while building one message must not stop every tick at that row: it is
+    retried with backoff like a transport error, and the other rows still go out."""
+    [broken_id, healthy_id] = await _rows(job_factory, [NotificationKind.APPROVED], users=2)
+    original = notifications.prepare_email
+
+    async def prepare(session: AsyncSession, note: Notification, **kwargs: object) -> object:
+        if note.id == broken_id:
+            raise KeyError("missing template field")
+        return await original(session, note, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(notifications, "prepare_email", prepare)
+    sender = FakeSender()
+
+    report = await _dispatch(job_factory, sender)
+
+    assert report == jobs.DispatchReport(sent=1, retried=1)
+    broken = await _get(job_factory, broken_id)
+    assert (broken.status, broken.attempts) == (NotificationStatus.PENDING, 1)
+    assert broken.last_error is not None and "missing template field" in broken.last_error
+    assert (await _get(job_factory, healthy_id)).status is NotificationStatus.SENT

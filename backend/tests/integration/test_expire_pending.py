@@ -292,3 +292,20 @@ async def test_control_approval_without_its_row_lock_overwrites_the_expiry(
 
     async with job_factory() as db:
         assert await _state(db, reservation_id) == (ReservationStatus.APPROVED, [False])
+
+
+async def test_expiry_touches_updated_at(
+    db_session: AsyncSession, student: User, restricted: Server
+) -> None:
+    pending = await book(db_session, student, restricted, SATURDAY, now=NOW)
+    before = await db_session.scalar(
+        select(Reservation.updated_at).where(Reservation.id == pending.id)
+    )
+
+    await jobs.expire_pending(db_session, now=SATURDAY)
+    await db_session.commit()
+
+    after = await db_session.scalar(
+        select(Reservation.updated_at).where(Reservation.id == pending.id)
+    )
+    assert before is not None and after is not None and after > before
