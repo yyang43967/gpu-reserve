@@ -17,6 +17,7 @@ No path takes these locks in the opposite order.
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from enum import StrEnum
 from typing import Final
 from zoneinfo import ZoneInfo
 
@@ -448,6 +449,14 @@ async def get_reservation(
     return reservation
 
 
+class ReservationOrder(StrEnum):
+    """List order by start time. Newest first suits a history; soonest first suits a
+    queue of decisions."""
+
+    NEWEST_FIRST = "-starts_at"
+    SOONEST_FIRST = "starts_at"
+
+
 @dataclass(frozen=True)
 class ReservationFilters:
     status: ReservationStatus | None = None
@@ -457,6 +466,7 @@ class ReservationFilters:
     # Reservations overlapping [overlaps_from, overlaps_to).
     overlaps_from: datetime | None = None
     overlaps_to: datetime | None = None
+    order: ReservationOrder = ReservationOrder.NEWEST_FIRST
 
 
 @dataclass(frozen=True)
@@ -473,8 +483,9 @@ async def list_reservations(
     offset: int,
     limit: int,
 ) -> ReservationListing:
-    """Newest start first. Related rows are loaded with one query per relationship,
-    so a page costs the same number of statements whatever its size."""
+    """Ordered by start time, newest first unless asked otherwise. Related rows are
+    loaded with one query per relationship, so a page costs the same number of
+    statements whatever its size."""
     conditions = []
     if viewer.role is not UserRole.ADMIN:
         conditions.append(Reservation.user_id == viewer.id)
@@ -498,7 +509,12 @@ async def list_reservations(
             selectinload(Reservation.user),
             selectinload(Reservation.allocations).selectinload(GpuAllocation.gpu),
         )
-        .order_by(Reservation.starts_at.desc(), Reservation.id)
+        .order_by(
+            Reservation.starts_at.asc()
+            if filters.order is ReservationOrder.SOONEST_FIRST
+            else Reservation.starts_at.desc(),
+            Reservation.id,
+        )
         .offset(offset)
         .limit(limit)
     )

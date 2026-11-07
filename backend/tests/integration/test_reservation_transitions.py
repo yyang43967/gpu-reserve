@@ -551,6 +551,45 @@ async def test_list_is_newest_start_first_and_paginated(
     assert [r.starts_at for r in page.items] == [starts[1]]
 
 
+async def test_list_can_be_soonest_first(
+    db_session: AsyncSession, student: User, server: Server
+) -> None:
+    starts = [SATURDAY + i * 3 * H for i in range(3)]
+    for start in reversed(starts):
+        await _book(db_session, student, server, start)
+
+    listing = await reservations.list_reservations(
+        db_session,
+        student,
+        reservations.ReservationFilters(order=reservations.ReservationOrder.SOONEST_FIRST),
+        offset=0,
+        limit=10,
+    )
+
+    assert [r.starts_at for r in listing.items] == starts
+
+
+async def test_list_order_through_the_api(
+    api_client: AsyncClient, student_headers: dict[str, str], server: Server
+) -> None:
+    start = next_saturday(datetime.now(UTC))
+    for offset in (3, 0):
+        await _post(
+            api_client, RESERVATIONS, student_headers, booking_body(server.id, start + offset * H)
+        )
+
+    soonest = await api_client.get(
+        RESERVATIONS, headers=student_headers, params={"order": "starts_at"}
+    )
+    default = await api_client.get(RESERVATIONS, headers=student_headers)
+    bad = await api_client.get(RESERVATIONS, headers=student_headers, params={"order": "id"})
+
+    starts = [item["starts_at"] for item in soonest.json()["items"]]
+    assert starts == sorted(starts)
+    assert [item["starts_at"] for item in default.json()["items"]] == starts[::-1]
+    assert bad.status_code == 422
+
+
 async def test_list_filters_through_the_api(
     api_client: AsyncClient, student_headers: dict[str, str], server: Server
 ) -> None:

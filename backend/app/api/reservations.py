@@ -63,6 +63,10 @@ async def list_reservations(
             description="Only reservations that end after this time (ends_at > from).",
         ),
     ] = None,
+    order: Annotated[
+        reservations.ReservationOrder,
+        Query(description="`-starts_at` (default) for newest first, `starts_at` for soonest."),
+    ] = reservations.ReservationOrder.NEWEST_FIRST,
     overlaps_to: Annotated[
         AwareDatetime | None,
         Query(
@@ -74,7 +78,7 @@ async def list_reservations(
         ),
     ] = None,
 ) -> Page[ReservationRead]:
-    """Reservations, newest start first. Students see their own; admins see all."""
+    """Reservations by start time. Students see their own; admins see all."""
     listing = await reservations.list_reservations(
         session,
         user,
@@ -84,6 +88,7 @@ async def list_reservations(
             user_id=user_id,
             overlaps_from=overlaps_from,
             overlaps_to=overlaps_to,
+            order=order,
         ),
         offset=paging.offset,
         limit=paging.page_size,

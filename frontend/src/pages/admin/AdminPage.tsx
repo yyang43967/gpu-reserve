@@ -1,9 +1,15 @@
-import { Building2, ChevronRight, Server, Users } from "lucide-react";
+import { Building2, ChevronRight, ClipboardCheck, Server, Users } from "lucide-react";
 import { Link } from "react-router";
 
 import { PageHeader } from "@/components/page-header";
 
 const SECTIONS = [
+  {
+    to: "/admin/approvals",
+    title: "Approvals",
+    description: "Approve or reject bookings on servers that need approval.",
+    icon: ClipboardCheck,
+  },
   {
     to: "/admin/users",
     title: "Users",
