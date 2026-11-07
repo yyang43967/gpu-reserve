@@ -1,21 +1,29 @@
 import uuid
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
-from sqlalchemy import ColumnElement, func, select, update
+from sqlalchemy import ColumnElement, exists, func, select, update
 from sqlalchemy.dialects.postgresql import distinct_on
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import contains_eager, selectinload
 
-from app.core.exceptions import HostnameTaken, ServerNotFound, UnknownLab
+from app.core.exceptions import (
+    GpusInUse,
+    HostnameTaken,
+    ServerHasReservations,
+    ServerNotFound,
+    UnknownLab,
+)
 from app.core.unset import UNSET, Unset
-from app.models import Gpu, GpuModel, Lab, Server, ServerStatus, User
+from app.models import Gpu, GpuAllocation, GpuModel, Lab, Reservation, Server, ServerStatus, User
 from app.models.server import DEFAULT_MAX_BOOKING_HOURS, GPU_MEMORY_GB
 from app.services.labs import can_see_inactive
 from app.services.storage import ObjectStorage
 from app.services.uploads import UploadPurpose, verify_upload
 
 HOSTNAME_UNIQUE_CONSTRAINT = "uq_servers_hostname"
+FOREIGN_KEY_VIOLATION = "23503"
 
 
 async def _ensure_lab_exists(session: AsyncSession, lab_id: uuid.UUID) -> None:
@@ -145,24 +153,70 @@ async def get_server(session: AsyncSession, viewer: User, server_id: uuid.UUID) 
 # --- GPU rows ---
 
 
-async def _ensure_gpus_removable(
-    session: AsyncSession, server_id: uuid.UUID, min_index: int
-) -> None:
-    """Raise GpusInUse if GPUs numbered `min_index` and up have future active allocations.
+async def _gpus_in_use(
+    session: AsyncSession, server_id: uuid.UUID, *, min_index: int, now: datetime
+) -> GpusInUse | None:
+    """An error describing active allocations that have not ended yet on the server's
+    GPUs numbered `min_index` and up, or None if there are none.
 
-    Allocations do not exist yet, so nothing can block a reduction. This is the one place
-    the check will go, so every path that removes GPUs already calls it.
+    Pending reservations hold their GPUs too, so their allocations count. The caller
+    holds the server's row lock (FOR UPDATE), so no booking can add an allocation on
+    these GPUs until the caller's transaction ends.
     """
+    rows = (
+        await session.execute(
+            select(Gpu.index.label("gpu_number"), GpuAllocation.reservation_id)
+            .join(GpuAllocation, GpuAllocation.gpu_id == Gpu.id)
+            .where(
+                Gpu.server_id == server_id,
+                Gpu.removed_at.is_(None),
+                Gpu.index >= min_index,
+                GpuAllocation.active.is_(True),
+                GpuAllocation.ends_at > now,
+            )
+        )
+    ).all()
+    if not rows:
+        return None
+    gpu_numbers = ", ".join(str(index) for index in sorted({row.gpu_number for row in rows}))
+    count = len({row.reservation_id for row in rows})
+    noun = "reservation" if count == 1 else "reservations"
+    return GpusInUse(f"GPUs {gpu_numbers} are held by {count} current or upcoming {noun}.")
+
+
+async def _ensure_gpus_removable(
+    session: AsyncSession, server_id: uuid.UUID, *, min_index: int, now: datetime
+) -> None:
+    """Refuse to remove GPUs numbered `min_index` and up while reservations hold them."""
+    error = await _gpus_in_use(session, server_id, min_index=min_index, now=now)
+    if error is not None:
+        raise error
+
+
+async def _ensure_server_retirable(
+    session: AsyncSession, server_id: uuid.UUID, *, now: datetime
+) -> None:
+    """Refuse to retire a server while reservations hold any of its GPUs. Students no
+    longer see retired servers, so they would hold bookings on hardware they cannot
+    find. Maintenance does not need this: it only stops new bookings."""
+    error = await _gpus_in_use(session, server_id, min_index=0, now=now)
+    if error is not None:
+        raise error
 
 
 async def _ensure_server_deletable(session: AsyncSession, server_id: uuid.UUID) -> None:
-    """Raise GpusInUse if the server has future active allocations.
+    """Refuse to delete a server with any reservation, in any status, past or future.
+    Its history must stay, so it is retired instead. This does not depend on the time,
+    so it takes no `now`."""
+    if await session.scalar(select(exists().where(Reservation.server_id == server_id))):
+        raise ServerHasReservations(
+            "This server has reservation history and cannot be deleted. Retire it instead."
+        )
 
-    Like `_ensure_gpus_removable`, a no-op until allocations exist.
-    """
 
-
-async def _sync_gpus(session: AsyncSession, server: Server, old_count: int) -> None:
+async def _sync_gpus(
+    session: AsyncSession, server: Server, *, old_count: int, now: datetime
+) -> None:
     """Make the active GPU rows of `server` match `server.gpu_count`.
 
     GPUs are numbered 0..gpu_count-1. Lowering the count soft-removes the highest
@@ -172,7 +226,7 @@ async def _sync_gpus(session: AsyncSession, server: Server, old_count: int) -> N
     """
     new_count = server.gpu_count
     if new_count < old_count:
-        await _ensure_gpus_removable(session, server.id, min_index=new_count)
+        await _ensure_gpus_removable(session, server.id, min_index=new_count, now=now)
         await session.execute(
             update(Gpu)
             .where(Gpu.server_id == server.id, Gpu.removed_at.is_(None), Gpu.index >= new_count)
@@ -243,7 +297,7 @@ async def create_server(
     )
     session.add(server)
     await _flush_checking_hostname(session, hostname)
-    await _sync_gpus(session, server, old_count=0)
+    await _sync_gpus(session, server, old_count=0, now=datetime.now(UTC))
     return await get_server_with_lab(session, server.id)
 
 
@@ -262,8 +316,13 @@ async def update_server(
     requires_approval: bool | None = None,
     max_booking_hours: int | None = None,
     notes: str | Unset | None = UNSET,
+    now: datetime,
 ) -> Server:
-    """Change any of the given fields. Pass None for interconnect or notes to clear them."""
+    """Change any of the given fields. Pass None for interconnect or notes to clear them.
+
+    Every change runs under the server's row lock, so a booking (which holds FOR SHARE)
+    sees either the old or the new version of the server, never a mix.
+    """
     server = await _lock_server(session, server_id)
     old_count = server.gpu_count
 
@@ -285,6 +344,8 @@ async def update_server(
     if interconnect is not UNSET:
         server.interconnect = interconnect or None
     if status is not None:
+        if status is ServerStatus.RETIRED and server.status is not ServerStatus.RETIRED:
+            await _ensure_server_retirable(session, server.id, now=now)
         server.status = status
     if requires_approval is not None:
         server.requires_approval = requires_approval
@@ -295,7 +356,7 @@ async def update_server(
 
     await _flush_checking_hostname(session, server.hostname)
     if server.gpu_count != old_count:
-        await _sync_gpus(session, server, old_count=old_count)
+        await _sync_gpus(session, server, old_count=old_count, now=now)
     return await get_server_with_lab(session, server.id)
 
 
@@ -324,7 +385,8 @@ async def set_image(
 
 
 async def delete_server(session: AsyncSession, server_id: uuid.UUID) -> str | None:
-    """Delete a server. Its GPU rows go with it (ON DELETE CASCADE).
+    """Delete a server that has never been booked. Its GPU rows go with it (ON DELETE
+    CASCADE). A server with reservations is refused; retire it instead.
 
     Returns the server's image key, which the caller deletes from storage once the
     transaction has committed.
@@ -333,5 +395,14 @@ async def delete_server(session: AsyncSession, server_id: uuid.UUID) -> str | No
     await _ensure_server_deletable(session, server.id)
     image_key = server.image_key
     await session.delete(server)
-    await session.flush()
+    try:
+        await session.flush()
+    except IntegrityError as exc:
+        # The RESTRICT foreign keys from reservations and allocations are the backstop
+        # if a reservation appears despite the check.
+        if getattr(exc.orig, "sqlstate", None) == FOREIGN_KEY_VIOLATION:
+            raise ServerHasReservations(
+                "This server has reservation history and cannot be deleted. Retire it instead."
+            ) from exc
+        raise
     return image_key

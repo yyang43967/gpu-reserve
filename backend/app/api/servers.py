@@ -114,6 +114,7 @@ async def update_server(
         requires_approval=body.requires_approval,
         max_booking_hours=body.max_booking_hours,
         notes=body.notes if "notes" in sent else UNSET,
+        now=datetime.now(UTC),
     )
     if "image_key" in sent:
         replaced = await servers.set_image(session, storage, admin, server_id, body.image_key)

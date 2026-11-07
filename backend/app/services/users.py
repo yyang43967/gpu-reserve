@@ -1,7 +1,8 @@
 import uuid
 from dataclasses import dataclass
+from datetime import datetime
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import exists, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -9,15 +10,20 @@ from app.core.exceptions import (
     EmailAlreadyRegistered,
     FullNameRequired,
     SelfModificationForbidden,
+    UserHasReservations,
     UserNotFound,
 )
-from app.models import User, UserRole
+from app.models import Reservation, User, UserRole
 from app.models.user import DEFAULT_WEEKLY_GPU_HOUR_QUOTA
-from app.services import locks, passwords, sessions
+from app.services import locks, passwords, reservations, sessions
 from app.services.storage import ObjectStorage
 from app.services.uploads import UploadPurpose, verify_upload
 
 EMAIL_UNIQUE_CONSTRAINT = "uq_users_email"
+FOREIGN_KEY_VIOLATION = "23503"
+_HAS_RESERVATIONS = (
+    "This account has reservation history and cannot be deleted. Deactivate it instead."
+)
 
 
 def normalize_email(email: str) -> str:
@@ -156,8 +162,14 @@ async def update_user(
     role: UserRole | None = None,
     is_active: bool | None = None,
     weekly_gpu_hour_quota: int | None = None,
+    now: datetime,
 ) -> User:
     """Change role, active status, or quota.
+
+    Changing the quota or the active status takes the user's booking lock first, so an
+    in-flight booking finishes against the old values and later ones see the new ones.
+    Deactivation cancels the user's pending and upcoming reservations and ends running
+    ones early, in the same transaction.
 
     Deactivation and role changes sign the user out everywhere. Access is already
     checked against the database on every request, so this is not needed to cut off
@@ -173,20 +185,34 @@ async def update_user(
     if user.id == actor.id and (role_changes or deactivates):
         raise SelfModificationForbidden("You cannot demote or deactivate your own account.")
 
+    quota_changes = (
+        weekly_gpu_hour_quota is not None and weekly_gpu_hour_quota != user.weekly_gpu_hour_quota
+    )
+    activity_changes = is_active is not None and is_active != user.is_active
+    if quota_changes or activity_changes:
+        # Taken before the users row is updated: bookings take this lock first too.
+        await locks.lock_user_bookings(session, user.id)
+
     if role is not None:
         user.role = role
     if is_active is not None:
         user.is_active = is_active
-    if weekly_gpu_hour_quota is not None and weekly_gpu_hour_quota != user.weekly_gpu_hour_quota:
-        # Wait for the user's in-flight bookings, which check against the old quota.
-        await locks.lock_user_bookings(session, user.id)
+    if weekly_gpu_hour_quota is not None:
         user.weekly_gpu_hour_quota = weekly_gpu_hour_quota
+    if deactivates:
+        await reservations.release_user_reservations(session, user.id, now=now, actor_id=actor.id)
     if role_changes or deactivates:
         await sessions.revoke_all_sessions(session, user.id)
 
     await session.flush()
     await session.refresh(user)
     return user
+
+
+async def _ensure_user_deletable(session: AsyncSession, user_id: uuid.UUID) -> None:
+    """Accounts with any reservation keep their history; deactivate them instead."""
+    if await session.scalar(select(exists().where(Reservation.user_id == user_id))):
+        raise UserHasReservations(_HAS_RESERVATIONS)
 
 
 async def delete_user(session: AsyncSession, actor: User, user_id: uuid.UUID) -> str | None:
@@ -198,9 +224,17 @@ async def delete_user(session: AsyncSession, actor: User, user_id: uuid.UUID) ->
     if user_id == actor.id:
         raise SelfModificationForbidden("You cannot delete your own account.")
     user = await get_user_or_raise(session, user_id)
+    await _ensure_user_deletable(session, user.id)
     avatar_key = user.avatar_key
     await session.delete(user)
-    await session.flush()
+    try:
+        await session.flush()
+    except IntegrityError as exc:
+        # The RESTRICT foreign key from reservations is the backstop for a booking
+        # made after the check.
+        if getattr(exc.orig, "sqlstate", None) == FOREIGN_KEY_VIOLATION:
+            raise UserHasReservations(_HAS_RESERVATIONS) from exc
+        raise
     return avatar_key
 
 

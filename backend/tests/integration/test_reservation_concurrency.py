@@ -5,7 +5,6 @@ shows the race actually happens. The controls hold every participant at the race
 window with a barrier, so they fail deterministically rather than by chance.
 """
 
-import asyncio
 import uuid
 from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime, timedelta
@@ -19,21 +18,22 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
+from sqlalchemy.orm import contains_eager
 
 from app.core.config import Settings
-from app.core.exceptions import AllocationContention, GpuUnavailable, QuotaExceeded
+from app.core.exceptions import (
+    AllocationContention,
+    GpusInUse,
+    GpuUnavailable,
+    InvalidToken,
+    QuotaExceeded,
+)
 from app.models import GpuAllocation, Reservation, Server, User, UserRole
 from app.models.reservation import ALLOCATION_OVERLAP_CONSTRAINT
-from app.services import reservations, users
+from app.services import reservations, servers, users
 from app.services.booking_rules import Interval
 from app.services.reservations import NewReservation, create_reservation
-from tests.integration.concurrency import (
-    LOCK_WAIT_TIMEOUT,
-    Gate,
-    backend_pid,
-    run_together,
-    wait_until_blocked,
-)
+from tests.integration.concurrency import Gate, PairOutcome, race_pair, run_together
 from tests.integration.db_utils import truncate_all
 from tests.integration.reservation_helpers import add_lab, add_server, add_user
 
@@ -293,18 +293,194 @@ async def test_booking_waits_for_a_quota_change_and_uses_the_new_quota(
     """An admin lowers a student's quota to zero while the student books. The booking
     waits for the change and is checked against the new quota, not the value on the
     User object it was given."""
-    student, servers = await _quota_race(factory)
+    student, servers_ = await _quota_race(factory)
     async with factory() as db:
         admin = await add_user(db, "admin@example.edu", role=UserRole.ADMIN)
 
     async with factory() as admin_session, factory() as booking_session:
-        await users.update_user(admin_session, admin, student.id, weekly_gpu_hour_quota=0)
-        booking_pid = await backend_pid(booking_session)
-        booking = asyncio.create_task(
-            create_reservation(booking_session, student, _thirteen_hours(servers[0]), now=NOW)
+        await users.update_user(admin_session, admin, student.id, weekly_gpu_hour_quota=0, now=NOW)
+        outcome = await race_pair(
+            race_engine,
+            admin_session,
+            booking_session,
+            lambda: create_reservation(
+                booking_session, student, _thirteen_hours(servers_[0]), now=NOW
+            ),
         )
 
-        assert await wait_until_blocked(race_engine, booking_pid)
-        await admin_session.commit()
-        with pytest.raises(QuotaExceeded):
-            await asyncio.wait_for(booking, LOCK_WAIT_TIMEOUT)
+    assert outcome.blocked
+    assert isinstance(outcome.error, QuotaExceeded)
+
+
+# --- 3. booking vs a gpu_count reduction ---
+
+
+async def _reduction_race(factory: async_sessionmaker[AsyncSession]) -> tuple[Server, User, User]:
+    """A 4-GPU server whose GPUs 0 and 1 are booked by someone else for the window, so
+    the only free GPUs are 2 and 3: exactly the ones a reduction to 2 removes. Without
+    this, lowest-k would pick a surviving GPU and the race could not show."""
+    async with factory() as db:
+        server = await add_server(db, await add_lab(db), gpu_count=4)
+        owner = await add_user(db, "owner@example.edu")
+        await create_reservation(db, owner, _one_gpu(server, gpus=2), now=NOW)
+        await db.commit()
+        student = await add_user(db, "student@example.edu")
+        admin = await add_user(db, "admin@example.edu", role=UserRole.ADMIN)
+    return server, student, admin
+
+
+async def _active_allocations_on_removed_gpus(engine: AsyncEngine) -> int:
+    async with engine.connect() as conn:
+        count = await conn.scalar(
+            text(
+                "SELECT count(*) FROM gpu_allocations a JOIN gpus g ON g.id = a.gpu_id "
+                "WHERE a.active AND g.removed_at IS NOT NULL"
+            )
+        )
+    return count or 0
+
+
+async def _lock_server_without_share(
+    session: AsyncSession, viewer: User, server_id: uuid.UUID
+) -> Server:
+    """_lock_server_shared without FOR SHARE: the protection the controls remove."""
+    server = await session.scalar(
+        select(Server)
+        .join(Server.lab)
+        .where(Server.id == server_id)
+        .options(contains_eager(Server.lab))
+        .execution_options(populate_existing=True)
+    )
+    assert server is not None
+    return server
+
+
+async def _reduction_first(
+    factory: async_sessionmaker[AsyncSession], engine: AsyncEngine
+) -> PairOutcome[Reservation]:
+    """The reduction holds the server lock, uncommitted, while the student books."""
+    server, student, _admin = await _reduction_race(factory)
+    async with factory() as admin_session, factory() as booking_session:
+        await servers.update_server(admin_session, server.id, gpu_count=2, now=NOW)
+        return await race_pair(
+            engine,
+            admin_session,
+            booking_session,
+            lambda: create_reservation(booking_session, student, _one_gpu(server), now=NOW),
+        )
+
+
+async def _booking_first(
+    factory: async_sessionmaker[AsyncSession], engine: AsyncEngine
+) -> PairOutcome[Server]:
+    """The booking holds its locks and its new allocation, uncommitted, while an admin
+    reduces gpu_count."""
+    server, student, _admin = await _reduction_race(factory)
+    async with factory() as booking_session, factory() as admin_session:
+        await create_reservation(booking_session, student, _one_gpu(server), now=NOW)
+        return await race_pair(
+            engine,
+            booking_session,
+            admin_session,
+            lambda: servers.update_server(admin_session, server.id, gpu_count=2, now=NOW),
+        )
+
+
+async def test_booking_waits_for_a_reduction_in_progress(
+    factory: async_sessionmaker[AsyncSession], race_engine: AsyncEngine
+) -> None:
+    """FOR SHARE makes the booking wait before it reads which GPUs are free, so it sees
+    the committed reduction."""
+    outcome = await _reduction_first(factory, race_engine)
+
+    assert outcome.blocked
+    assert isinstance(outcome.error, GpuUnavailable)
+    assert await _active_allocations_on_removed_gpus(race_engine) == 0
+
+
+async def test_control_reduction_first_without_for_share(
+    factory: async_sessionmaker[AsyncSession],
+    race_engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Negative control. Without FOR SHARE the booking reads the GPUs while the removal
+    is uncommitted and still sees GPU 2 as active. It does block later, when inserting
+    the reservation (the foreign key to servers takes KEY SHARE, which conflicts with
+    the admin's FOR UPDATE), but by then its choice is made: once the admin commits it
+    inserts an allocation on the removed GPU."""
+    monkeypatch.setattr(reservations, "_lock_server_shared", _lock_server_without_share)
+
+    outcome = await _reduction_first(factory, race_engine)
+
+    assert outcome.error is None
+    assert await _active_allocations_on_removed_gpus(race_engine) == 1
+
+
+async def test_reduction_waits_for_a_booking_in_progress(
+    factory: async_sessionmaker[AsyncSession], race_engine: AsyncEngine
+) -> None:
+    outcome = await _booking_first(factory, race_engine)
+
+    assert outcome.blocked
+    assert isinstance(outcome.error, GpusInUse)
+    assert await _active_allocations_on_removed_gpus(race_engine) == 0
+
+
+async def test_booking_first_is_also_covered_by_the_reservation_foreign_key(
+    factory: async_sessionmaker[AsyncSession],
+    race_engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """In this order FOR SHARE is not the only protection, so no negative control can
+    show a race by removing it. The booking's insert into reservations already holds
+    KEY SHARE on the server row (foreign key check), and the reduction's FOR UPDATE
+    waits for it either way. This test pins that behavior down."""
+    monkeypatch.setattr(reservations, "_lock_server_shared", _lock_server_without_share)
+
+    outcome = await _booking_first(factory, race_engine)
+
+    assert outcome.blocked
+    assert isinstance(outcome.error, GpusInUse)
+
+
+# --- 4. booking vs other server edits ---
+
+
+async def test_server_edits_wait_for_bookings_in_progress(
+    factory: async_sessionmaker[AsyncSession], race_engine: AsyncEngine
+) -> None:
+    """Every server change takes FOR UPDATE, not only gpu_count changes, so an edit to
+    max_booking_hours waits until a booking that read the old limit commits."""
+    server, student, _ = await _reduction_race(factory)
+    async with factory() as booking_session, factory() as admin_session:
+        await create_reservation(booking_session, student, _one_gpu(server), now=NOW)
+        outcome = await race_pair(
+            race_engine,
+            booking_session,
+            admin_session,
+            lambda: servers.update_server(admin_session, server.id, max_booking_hours=1, now=NOW),
+        )
+
+    assert outcome.blocked
+    assert outcome.result is not None and outcome.result.max_booking_hours == 1
+
+
+# --- deactivation vs booking ---
+
+
+async def test_booking_waits_for_a_deactivation_and_is_refused(
+    factory: async_sessionmaker[AsyncSession], race_engine: AsyncEngine
+) -> None:
+    server, student, admin = await _reduction_race(factory)
+
+    async with factory() as admin_session, factory() as booking_session:
+        await users.update_user(admin_session, admin, student.id, is_active=False, now=NOW)
+        outcome = await race_pair(
+            race_engine,
+            admin_session,
+            booking_session,
+            lambda: create_reservation(booking_session, student, _one_gpu(server), now=NOW),
+        )
+
+    assert outcome.blocked
+    assert isinstance(outcome.error, InvalidToken)

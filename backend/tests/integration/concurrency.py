@@ -8,7 +8,8 @@ of hanging.
 
 import asyncio
 from collections.abc import Awaitable, Callable
-from typing import Final
+from dataclasses import dataclass
+from typing import Any, Final
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
@@ -64,12 +65,16 @@ async def backend_pids_waiting_on_locks(engine: AsyncEngine, pids: list[int]) ->
         return list(rows)
 
 
-async def wait_until_blocked(engine: AsyncEngine, pid: int) -> bool:
+async def wait_until_blocked(
+    engine: AsyncEngine, pid: int, *, unless_done: "asyncio.Future[Any] | None" = None
+) -> bool:
     """Poll until the backend `pid` waits on a lock. False if it never does within
-    LOCK_WAIT_TIMEOUT."""
+    LOCK_WAIT_TIMEOUT, or if `unless_done` finishes first (it ran without waiting)."""
     loop = asyncio.get_running_loop()
     deadline = loop.time() + LOCK_WAIT_TIMEOUT
     while loop.time() < deadline:
+        if unless_done is not None and unless_done.done():
+            return False
         if await backend_pids_waiting_on_locks(engine, [pid]):
             return True
         await asyncio.sleep(POLL_INTERVAL)
@@ -80,3 +85,48 @@ async def backend_pid(session: AsyncSession) -> int:
     pid = await session.scalar(text("SELECT pg_backend_pid()"))
     assert isinstance(pid, int)
     return pid
+
+
+@dataclass(frozen=True)
+class PairOutcome[T]:
+    """How the second transaction of a pair fared: whether it waited on a lock held by
+    the first, and what it returned or raised."""
+
+    blocked: bool
+    result: T | None
+    error: Exception | None
+
+
+async def race_pair[T](
+    engine: AsyncEngine,
+    first: AsyncSession,
+    second: AsyncSession,
+    second_call: Callable[[], Awaitable[T]],
+) -> PairOutcome[T]:
+    """`first` has done its work and holds its locks, uncommitted. Start `second_call`
+    in `second`, record whether it blocks on a lock, then commit `first` and collect
+    the outcome of `second`, committing it on success.
+
+    The second call is always awaited before returning, so no query is left running
+    on a session that is about to close.
+    """
+    pid = await backend_pid(second)
+    task = asyncio.create_task(second_call())
+    try:
+        blocked = await wait_until_blocked(engine, pid, unless_done=task)
+        await first.commit()
+    except BaseException:
+        await first.rollback()
+        raise
+    finally:
+        await asyncio.wait({task}, timeout=LOCK_WAIT_TIMEOUT)
+        if not task.done():
+            task.cancel()
+    error = task.exception()
+    if error is not None:
+        if not isinstance(error, Exception):
+            raise error
+        await second.rollback()
+        return PairOutcome(blocked=blocked, result=None, error=error)
+    await second.commit()
+    return PairOutcome(blocked=blocked, result=task.result(), error=None)

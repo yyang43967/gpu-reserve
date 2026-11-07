@@ -274,3 +274,27 @@ class ReservationNotFound(DomainError):
     kind = ErrorKind.NOT_FOUND
     type_slug = "reservation-not-found"
     title = "Reservation not found"
+
+
+class InvalidReservationState(DomainError):
+    """The reservation's status or timing does not allow this transition."""
+
+    kind = ErrorKind.CONFLICT
+    type_slug = "invalid-reservation-state"
+    title = "Reservation cannot be changed"
+
+
+class ServerHasReservations(DomainError):
+    """A server with any booking history cannot be deleted; retire it instead."""
+
+    kind = ErrorKind.CONFLICT
+    type_slug = "server-has-reservations"
+    title = "Server has reservations"
+
+
+class UserHasReservations(DomainError):
+    """A user with any booking history cannot be deleted; deactivate them instead."""
+
+    kind = ErrorKind.CONFLICT
+    type_slug = "user-has-reservations"
+    title = "User has reservations"

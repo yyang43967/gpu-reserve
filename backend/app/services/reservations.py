@@ -20,7 +20,7 @@ from datetime import datetime
 from typing import Final
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import exists, func, select
+from sqlalchemy import exists, func, or_, select, update
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import contains_eager, selectinload
@@ -28,6 +28,8 @@ from sqlalchemy.orm import contains_eager, selectinload
 from app.core.exceptions import (
     AllocationContention,
     GpuUnavailable,
+    InvalidReservationState,
+    InvalidToken,
     ReservationNotFound,
     ServerNotFound,
     ServerUnavailable,
@@ -97,11 +99,22 @@ async def _lock_user_bookings(session: AsyncSession, user_id: uuid.UUID) -> None
     await locks.lock_user_bookings(session, user_id)
 
 
-async def _current_quota(session: AsyncSession, user_id: uuid.UUID) -> int:
-    """The quota as of now, read after the user lock. The caller's User object was
-    loaded before the lock, and an admin may have changed the quota since."""
-    quota = await session.scalar(select(User.weekly_gpu_hour_quota).where(User.id == user_id))
-    return quota or 0
+@dataclass(frozen=True)
+class _Account:
+    is_active: bool
+    quota_hours: int
+
+
+async def _current_account(session: AsyncSession, user_id: uuid.UUID) -> _Account:
+    """Active status and quota as of now, read after the user lock. The caller's User
+    object was loaded before the lock, and an admin may have deactivated the account
+    or changed the quota since; both changes take the same lock."""
+    row = (
+        await session.execute(
+            select(User.is_active, User.weekly_gpu_hour_quota).where(User.id == user_id)
+        )
+    ).one()
+    return _Account(is_active=row.is_active, quota_hours=row.weekly_gpu_hour_quota)
 
 
 async def _lock_server_shared(session: AsyncSession, viewer: User, server_id: uuid.UUID) -> Server:
@@ -231,6 +244,10 @@ async def create_reservation(
     booking = Booking(interval, request.gpu_count)
 
     await _lock_user_bookings(session, actor.id)
+    account = await _current_account(session, actor.id)
+    if not account.is_active:
+        # The same answer the auth layer gives a deactivated account.
+        raise InvalidToken("The account is not active.")
     server = await _lock_server_shared(session, actor, request.server_id)
     zone = ZoneInfo(server.lab.timezone)
 
@@ -253,7 +270,7 @@ async def create_reservation(
     booking_rules.check_quota(
         booking,
         existing,
-        quota_hours=await _current_quota(session, actor.id),
+        quota_hours=account.quota_hours,
         zone=QUOTA_TIMEZONE,
     )
 
@@ -318,3 +335,93 @@ async def _allocate(
     raise AllocationContention(
         f"The GPUs on {server.hostname} were taken while booking. Please try again."
     )
+
+
+# --- ending reservations ---
+
+
+async def finish_reservation(
+    session: AsyncSession,
+    reservation: Reservation,
+    *,
+    now: datetime,
+    actor_id: uuid.UUID,
+    context: dict[str, str] | None = None,
+) -> None:
+    """Cancel a reservation, or end it early if it is running. The caller holds the
+    reservation's row lock.
+
+    - pending, before or after its start: cancelled.
+    - approved, not started (now <= starts_at): cancelled.
+    - approved and running (starts_at < now < ends_at): completed, with its end moved
+      to the first grid boundary at or after now. New bookings can only start on the
+      grid and in the future, so the freed time begins exactly there.
+    - anything else: InvalidReservationState.
+
+    Allocations become inactive in the same statement, since only pending and approved
+    reservations hold GPUs.
+    """
+    previous = reservation.status
+    original_end = reservation.ends_at
+    if previous is ReservationStatus.PENDING or (
+        previous is ReservationStatus.APPROVED and now <= reservation.starts_at
+    ):
+        reservation.status = ReservationStatus.CANCELLED
+        action = "reservation.cancelled"
+    elif previous is ReservationStatus.APPROVED and reservation.starts_at < now < original_end:
+        reservation.status = ReservationStatus.COMPLETED
+        reservation.ends_at = min(booking_rules.ceil_to_grid(now), original_end)
+        action = "reservation.ended_early"
+    else:
+        raise InvalidReservationState(
+            f"A {previous.value} reservation that has "
+            f"{'ended' if now >= original_end else 'not started'} cannot be cancelled."
+        )
+
+    await session.execute(
+        update(GpuAllocation)
+        .where(GpuAllocation.reservation_id == reservation.id)
+        .values(active=False, ends_at=reservation.ends_at)
+    )
+    payload: dict[str, str] = {"from_status": previous.value, "to_status": reservation.status.value}
+    if reservation.ends_at != original_end:
+        payload |= {
+            "original_ends_at": original_end.isoformat(),
+            "ends_at": reservation.ends_at.isoformat(),
+        }
+    audit.record(
+        session,
+        actor_id=actor_id,
+        action=action,
+        entity_type=ENTITY_RESERVATION,
+        entity_id=reservation.id,
+        payload=payload | (context or {}),
+    )
+
+
+async def release_user_reservations(
+    session: AsyncSession, user_id: uuid.UUID, *, now: datetime, actor_id: uuid.UUID
+) -> int:
+    """Cancel or end every reservation the user still holds. Used when an account is
+    deactivated; the caller holds the user's advisory lock. Returns how many changed."""
+    held = await session.scalars(
+        select(Reservation)
+        .where(
+            Reservation.user_id == user_id,
+            or_(
+                Reservation.status == ReservationStatus.PENDING,
+                (Reservation.status == ReservationStatus.APPROVED) & (Reservation.ends_at > now),
+            ),
+        )
+        .order_by(Reservation.id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    changed = 0
+    for reservation in held:
+        await finish_reservation(
+            session, reservation, now=now, actor_id=actor_id, context={"reason": "user_deactivated"}
+        )
+        changed += 1
+    await session.flush()
+    return changed
