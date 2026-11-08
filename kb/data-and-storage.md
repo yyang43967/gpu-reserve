@@ -5,9 +5,9 @@ last_reviewed: 2026-11-08
 
 # Data and storage
 
-This page is lab policy. The booking system does not manage files on the servers; these rules are what every user agrees to follow.
-
 ## Local scratch storage
+
+This page is lab policy. The booking system does not manage files on the servers; these rules are what every user agrees to follow.
 
 Each server has fast local disk space, mounted as scratch, for datasets, checkpoints, and outputs while you work. Scratch space is shared by everyone who books that server. Keep your files in a directory named after your account and clean up after your booking.
 

@@ -5,11 +5,9 @@ last_reviewed: 2026-11-08
 
 # Citing lab resources
 
-This page is lab policy.
-
 ## When to acknowledge
 
-Acknowledge the shared GPU servers in any paper, thesis, dissertation, poster, or technical report whose results relied on them, including experiments, model training, or evaluation. Acknowledgments help the department show how the hardware is used when it asks for funding to maintain and replace it.
+This is lab policy. Acknowledge the shared GPU servers in any paper, thesis, dissertation, poster, or technical report whose results relied on them, including experiments, model training, or evaluation. Acknowledgments help the department show how the hardware is used when it asks for funding to maintain and replace it.
 
 ## Acknowledgment text
 
