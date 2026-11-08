@@ -206,8 +206,34 @@ def floor_score(value: float) -> float:
 def choose_threshold(dev: Sequence[Outcome]) -> float:
     """The highest threshold that keeps every dev hit: the lowest score at which a dev
     question's first gold section was found, rounded down."""
-    gold_scores = [o.hits[o.rank - 1].score for o in dev if o.rank is not None]
+    gold_scores = _gold_scores(dev)
     return floor_score(min(gold_scores)) if gold_scores else 0.0
+
+
+def _gold_scores(dev: Sequence[Outcome]) -> list[float]:
+    return [o.hits[o.rank - 1].score for o in dev if o.rank is not None]
+
+
+def leave_one_out_kept(dev: Sequence[Outcome]) -> int:
+    """Dev hits that survive a threshold chosen without them: an estimate of how the
+    zero-margin threshold treats questions it has not seen."""
+    scores = _gold_scores(dev)
+    kept = 0
+    for i, score in enumerate(scores):
+        others = scores[:i] + scores[i + 1 :]
+        if not others or score >= floor_score(min(others)):
+            kept += 1
+    return kept
+
+
+def choose_min_score(dev: Sequence[Outcome], negatives: Sequence[Outcome]) -> float:
+    """The dev threshold, but only if it separates: when some negative reaches it, a cut
+    cannot tell in-scope from out-of-scope questions and only costs in-scope hits, so no
+    cut is applied and out-of-scope handling is left to the assistant's prompt."""
+    threshold = choose_threshold(dev)
+    if any(o.top_score >= threshold for o in negatives):
+        return 0.0
+    return threshold
 
 
 def pick_setting[T](results: dict[T, int], default: T, margin: int = SWEEP_MARGIN) -> T:
@@ -325,6 +351,8 @@ async def sweep(kb_dir: Path) -> int:
     dev_outcomes = await run_questions(dev, replay, nearest, k=k_chosen, min_score=-1.0)
     neg_outcomes = await run_questions(negatives, replay, nearest, k=k_chosen, min_score=-1.0)
     threshold = choose_threshold(dev_outcomes)
+    min_score = choose_min_score(dev_outcomes, neg_outcomes)
+    dev_hits = sum(1 for o in dev_outcomes if o.rank is not None)
     passing = [o.question.id for o in neg_outcomes if o.top_score >= threshold]
     out += [
         "",
@@ -343,13 +371,16 @@ async def sweep(kb_dir: Path) -> int:
         f"Threshold that keeps every dev hit: {threshold:.2f}. "
         f"Negatives at or above it: {len(passing)} of {len(neg_outcomes)}"
         + (f" ({', '.join(passing)})." if passing else "."),
+        f"Leave-one-out: {leave_one_out_kept(dev_outcomes)} of {dev_hits} dev hits survive "
+        "a threshold chosen without them.",
         "",
         "### Chosen",
         f"- chunking: target {chosen.target_tokens}, overlap {chosen.overlap_tokens}, "
         f"heading prefix {'on' if chosen.heading_prefix else 'off'}"
         + (" (defaults kept)" if chosen == DEFAULT_PARAMS else ""),
         f"- k = {k_chosen}" + (" (default kept)" if k_chosen == DEFAULT_K else ""),
-        f"- RAG_MIN_SCORE = {threshold:.2f}",
+        f"- RAG_MIN_SCORE = {min_score:.2f}"
+        + (" (no cut: the threshold does not separate dev hits from negatives)" if passing else ""),
     ]
     print("\n".join(out))
     return 0

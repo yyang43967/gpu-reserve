@@ -71,6 +71,25 @@ def test_threshold_keeps_every_dev_hit() -> None:
     assert choose_threshold(outcomes) == pytest.approx(0.43)
 
 
+def test_leave_one_out_counts_hits_a_threshold_without_them_keeps() -> None:
+    outcomes = [
+        Outcome(question(str(i), ("d", "A")), [policy_hit("d", "A", score)])
+        for i, score in enumerate([0.455, 0.460, 0.6])
+    ]
+
+    # Without 0.455 the threshold is 0.46, which drops it; the other two survive.
+    assert evaluation.leave_one_out_kept(outcomes) == 2
+
+
+def test_min_score_is_applied_only_when_it_separates() -> None:
+    dev = [Outcome(question("1", ("d", "A")), [policy_hit("d", "A", 0.5)])]
+    below = [Outcome(question("n1"), [policy_hit("d", "X", 0.3)])]
+    above = [Outcome(question("n2"), [policy_hit("d", "X", 0.55)])]
+
+    assert evaluation.choose_min_score(dev, below) == pytest.approx(0.5)
+    assert evaluation.choose_min_score(dev, below + above) == 0.0
+
+
 def test_defaults_win_unless_beaten_by_more_than_the_margin() -> None:
     assert pick_setting({"default": 15, "other": 17}, "default") == "default"
     assert pick_setting({"default": 15, "other": 18}, "default") == "other"

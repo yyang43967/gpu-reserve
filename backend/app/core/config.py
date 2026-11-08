@@ -115,6 +115,8 @@ class Settings(BaseSettings):
     rag_top_k: int = Field(default=5, gt=0)
     # Minimum cosine similarity for a result. Measured for one embedding model: a new
     # model means re-recording the evaluation embeddings and measuring it again.
+    # No cut by default: on the dev set no threshold separates in-scope questions from
+    # out-of-scope ones (evals/rag/results.md), so out-of-scope handling is the prompt's job.
     rag_min_score: float = Field(default=0.0, ge=-1.0, le=1.0)
 
     @field_validator(
