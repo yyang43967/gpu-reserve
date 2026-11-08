@@ -89,6 +89,30 @@ describe("dashboard", () => {
     expect(screen.queryByText("Lab activity")).toBeNull();
   });
 
+  it("does not call a pending booking running after its start", async () => {
+    fakeApi(
+      ...signedInAs("student"),
+      on("GET", "/stats/overview", () =>
+        Response.json(
+          makeOverview({
+            upcoming: [
+              reservation({
+                status: "pending",
+                starts_at: "2030-01-12T17:00:00Z",
+                ends_at: "2030-01-12T19:00:00Z",
+              }),
+            ],
+          }),
+        ),
+      ),
+    );
+    renderRoute("/");
+
+    const upcoming = await screen.findByRole("list", { name: "Upcoming reservations" });
+    expect(within(upcoming).getByText("Pending approval")).toBeInTheDocument();
+    expect(within(upcoming).queryByText("Running")).toBeNull();
+  });
+
   it("points to slot search when nothing is booked", async () => {
     fakeApi(
       ...signedInAs("student"),

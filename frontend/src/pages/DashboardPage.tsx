@@ -10,7 +10,11 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import type { AdminOverview, Overview, Reservation } from "@/lib/api-types";
 import { formatInLab, formatLabRange } from "@/lib/lab-time";
 import { QuotaSummary } from "@/reservations/QuotaSummary";
-import { RESERVATION_STATUS_LABELS } from "@/reservations/reservations-api";
+import {
+  DISPLAY_STATUS_LABELS,
+  DISPLAY_STATUS_VARIANTS,
+  displayStatus,
+} from "@/reservations/reservation-status";
 import { getOverview, overviewKey } from "@/stats/stats-api";
 
 const QUICK_LINKS = [
@@ -25,7 +29,7 @@ function percent(fraction: number): string {
 }
 
 function UpcomingItem({ reservation, now }: { reservation: Reservation; now: Date }) {
-  const running = new Date(reservation.starts_at) <= now;
+  const status = displayStatus(reservation, now);
   return (
     <li className="grid gap-1 border-b py-3 last:border-b-0">
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -35,9 +39,7 @@ function UpcomingItem({ reservation, now }: { reservation: Reservation; now: Dat
         >
           {reservation.server.hostname}
         </Link>
-        <Badge variant={reservation.status === "pending" ? "secondary" : "default"}>
-          {running ? "Running" : RESERVATION_STATUS_LABELS[reservation.status]}
-        </Badge>
+        <Badge variant={DISPLAY_STATUS_VARIANTS[status]}>{DISPLAY_STATUS_LABELS[status]}</Badge>
       </div>
       <p className="text-sm tabular-nums">
         {formatLabRange(reservation.starts_at, reservation.ends_at, reservation.lab.timezone)}

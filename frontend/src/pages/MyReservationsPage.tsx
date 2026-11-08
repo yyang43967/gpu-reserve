@@ -27,6 +27,12 @@ import { useLatestSearchParams } from "@/lib/use-search-params";
 import { earlyEnd } from "@/reservations/booking";
 import { QuotaSummary } from "@/reservations/QuotaSummary";
 import {
+  DISPLAY_STATUS_LABELS,
+  DISPLAY_STATUS_VARIANTS,
+  describeGpus,
+  displayStatus,
+} from "@/reservations/reservation-status";
+import {
   canCancel,
   cancelReservation,
   getQuota,
@@ -41,18 +47,6 @@ import {
 } from "@/reservations/reservations-api";
 
 const STATUSES = Object.keys(RESERVATION_STATUS_LABELS) as ReservationStatus[];
-
-const STATUS_VARIANTS: Record<
-  ReservationStatus,
-  "default" | "secondary" | "outline" | "destructive"
-> = {
-  pending: "secondary",
-  approved: "default",
-  rejected: "destructive",
-  cancelled: "outline",
-  expired: "outline",
-  completed: "outline",
-};
 
 interface ListParams {
   page: number;
@@ -191,9 +185,8 @@ function ReservationItem({
       setDownloading(false);
     }
   };
-  const gpus = reservation.gpu_indexes.length
-    ? `GPU ${reservation.gpu_indexes.join(", ")}`
-    : `${String(reservation.gpu_count)} GPUs`;
+  const gpus = describeGpus(reservation);
+  const status = displayStatus(reservation, now);
 
   return (
     <li
@@ -212,9 +205,7 @@ function ReservationItem({
             {reservation.lab.name} · {gpus}
           </p>
         </div>
-        <Badge variant={STATUS_VARIANTS[reservation.status]}>
-          {RESERVATION_STATUS_LABELS[reservation.status]}
-        </Badge>
+        <Badge variant={DISPLAY_STATUS_VARIANTS[status]}>{DISPLAY_STATUS_LABELS[status]}</Badge>
       </div>
       <p className="text-sm tabular-nums">
         {formatLabRange(reservation.starts_at, reservation.ends_at, zone)}

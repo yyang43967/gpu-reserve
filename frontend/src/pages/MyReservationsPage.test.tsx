@@ -85,6 +85,40 @@ describe("my reservations page", () => {
     expect(within(tokyo).getByText("Pending approval")).toBeInTheDocument();
   });
 
+  it("labels an approved booking in progress as running", async () => {
+    api(() => [
+      reservation({ starts_at: "2030-01-12T17:00:00Z", ends_at: "2030-01-12T19:00:00Z" }),
+    ]);
+    renderRoute("/reservations");
+
+    const item = await screen.findByRole("listitem", { name: /a100-node-01/ });
+    expect(within(item).getByText("Running")).toBeInTheDocument();
+    expect(within(item).queryByText("Approved")).toBeNull();
+    expect(within(item).getByText("Vision Lab · GPU 0, 1")).toBeInTheDocument();
+  });
+
+  it("hides GPU numbers that were never in use but keeps the calendar download", async () => {
+    api(() =>
+      (["rejected", "expired", "cancelled"] as const).map((status, i) =>
+        reservation({
+          id: `r-${status}`,
+          status,
+          starts_at: "2030-01-10T17:00:00Z",
+          ends_at: "2030-01-10T19:00:00Z",
+          server: { id: `s-${String(i)}`, hostname: `${status}-node`, gpu_model: "A100_80GB" },
+        }),
+      ),
+    );
+    renderRoute("/reservations");
+
+    for (const status of ["rejected", "expired", "cancelled"]) {
+      const item = await screen.findByRole("listitem", { name: new RegExp(`${status}-node`) });
+      expect(within(item).getByText("Vision Lab · 2 GPUs")).toBeInTheDocument();
+      expect(within(item).queryByText(/GPU 0/)).toBeNull();
+      expect(within(item).getByRole("button", { name: "Add to calendar" })).toBeInTheDocument();
+    }
+  });
+
   it("shows both dates for a reservation that crosses midnight", async () => {
     api(() => [
       reservation({ starts_at: "2030-01-13T06:00:00Z", ends_at: "2030-01-13T10:00:00Z" }),
