@@ -147,7 +147,7 @@ class CachedEmbedder:
             if self._inner is None:
                 raise CacheMissError(
                     f"{len(missing)} texts have no recorded embedding; the knowledge base or "
-                    "the questions changed. Re-record with `python -m evals.rag.record`."
+                    "the questions changed. Re-record with `python -m app.rag.evaluation record`."
                 )
             by_key = dict(zip(keys, texts, strict=True))
             fresh = await self._inner.embed([by_key[k] for k in missing])

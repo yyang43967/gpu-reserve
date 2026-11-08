@@ -24,5 +24,13 @@
     - `hardware-guide › Multi-GPU jobs › When NVLink matters` described tensor parallelism as "one model is split across GPUs", echoing i12. It now reads "divides each layer's weight matrices among the GPUs". i12 went from 0.71 to 0.57.
   - After the rephrasing: median 0.33, max 0.60.
 
+### Dev set (`dev.jsonl`)
+- 20 questions for tuning, written after the document bodies, labeled the same way. They never overlap the acceptance questions.
+- Heading-overlap check: five questions flagged and reworded before any run (d03, d09, d15, d16, d20). d09 is still flagged because it quotes the error type `too-many-gpus`, which is what a student would paste; kept. Median heading share after rewording 0.00; median body share 0.44, higher than the acceptance set (0.33), as expected for questions written after the text.
+
+### Negatives (`negatives.jsonl`)
+- 10 questions the knowledge base does not answer, used only to measure the minimum score. Six are near the domain (another university's supercomputer, Slurm `sbatch`, a CUDA device-side assert, building opening hours, installing PyTorch with CUDA on a laptop, conference deadlines); four are off topic.
+- Re-checked against the finished bodies: none is answered. Closest wording: the contact guide mentions administrators' "office hours" (n04 asks when a building opens), the FAQ says drivers are installed by administrators (n05 asks about a personal laptop), and the quota page mentions conference deadlines as a busy time (n06 asks which deadlines are coming up).
+
 ## KB edits after the first run
 None yet.

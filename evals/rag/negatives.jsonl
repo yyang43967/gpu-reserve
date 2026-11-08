@@ -1,0 +1,10 @@
+{"id": "n01", "question": "How do I get an allocation on another university's national supercomputer?", "kind": "near"}
+{"id": "n02", "question": "What's the sbatch flag to request two GPUs in a Slurm job script?", "kind": "near"}
+{"id": "n03", "question": "PyTorch says 'CUDA error: device-side assert triggered'. How do I find the bug?", "kind": "near"}
+{"id": "n04", "question": "What time does the engineering building open on Saturdays?", "kind": "near"}
+{"id": "n05", "question": "How do I install PyTorch with CUDA support on my own laptop?", "kind": "near"}
+{"id": "n06", "question": "Which conference deadlines are coming up this month for computer vision?", "kind": "near"}
+{"id": "n07", "question": "What is the capital of France?", "kind": "off"}
+{"id": "n08", "question": "Book me a flight to Denver next Friday.", "kind": "off"}
+{"id": "n09", "question": "Give me a recipe for vegetable lasagna.", "kind": "off"}
+{"id": "n10", "question": "Write a short poem about autumn.", "kind": "off"}
