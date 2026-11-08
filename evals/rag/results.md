@@ -167,7 +167,7 @@ Misses:
 ## Change between the runs
 - **What changed:** `RAG_MIN_SCORE` from 0.45 to 0.0 (no score cut). The sweep now applies the dev threshold only when it separates dev hits from the negatives, and reports a leave-one-out check. Nothing in `kb/`, the question sets, chunking, or k changed.
 - **Dev-set evidence:** the dev threshold (0.45) does not separate in-scope from out-of-scope questions: two near-domain negatives score above it (n01 0.489, n02 0.561). A cut that cannot separate only removes in-scope results, and out-of-scope handling already sits with the assistant's prompt. At 0.0 the dev set keeps 20/20 with the same hit@1 and MRR.
-- **What the dev set did not show:** Leave-one-out: 20 of 20 dev hits survive a threshold chosen without them. The dev questions were written after the bodies and sit closer to the text (median body overlap 0.44 against 0.33 for acceptance), so their scores run higher. That shift, not the threshold rule itself, is what the first run exposed.
+- **What the dev set did not show:** Leave-one-out: 20 of 20 dev hits survive a threshold chosen without them. The dev questions were written after the bodies and sit closer to the text (median body overlap 0.44 against 0.33 for acceptance), so their scores run higher. That shift is what made the misapplied threshold (below) cost acceptance hits.
 - The motive for looking at the threshold came from the first run's failure mode; the value was chosen from the dev set and negatives only, without scoring acceptance at other thresholds.
 
 ## Second acceptance run (regression gate, not the reported result)
@@ -232,6 +232,10 @@ Misses:
 |---|---|---|---|---|---|---|
 | first (reported) | 0.45 | 22/30 | 5/10 | 18 | 0.667 | 246 |
 | second | 0.00 | 27/30 | 7/10 | 20 | 0.778 | 417 |
+
+### How to read the re-run
+- **It is not a held-out result.** The threshold change was prompted by the acceptance failure. The dev set was 20/20 at 0.45 and did not reveal the problem, so the second run measures a setting chosen after seeing the acceptance set fail. The first run (22/30) remains the reported number.
+- **0.45 misapplied the rule agreed before the sweep.** That rule said that if the dev and negative distributions overlap, keeping every dev hit wins, and the threshold cannot separate them. Near-domain negatives reach 0.561 (n02), above the dev minimum of 0.455 (d18), so the distributions overlap and no threshold separates them. Setting the cut at the dev minimum anyway kept every dev hit but filtered nothing reliably. 0.0 is what the rule should have produced in the first place; the sweep now encodes it.
 
 ## KB edits after the first run
 None yet.
