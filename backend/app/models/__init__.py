@@ -1,4 +1,5 @@
 from app.models.audit import AuditLog
+from app.models.kb_chunk import KbChunk
 from app.models.lab import Lab
 from app.models.notification import (
     MAX_DELIVERY_ATTEMPTS,
@@ -18,6 +19,7 @@ __all__ = [
     "Gpu",
     "GpuAllocation",
     "GpuModel",
+    "KbChunk",
     "Lab",
     "Notification",
     "NotificationKind",

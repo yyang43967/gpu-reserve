@@ -1,5 +1,9 @@
 """In-memory stand-ins for external services."""
 
+import hashlib
+import math
+import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -44,3 +48,35 @@ class FakeStorage:
 
     def put(self, key: str, size_bytes: int, content_type: str) -> None:
         self.objects[key] = ObjectInfo(size_bytes=size_bytes, content_type=content_type)
+
+
+class FakeEmbedder:
+    """Deterministic embeddings with no network: a hashed bag of words, normalized.
+
+    Texts that share words get similar vectors, so retrieval order and score thresholds
+    can be tested meaningfully. `calls` records every batch it was asked to embed.
+    """
+
+    def __init__(self, model: str = "fake-embedding", dimensions: int = 1536) -> None:
+        self.model = model
+        self.dimensions = dimensions
+        self.calls: list[list[str]] = []
+
+    def vector(self, text: str) -> list[float]:
+        values = [0.0] * self.dimensions
+        for word in re.findall(r"[a-z0-9]+", text.lower()):
+            digest = hashlib.sha256(word.encode()).digest()
+            values[int.from_bytes(digest[:4], "big") % self.dimensions] += 1.0
+        norm = math.sqrt(sum(v * v for v in values))
+        if norm == 0:
+            # pgvector has no cosine distance for a zero vector.
+            values[0], norm = 1.0, 1.0
+        return [v / norm for v in values]
+
+    async def embed(self, texts: Sequence[str]) -> list[list[float]]:
+        self.calls.append(list(texts))
+        return [self.vector(text) for text in texts]
+
+    @property
+    def embedded(self) -> int:
+        return sum(len(batch) for batch in self.calls)

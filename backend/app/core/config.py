@@ -1,5 +1,6 @@
 from enum import StrEnum
 from functools import lru_cache
+from pathlib import Path
 from typing import Annotated, Final
 from zoneinfo import ZoneInfo
 
@@ -7,6 +8,7 @@ from pydantic import Field, PostgresDsn, RedisDsn, SecretStr, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 from app.core.timezones import valid_timezone
+from app.models.kb_chunk import EMBEDDING_DIMENSIONS
 
 # HS256 keys shorter than the hash output weaken the signature.
 JWT_SECRET_MIN_BYTES: Final = 32
@@ -101,6 +103,22 @@ class Settings(BaseSettings):
     # default for new labs can never move existing quota weeks.
     quota_timezone: str = "America/Los_Angeles"
 
+    # Knowledge base. The default is the repository's kb/ directory when running on the
+    # host; the image sets KB_DIR to the copy inside it.
+    kb_dir: Path = Path(__file__).resolve().parents[3] / "kb"
+    # Unset means no embeddings: ingestion refuses to run, and so will policy search.
+    openai_api_key: SecretStr | None = None
+    embedding_model: str = "text-embedding-3-small"
+    # Must equal the width of kb_chunks.embedding; requested from the API explicitly.
+    embedding_dimensions: int = EMBEDDING_DIMENSIONS
+    # Sections returned per policy search.
+    rag_top_k: int = Field(default=5, gt=0)
+    # Minimum cosine similarity for a result. Measured for one embedding model: a new
+    # model means re-recording the evaluation embeddings and measuring it again.
+    # No cut by default: on the dev set no threshold separates in-scope questions from
+    # out-of-scope ones (evals/rag/results.md), so out-of-scope handling is the prompt's job.
+    rag_min_score: float = Field(default=0.0, ge=-1.0, le=1.0)
+
     @field_validator(
         "s3_endpoint_url",
         "s3_public_endpoint_url",
@@ -108,6 +126,7 @@ class Settings(BaseSettings):
         "s3_access_key_id",
         "s3_secret_access_key",
         "ses_region",
+        "openai_api_key",
         mode="before",
     )
     @classmethod
@@ -130,6 +149,13 @@ class Settings(BaseSettings):
     @classmethod
     def quota_timezone_supported(cls, value: str) -> str:
         return valid_timezone(value)
+
+    @field_validator("embedding_dimensions")
+    @classmethod
+    def embedding_dimensions_match_column(cls, value: int) -> int:
+        if value != EMBEDDING_DIMENSIONS:
+            raise ValueError(f"must be {EMBEDDING_DIMENSIONS}, the width of the embedding column")
+        return value
 
     @field_validator("jwt_secret")
     @classmethod
