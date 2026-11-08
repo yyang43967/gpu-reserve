@@ -5,6 +5,7 @@ from arq.connections import RedisSettings
 
 from app.core.config import get_settings
 from app.db.session import create_engine, create_session_factory
+from app.rag.embeddings import build_embedder
 from app.services.email import build_sender
 from app.workers import tasks
 
@@ -21,6 +22,8 @@ async def startup(ctx: dict[str, Any]) -> None:
     ctx["engine"] = engine
     ctx["session_factory"] = create_session_factory(engine)
     ctx["email_sender"] = build_sender(settings)
+    # None without an API key; only reindex_kb needs it, and it says so.
+    ctx["embedder"] = build_embedder(settings)
 
 
 async def shutdown(ctx: dict[str, Any]) -> None:
@@ -60,7 +63,7 @@ CRON_JOBS: Final = [
 
 
 class WorkerSettings:
-    functions: ClassVar[list[Any]] = [ping]
+    functions: ClassVar[list[Any]] = [ping, tasks.reindex_kb]
     cron_jobs: ClassVar[list[Any]] = CRON_JOBS
     on_startup = startup
     on_shutdown = shutdown

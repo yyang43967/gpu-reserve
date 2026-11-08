@@ -9,6 +9,8 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.config import Settings
+from app.rag.embeddings import Embedder, EmbeddingError
+from app.rag.ingest import IngestReport, format_report, ingest
 from app.services import jobs
 from app.services.email import EmailSender
 
@@ -51,4 +53,15 @@ async def dispatch_notifications(ctx: dict[str, Any]) -> jobs.DispatchReport:
     )
     if report != jobs.DispatchReport():
         logger.info("dispatch_notifications: %s", report)
+    return report
+
+
+async def reindex_kb(ctx: dict[str, Any]) -> IngestReport:
+    """Bring the stored knowledge base in line with the documents. Run on demand."""
+    settings: Settings = ctx["settings"]
+    embedder: Embedder | None = ctx["embedder"]
+    if embedder is None:
+        raise EmbeddingError("OPENAI_API_KEY is not set, so the knowledge base cannot be indexed")
+    report = await ingest(ctx["session_factory"], embedder, settings.kb_dir)
+    logger.info("reindex_kb: %s", format_report(report))
     return report
