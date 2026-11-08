@@ -18,6 +18,11 @@
   - Original: "My job crashed 20 minutes into a 6-hour slot. If I stop the reservation now, does the unused time go back into my weekly budget?"
   - New: "My job crashed 20 minutes into a slot that was booked until 6pm. If I stop the reservation now, does the unused time return to my weekly budget?"
   - Labels and author unchanged.
+- **Body overlap after the document bodies were written** (`overlap.py --body`: share of a question's content words found in its gold section). First measurement: median 0.33, max 0.83. Blind questions median 0.31, informed median 0.33.
+  - Two body sentences echoed acceptance wording and were rephrased **before any retrieval run**. Questions and labels were not changed.
+    - `hardware-guide › Estimating GPU memory › Full fine-tuning` repeated "updating every weight … with Adam in mixed precision" from i13. It now reads "Full fine-tuning trains all parameters. With AdamW and 16-bit mixed-precision training …". i13 went from 0.83 to 0.58.
+    - `hardware-guide › Multi-GPU jobs › When NVLink matters` described tensor parallelism as "one model is split across GPUs", echoing i12. It now reads "divides each layer's weight matrices among the GPUs". i12 went from 0.71 to 0.57.
+  - After the rephrasing: median 0.33, max 0.60.
 
 ## KB edits after the first run
 None yet.
