@@ -4,7 +4,6 @@ import { describe, expect, it } from "vitest";
 import type { Server } from "@/lib/api-types";
 import {
   fakeApi,
-  healthy,
   makeLab,
   makeServer,
   on,
@@ -75,7 +74,7 @@ function lastServerQuery(requests: FakeRequest[]) {
 
 describe("servers page", () => {
   it("shows a card per server with specs from the API", async () => {
-    fakeApi(...signedInAs("student"), healthy, labsApi, serversApi([a100, rtx]));
+    fakeApi(...signedInAs("student"), labsApi, serversApi([a100, rtx]));
     renderRoute("/servers");
 
     const list = await screen.findByRole("list", { name: "Servers" });
@@ -98,14 +97,14 @@ describe("servers page", () => {
   it("shows memory per GPU as the API reports it", async () => {
     // The API is the source of truth, even if it ever disagrees with the local table.
     const custom = makeServer({ gpu_model: "A100_40GB", gpu_memory_gb: 41 });
-    fakeApi(...signedInAs("student"), healthy, labsApi, serversApi([custom]));
+    fakeApi(...signedInAs("student"), labsApi, serversApi([custom]));
     renderRoute("/servers");
 
     expect(await screen.findByText(/41 GB each/)).toBeInTheDocument();
   });
 
   it("reads filters from the URL and sends them to the API", async () => {
-    const requests = fakeApi(...signedInAs("student"), healthy, labsApi, serversApi([a100]));
+    const requests = fakeApi(...signedInAs("student"), labsApi, serversApi([a100]));
     renderRoute("/servers?lab=lab-1&gpu=A100_80GB&memory=48&gpus=4&status=available");
 
     await screen.findByRole("heading", { name: "gpu-01" });
@@ -127,7 +126,7 @@ describe("servers page", () => {
   });
 
   it("ignores filter values it does not offer", async () => {
-    const requests = fakeApi(...signedInAs("student"), healthy, labsApi, serversApi([a100]));
+    const requests = fakeApi(...signedInAs("student"), labsApi, serversApi([a100]));
     // Students cannot filter by retired; 3 GPUs and 12 GB are not options.
     renderRoute("/servers?gpu=K80&memory=12&gpus=3&status=retired");
 
@@ -136,7 +135,7 @@ describe("servers page", () => {
   });
 
   it("updates the URL and the query when a filter changes, back to page 1", async () => {
-    const requests = fakeApi(...signedInAs("student"), healthy, labsApi, serversApi([a100, rtx]));
+    const requests = fakeApi(...signedInAs("student"), labsApi, serversApi([a100, rtx]));
     const { router } = renderRoute("/servers?page=2&gpu=RTX_4090");
     await screen.findByRole("heading", { name: "Servers" });
 
@@ -155,7 +154,7 @@ describe("servers page", () => {
   });
 
   it("keeps every filter when several change before the page re-renders", async () => {
-    const requests = fakeApi(...signedInAs("student"), healthy, labsApi, serversApi([a100, rtx]));
+    const requests = fakeApi(...signedInAs("student"), labsApi, serversApi([a100, rtx]));
     const { router } = renderRoute("/servers?page=2");
     await screen.findByRole("heading", { name: "Servers" });
 
@@ -182,7 +181,7 @@ describe("servers page", () => {
   });
 
   it("builds on a location set elsewhere after its own updates", async () => {
-    fakeApi(...signedInAs("student"), healthy, labsApi, serversApi([a100, rtx]));
+    fakeApi(...signedInAs("student"), labsApi, serversApi([a100, rtx]));
     const { router } = renderRoute("/servers");
     await screen.findByRole("heading", { name: "gpu-01" });
 
@@ -203,7 +202,6 @@ describe("servers page", () => {
   it("lists labs in the lab filter, marking inactive ones", async () => {
     fakeApi(
       ...signedInAs("admin"),
-      healthy,
       on("GET", "/labs", () => Response.json(page([visionLab, oldLab]))),
       serversApi([a100]),
     );
@@ -219,7 +217,7 @@ describe("servers page", () => {
   });
 
   it("offers the retired status to admins only", async () => {
-    fakeApi(...signedInAs("admin"), healthy, labsApi, serversApi([a100]));
+    fakeApi(...signedInAs("admin"), labsApi, serversApi([a100]));
     renderRoute("/servers");
 
     const status = await screen.findByLabelText("Status");
@@ -227,7 +225,7 @@ describe("servers page", () => {
   });
 
   it("hides the retired status from students", async () => {
-    fakeApi(...signedInAs("student"), healthy, labsApi, serversApi([a100]));
+    fakeApi(...signedInAs("student"), labsApi, serversApi([a100]));
     renderRoute("/servers");
 
     const status = await screen.findByLabelText("Status");
@@ -235,7 +233,7 @@ describe("servers page", () => {
   });
 
   it("explains when no server matches and clears the filters", async () => {
-    const requests = fakeApi(...signedInAs("student"), healthy, labsApi, serversApi([rtx]));
+    const requests = fakeApi(...signedInAs("student"), labsApi, serversApi([rtx]));
     const { router } = renderRoute("/servers?gpu=H100_80GB&gpus=16");
 
     expect(await screen.findByText("No servers match these filters")).toBeInTheDocument();
@@ -247,7 +245,7 @@ describe("servers page", () => {
   });
 
   it("shows an empty state without servers", async () => {
-    fakeApi(...signedInAs("student"), healthy, labsApi, serversApi([]));
+    fakeApi(...signedInAs("student"), labsApi, serversApi([]));
     renderRoute("/servers");
 
     expect(await screen.findByText("No servers yet")).toBeInTheDocument();
@@ -255,7 +253,7 @@ describe("servers page", () => {
   });
 
   it("points admins to the admin area when there are no servers", async () => {
-    fakeApi(...signedInAs("admin"), healthy, labsApi, serversApi([]));
+    fakeApi(...signedInAs("admin"), labsApi, serversApi([]));
     renderRoute("/servers");
 
     expect(await screen.findByText(/from the admin area/)).toBeInTheDocument();
@@ -266,7 +264,6 @@ describe("servers page", () => {
     const list = serversApi([a100]);
     fakeApi(
       ...signedInAs("student"),
-      healthy,
       labsApi,
       (request) =>
         request.path === "/servers" && fail
@@ -287,7 +284,6 @@ describe("servers page", () => {
   it("keeps the server list usable when labs fail to load", async () => {
     fakeApi(
       ...signedInAs("student"),
-      healthy,
       on("GET", "/labs", () => problem(500, "internal-error")),
       serversApi([a100]),
     );
@@ -303,7 +299,7 @@ describe("servers page", () => {
     const many = Array.from({ length: 30 }, (_, i) =>
       makeServer({ id: `server-${String(i)}`, hostname: `node-${String(i).padStart(2, "0")}` }),
     );
-    const requests = fakeApi(...signedInAs("student"), healthy, labsApi, serversApi(many));
+    const requests = fakeApi(...signedInAs("student"), labsApi, serversApi(many));
     const { router } = renderRoute("/servers");
 
     await screen.findByRole("heading", { name: "node-00" });
@@ -317,7 +313,7 @@ describe("servers page", () => {
   });
 
   it("steps back to the last page when the page is past the end", async () => {
-    fakeApi(...signedInAs("student"), healthy, labsApi, serversApi([a100]));
+    fakeApi(...signedInAs("student"), labsApi, serversApi([a100]));
     const { router } = renderRoute("/servers?page=5");
 
     await screen.findByRole("heading", { name: "gpu-01" });

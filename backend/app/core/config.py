@@ -1,9 +1,12 @@
 from enum import StrEnum
 from functools import lru_cache
 from typing import Annotated, Final
+from zoneinfo import ZoneInfo
 
 from pydantic import Field, PostgresDsn, RedisDsn, SecretStr, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
+from app.core.timezones import valid_timezone
 
 # HS256 keys shorter than the hash output weaken the signature.
 JWT_SECRET_MIN_BYTES: Final = 32
@@ -13,6 +16,13 @@ class Environment(StrEnum):
     LOCAL = "local"
     TEST = "test"
     PRODUCTION = "production"
+
+
+class EmailBackend(StrEnum):
+    # Plain SMTP, for Mailpit locally.
+    SMTP = "smtp"
+    # Amazon SES through its API, with the instance role's credentials.
+    SES = "ses"
 
 
 class Settings(BaseSettings):
@@ -71,12 +81,33 @@ class Settings(BaseSettings):
     # How long a presigned upload stays usable.
     upload_url_ttl_seconds: int = Field(default=300, gt=0)
 
+    # Outgoing email. Locally, Mailpit accepts SMTP on port 1025.
+    email_backend: EmailBackend = EmailBackend.SMTP
+    email_from: str = "GPU Reserve <no-reply@gpureserve.dev>"
+    # SES only. Unset means the default from the environment or instance metadata.
+    ses_region: str | None = None
+    smtp_host: str = "localhost"
+    smtp_port: int = Field(default=1025, gt=0)
+    smtp_timeout_seconds: float = Field(default=10.0, gt=0)
+    # Links in emails point here.
+    frontend_url: str = "http://localhost:5173"
+
+    # Presigned upload URLs per user, so one account cannot fill the bucket.
+    presign_user_limit: int = Field(default=30, gt=0)
+    presign_user_window_seconds: int = Field(default=10 * 60, gt=0)
+
+    # Weekly GPU-hour quotas run Monday 00:00 to Monday 00:00 in this one zone, for
+    # every lab. It is set on its own, not taken from the lab default, so changing the
+    # default for new labs can never move existing quota weeks.
+    quota_timezone: str = "America/Los_Angeles"
+
     @field_validator(
         "s3_endpoint_url",
         "s3_public_endpoint_url",
         "s3_region",
         "s3_access_key_id",
         "s3_secret_access_key",
+        "ses_region",
         mode="before",
     )
     @classmethod
@@ -95,12 +126,21 @@ class Settings(BaseSettings):
             return [origin.strip() for origin in value.split(",") if origin.strip()]
         return value
 
+    @field_validator("quota_timezone")
+    @classmethod
+    def quota_timezone_supported(cls, value: str) -> str:
+        return valid_timezone(value)
+
     @field_validator("jwt_secret")
     @classmethod
     def jwt_secret_long_enough(cls, value: SecretStr) -> SecretStr:
         if len(value.get_secret_value().encode()) < JWT_SECRET_MIN_BYTES:
             raise ValueError(f"must be at least {JWT_SECRET_MIN_BYTES} bytes")
         return value
+
+    @property
+    def quota_zone(self) -> ZoneInfo:
+        return ZoneInfo(self.quota_timezone)
 
 
 @lru_cache

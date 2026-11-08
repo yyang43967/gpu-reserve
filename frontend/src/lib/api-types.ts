@@ -142,7 +142,7 @@ export interface Availability {
   runs: FreeRun[];
 }
 
-/** GPU-hours in the current quota week. Hours can be fractional. */
+/** GPU-hours in one quota week (the current one unless another was asked for). Hours can be fractional. */
 export interface Quota {
   week_start: string;
   week_end: string;
@@ -150,4 +150,73 @@ export interface Quota {
   used_hours: number;
   quota_hours: number;
   remaining_hours: number;
+}
+
+/** The server fields a slot search result carries. */
+export interface SlotServer {
+  id: string;
+  hostname: string;
+  gpu_model: GpuModel;
+  gpu_memory_gb: number;
+  gpu_count: number;
+  requires_approval: boolean;
+  max_booking_hours: number;
+}
+
+/** One candidate time for a job. Times are UTC instants; show them in the lab's zone. */
+export interface Slot {
+  server: SlotServer;
+  lab: { id: string; name: string; timezone: string };
+  starts_at: string;
+  ends_at: string;
+  /** The fewest GPUs free during the slot, the requested ones included. */
+  free_gpus: number;
+}
+
+export interface SlotSearchResponse {
+  /** Ranked: earliest first, then no approval needed, smaller GPUs, tighter fit. */
+  items: Slot[];
+}
+
+export interface AdminOverview {
+  pending_approvals: number;
+  gpus_in_use: number;
+  gpus_total: number;
+  week_start: string;
+  week_end: string;
+  /** Booked over available GPU-hours this quota week, from 0 to 1. */
+  utilization_this_week: number;
+}
+
+export interface Overview {
+  quota: Quota;
+  /** Up to three pending or approved reservations that have not ended, soonest first. */
+  upcoming: Reservation[];
+  my_pending: number;
+  /** Present for admins only. */
+  admin: AdminOverview | null;
+}
+
+export interface UtilizationTotals {
+  available_gpu_hours: number;
+  booked_gpu_hours: number;
+  pending_gpu_hours: number;
+  /** Booked over available, from 0 to 1. */
+  utilization: number;
+}
+
+export interface ServerUtilization extends UtilizationTotals {
+  server_id: string;
+  hostname: string;
+  gpu_model: GpuModel;
+  gpu_count: number;
+  status: ServerStatus;
+  lab: { id: string; name: string; timezone: string };
+}
+
+export interface Utilization {
+  starts_at: string;
+  ends_at: string;
+  servers: ServerUtilization[];
+  totals: UtilizationTotals;
 }

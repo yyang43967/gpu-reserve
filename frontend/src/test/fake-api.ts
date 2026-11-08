@@ -1,6 +1,6 @@
 import { vi } from "vitest";
 
-import type { Lab, Page, Server, TokenResponse, User, UserRole } from "@/lib/api-types";
+import type { Lab, Overview, Page, Server, TokenResponse, User, UserRole } from "@/lib/api-types";
 
 export function makeUser(overrides: Partial<User> = {}): User {
   return {
@@ -158,4 +158,24 @@ export const signedOut: Route = on("POST", "/auth/refresh", () =>
   problem(401, "invalid-token", { detail: "No refresh token was sent." }),
 );
 
-export const healthy: Route = on("GET", "/health", () => Response.json({ status: "ok" }));
+export function makeOverview(overrides: Partial<Overview> = {}): Overview {
+  return {
+    quota: {
+      week_start: "2030-01-07T08:00:00Z",
+      week_end: "2030-01-14T08:00:00Z",
+      timezone: "America/Los_Angeles",
+      used_hours: 0,
+      quota_hours: 48,
+      remaining_hours: 48,
+    },
+    upcoming: [],
+    my_pending: 0,
+    admin: null,
+    ...overrides,
+  };
+}
+
+/** The dashboard's data for a user with nothing booked, for tests that land on "/". */
+export const emptyDashboard: Route = on("GET", "/stats/overview", () =>
+  Response.json(makeOverview()),
+);

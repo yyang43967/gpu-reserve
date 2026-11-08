@@ -41,6 +41,8 @@ from app.models import (
     CreatedVia,
     Gpu,
     GpuAllocation,
+    Lab,
+    NotificationKind,
     Reservation,
     ReservationStatus,
     Server,
@@ -48,16 +50,15 @@ from app.models import (
     User,
     UserRole,
 )
-from app.models.lab import DEFAULT_LAB_TIMEZONE
 from app.models.reservation import HOLDING_STATUSES, QUOTA_STATUSES
-from app.services import audit, booking_rules, locks
+from app.services import audit, booking_rules, locks, notifications
 from app.services.booking_rules import Booking, Interval
 from app.services.servers import get_server, visibility_conditions
 
 MAX_ACTIVE_RESERVATIONS: Final = 4
-MAX_ALLOCATION_ATTEMPTS: Final = 3
-# Weekly quotas are counted in one fixed zone, whichever lab a booking is in.
-QUOTA_TIMEZONE: Final = ZoneInfo(DEFAULT_LAB_TIMEZONE)
+# After the first attempt, retry up to this many times when another booking takes a
+# chosen GPU first.
+MAX_ALLOCATION_RETRIES: Final = 3
 
 # exclusion_violation: another transaction took one of the chosen GPUs.
 EXCLUSION_VIOLATION: Final = "23P01"
@@ -153,6 +154,20 @@ async def _count_active_reservations(
     return count or 0
 
 
+async def count_active_reservations(
+    session: AsyncSession, user_id: uuid.UUID, now: datetime
+) -> int:
+    """Pending and approved reservations of the user that have not ended."""
+    return await _count_active_reservations(session, user_id, now)
+
+
+async def load_quota_bookings(
+    session: AsyncSession, user_id: uuid.UUID, span: Interval
+) -> list[Booking]:
+    """The user's reservations that count toward the quota and overlap `span`."""
+    return await _load_quota_bookings(session, user_id, span)
+
+
 async def _load_quota_bookings(
     session: AsyncSession, user_id: uuid.UUID, span: Interval
 ) -> list[Booking]:
@@ -234,11 +249,18 @@ class NewReservation:
 
 
 async def create_reservation(
-    session: AsyncSession, actor: User, request: NewReservation, *, now: datetime
+    session: AsyncSession,
+    actor: User,
+    request: NewReservation,
+    *,
+    now: datetime,
+    quota_zone: ZoneInfo,
 ) -> Reservation:
     """Book `gpu_count` GPUs on a server for [starts_at, ends_at).
 
-    Raises a DomainError for any rule the request breaks. The caller commits.
+    `quota_zone` is the zone whose Monday-to-Monday weeks the quota is counted in,
+    whichever lab the server is in. Raises a DomainError for any rule the request
+    breaks. The caller commits.
     """
     # Only the shape of the request is checked before taking locks. Every rule that
     # reads server or lab data runs after the server lock, so it sees the version of
@@ -266,7 +288,7 @@ async def create_reservation(
         raise TooManyReservations(
             f"You can hold at most {MAX_ACTIVE_RESERVATIONS} upcoming or running reservations."
         )
-    weeks = booking_rules.weeks_overlapping(interval, QUOTA_TIMEZONE)
+    weeks = booking_rules.weeks_overlapping(interval, quota_zone)
     existing = await _load_quota_bookings(
         session, actor.id, Interval(weeks[0].start, weeks[-1].end)
     )
@@ -274,7 +296,7 @@ async def create_reservation(
         booking,
         existing,
         quota_hours=account.quota_hours,
-        zone=QUOTA_TIMEZONE,
+        zone=quota_zone,
     )
 
     status = ReservationStatus.PENDING if server.requires_approval else ReservationStatus.APPROVED
@@ -308,7 +330,7 @@ async def _allocate(
 ) -> uuid.UUID:
     """Insert the reservation and its allocations, retrying when another booking takes
     a chosen GPU first. Returns the new reservation's id."""
-    for _attempt in range(MAX_ALLOCATION_ATTEMPTS):
+    for _attempt in range(1 + MAX_ALLOCATION_RETRIES):
         try:
             async with session.begin_nested():
                 free = await _select_free_gpus(session, server.id, interval)
@@ -399,6 +421,9 @@ async def finish_reservation(
         entity_type=ENTITY_RESERVATION,
         entity_id=reservation.id,
         payload=payload | (context or {}),
+    )
+    notifications.notify_owner(
+        session, reservation, NotificationKind.CANCELLED, actor_id=actor_id, now=now
     )
 
 
@@ -565,10 +590,14 @@ async def approve_reservation(
         )
     if reservation.starts_at <= now:
         raise InvalidReservationState("This reservation has already started.")
+    await _ensure_server_open(session, reservation.server_id)
     reservation.status = ReservationStatus.APPROVED
     reservation.decided_by = admin.id
     reservation.decided_at = now
     _record_decision(session, admin, reservation, "reservation.approved")
+    notifications.notify_owner(
+        session, reservation, NotificationKind.APPROVED, actor_id=admin.id, now=now
+    )
     await session.flush()
     return await load_reservation(session, reservation_id)
 
@@ -597,8 +626,34 @@ async def reject_reservation(
         .values(active=False)
     )
     _record_decision(session, admin, reservation, "reservation.rejected", reason=reason)
+    notifications.notify_owner(
+        session, reservation, NotificationKind.REJECTED, actor_id=admin.id, now=now
+    )
     await session.flush()
     return await load_reservation(session, reservation_id)
+
+
+async def _ensure_server_open(session: AsyncSession, server_id: uuid.UUID) -> None:
+    """Refuse an approval when the server is no longer open for booking.
+
+    The server row is locked FOR SHARE, as a booking does, so a concurrent change to
+    maintenance either commits first and is seen here, or waits for the approval. The
+    caller already holds the reservation's row lock; no path locks a server row and
+    then a reservation row, so this order cannot deadlock.
+    """
+    row = (
+        await session.execute(
+            select(Server.hostname, Server.status, Lab.is_active)
+            .join(Server.lab)
+            .where(Server.id == server_id)
+            .with_for_update(read=True, of=Server)
+        )
+    ).one()
+    if row.status is not ServerStatus.AVAILABLE or not row.is_active:
+        raise ServerUnavailable(
+            f"{row.hostname} is not open for booking right now, so the request cannot be "
+            "approved. Reject it, or approve it once the server is back."
+        )
 
 
 def _record_decision(
@@ -690,17 +745,13 @@ async def server_availability(
     busy = [Interval(row.starts_at, row.ends_at) for row in busy_rows]
 
     runs: list[FreeRun] = []
-    slot_start = window.start
-    while slot_start < window.end:
-        slot = Interval(slot_start, slot_start + booking_rules.SLOT)
-        # An active GPU has at most one active allocation per instant, so counting
-        # overlapping allocations counts busy GPUs.
-        free = server.gpu_count - sum(1 for b in busy if b.overlap_minutes(slot) > 0)
+    for index, free in enumerate(booking_rules.free_per_slot(window, server.gpu_count, busy)):
+        slot_start = window.start + index * booking_rules.SLOT
+        slot_end = slot_start + booking_rules.SLOT
         if runs and runs[-1].free == free:
-            runs[-1] = FreeRun(runs[-1].starts_at, slot.end, free)
+            runs[-1] = FreeRun(runs[-1].starts_at, slot_end, free)
         else:
-            runs.append(FreeRun(slot.start, slot.end, free))
-        slot_start = slot.end
+            runs.append(FreeRun(slot_start, slot_end, free))
     return Availability(server=server, window=window, runs=runs)
 
 
@@ -716,14 +767,17 @@ class QuotaStatus:
         return max(0, self.quota_minutes - self.used_minutes)
 
 
-async def quota_status(session: AsyncSession, user: User, *, now: datetime) -> QuotaStatus:
-    """The user's GPU time in the current quota week, counted with the same functions
-    the booking check uses."""
-    week = booking_rules.week_containing(now, QUOTA_TIMEZONE)
+async def quota_status(
+    session: AsyncSession, user: User, *, at: datetime, quota_zone: ZoneInfo
+) -> QuotaStatus:
+    """The user's GPU time in the quota week containing `at`, counted with the same
+    functions the booking check uses. Pass now for the current week, or a booking's
+    start to see the week it will be checked against."""
+    week = booking_rules.week_containing(at, quota_zone)
     bookings = await _load_quota_bookings(session, user.id, week)
     return QuotaStatus(
         week=week,
-        timezone=QUOTA_TIMEZONE.key,
+        timezone=quota_zone.key,
         used_minutes=booking_rules.used_gpu_minutes(week, bookings),
         quota_minutes=user.weekly_gpu_hour_quota * booking_rules.MINUTES_PER_HOUR,
     )

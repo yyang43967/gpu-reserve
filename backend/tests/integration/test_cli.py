@@ -168,3 +168,36 @@ async def test_mismatched_prompts_are_rejected(
 async def test_password_is_not_an_argument() -> None:
     with pytest.raises(SystemExit):
         cli.main(["create-admin", "--email", "root@example.edu", "--password", PASSWORD])
+
+
+async def test_reset_database_empties_every_table_in_test(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await users.create_user(
+        db_session, email="someone@example.edu", password=PASSWORD, full_name="Someone"
+    )
+    await db_session.commit()
+    monkeypatch.setenv("ENVIRONMENT", "test")
+
+    assert await asyncio.to_thread(cli.main, ["reset-database"]) == 0
+
+    assert await all_users(db_session) == []
+
+
+@pytest.mark.parametrize("environment", ["local", "production"])
+async def test_reset_database_is_refused_outside_test(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    environment: str,
+) -> None:
+    await users.create_user(
+        db_session, email="someone@example.edu", password=PASSWORD, full_name="Someone"
+    )
+    await db_session.commit()
+    monkeypatch.setenv("ENVIRONMENT", environment)
+
+    assert await asyncio.to_thread(cli.main, ["reset-database"]) == 1
+
+    assert "only runs with ENVIRONMENT=test" in capsys.readouterr().err
+    assert len(await all_users(db_session)) == 1

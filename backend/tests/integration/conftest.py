@@ -6,7 +6,7 @@ from alembic import command
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from redis.asyncio import Redis
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from testcontainers.postgres import PostgresContainer
 from testcontainers.redis import RedisContainer
 
@@ -140,3 +140,19 @@ def client_from(running_app: FastAPI) -> ClientFactory:
 async def api_client(client_from: ClientFactory) -> AsyncIterator[AsyncClient]:
     async with client_from("192.0.2.1") as client:
         yield client
+
+
+@pytest.fixture
+async def job_engine(make_settings: Callable[..., Settings]) -> AsyncIterator[AsyncEngine]:
+    """A separate engine for tests whose code under test opens and commits its own
+    sessions. Committed data is removed afterwards."""
+    engine = create_engine(make_settings())
+    yield engine
+    await engine.dispose()
+    await truncate_all(engine)
+    await engine.dispose()
+
+
+@pytest.fixture
+def job_factory(job_engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
+    return async_sessionmaker(job_engine, expire_on_commit=False)

@@ -110,10 +110,12 @@ export interface ApiRequestOptions {
   method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
   body?: unknown;
   signal?: AbortSignal;
+  /** The media type asked for; JSON unless a file is downloaded. */
+  accept?: string;
 }
 
 async function send(path: string, options: ApiRequestOptions): Promise<Response> {
-  const headers = new Headers({ Accept: "application/json" });
+  const headers = new Headers({ Accept: options.accept ?? "application/json" });
   const token = getAccessToken();
   if (token) {
     headers.set("Authorization", `Bearer ${token}`);
@@ -133,13 +135,13 @@ async function send(path: string, options: ApiRequestOptions): Promise<Response>
 }
 
 /**
- * Call the API and return the parsed JSON body (undefined for 204).
+ * Call the API and return the successful response.
  *
  * On a 401 it refreshes the access token once and retries. If the session cannot be
  * refreshed, the session-expired handler runs and the original error is thrown.
  * Every error is thrown as an ApiError built from the problem details response.
  */
-export async function apiFetch<T>(path: string, options: ApiRequestOptions = {}): Promise<T> {
+async function request(path: string, options: ApiRequestOptions): Promise<Response> {
   let response = await send(path, options);
 
   if (response.status === 401 && !NO_REFRESH_PATHS.has(path)) {
@@ -155,22 +157,24 @@ export async function apiFetch<T>(path: string, options: ApiRequestOptions = {})
   if (!response.ok) {
     throw await toApiError(response);
   }
+  return response;
+}
+
+/** Call the API and return the parsed JSON body (undefined for 204). See `request`. */
+export async function apiFetch<T>(path: string, options: ApiRequestOptions = {}): Promise<T> {
+  const response = await request(path, options);
   if (response.status === 204) {
     return undefined as T;
   }
   return (await response.json()) as T;
 }
 
+/** Download a file from the API with the same authentication and errors as apiFetch. */
+export async function apiFetchBlob(path: string, options: ApiRequestOptions = {}): Promise<Blob> {
+  const response = await request(path, options);
+  return response.blob();
+}
+
 export function apiGet<T>(path: string, signal?: AbortSignal): Promise<T> {
   return apiFetch<T>(path, { signal });
-}
-
-// --- health ---
-
-export interface HealthResponse {
-  status: "ok";
-}
-
-export function getHealth(signal?: AbortSignal): Promise<HealthResponse> {
-  return apiGet<HealthResponse>("/health", signal);
 }

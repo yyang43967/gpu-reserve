@@ -6,7 +6,19 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from redis.asyncio import Redis
 
-from app.api import API_PREFIX, auth, health, labs, me, reservations, servers, uploads, users
+from app.api import (
+    API_PREFIX,
+    auth,
+    health,
+    labs,
+    me,
+    reservations,
+    search,
+    servers,
+    stats,
+    uploads,
+    users,
+)
 from app.core.config import Settings, get_settings
 from app.core.errors import register_error_handlers
 from app.db.session import create_engine, create_session_factory
@@ -56,6 +68,8 @@ def create_app(settings: Settings | None = None, storage: ObjectStorage | None =
     app.include_router(labs.router, prefix=API_PREFIX)
     app.include_router(servers.router, prefix=API_PREFIX)
     app.include_router(reservations.router, prefix=API_PREFIX)
+    app.include_router(search.router, prefix=API_PREFIX)
+    app.include_router(stats.router, prefix=API_PREFIX)
     app.include_router(uploads.router, prefix=API_PREFIX)
 
     return app

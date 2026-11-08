@@ -21,10 +21,20 @@ export default defineConfig(({ mode }) => {
         "/api": { target: apiProxyTarget, changeOrigin: true },
       },
     },
+    // `vite preview` serves the production build; the end-to-end tests use it.
+    preview: {
+      port: 4173,
+      strictPort: true,
+      proxy: {
+        "/api": { target: apiProxyTarget, changeOrigin: true },
+      },
+    },
     test: {
       environment: "jsdom",
       globals: true,
       setupFiles: ["./src/test/setup.ts"],
+      // Playwright's end-to-end specs run separately.
+      include: ["src/**/*.test.{ts,tsx}"],
       css: false,
     },
   };

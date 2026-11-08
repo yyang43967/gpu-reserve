@@ -7,11 +7,14 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import GpuModel, Lab, Server, ServerStatus, User, UserRole
+from app.models import GpuModel, Lab, Reservation, Server, ServerStatus, User, UserRole
 from app.models.lab import DEFAULT_LAB_TIMEZONE
 from app.services import labs, servers
+from app.services.reservations import NewReservation, create_reservation
 
 LA = ZoneInfo(DEFAULT_LAB_TIMEZONE)
+# The quota zone the application uses by default; the tests count weeks in it.
+QUOTA_ZONE = ZoneInfo("America/Los_Angeles")
 SATURDAY = 5
 
 
@@ -80,12 +83,13 @@ async def add_server(
     status: ServerStatus = ServerStatus.AVAILABLE,
     requires_approval: bool = False,
     max_booking_hours: int = 12,
+    gpu_model: GpuModel = GpuModel.A100_80GB,
 ) -> Server:
     server = await servers.create_server(
         db,
         lab_id=lab.id,
         hostname=hostname,
-        gpu_model=GpuModel.A100_80GB,
+        gpu_model=gpu_model,
         gpu_count=gpu_count,
         cpu_cores=64,
         ram_gb=512,
@@ -111,3 +115,32 @@ def booking_body(
         "ends_at": (start + timedelta(hours=hours)).isoformat(),
         "purpose": purpose,
     }
+
+
+async def book(
+    db: AsyncSession,
+    user: User,
+    server: Server,
+    start: datetime,
+    *,
+    now: datetime,
+    hours: float = 1,
+    gpus: int = 1,
+    purpose: str = "Fine-tuning a 7B model",
+) -> Reservation:
+    """Create a reservation through the service, as of `now`, and commit."""
+    reservation = await create_reservation(
+        db,
+        user,
+        NewReservation(
+            server_id=server.id,
+            gpu_count=gpus,
+            starts_at=start,
+            ends_at=start + timedelta(hours=hours),
+            purpose=purpose,
+        ),
+        now=now,
+        quota_zone=QUOTA_ZONE,
+    )
+    await db.commit()
+    return reservation

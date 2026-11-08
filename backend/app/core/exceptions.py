@@ -304,3 +304,15 @@ class InvalidAvailabilityWindow(DomainError):
     kind = ErrorKind.INVALID
     type_slug = "invalid-availability-window"
     title = "Invalid availability window"
+
+
+class InvalidSearchWindow(DomainError):
+    kind = ErrorKind.INVALID
+    type_slug = "invalid-search-window"
+    title = "Invalid search window"
+
+
+class InvalidUtilizationWindow(DomainError):
+    kind = ErrorKind.INVALID
+    type_slug = "invalid-utilization-window"
+    title = "Invalid utilization window"

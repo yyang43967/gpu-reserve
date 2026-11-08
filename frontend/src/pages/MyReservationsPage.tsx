@@ -1,4 +1,5 @@
 import { keepPreviousData, useQuery, useQueryClient } from "@tanstack/react-query";
+import { CalendarPlus } from "lucide-react";
 import { useState } from "react";
 import { Link } from "react-router";
 
@@ -24,31 +25,28 @@ import { describeError } from "@/lib/form-errors";
 import { formatInLab, formatLabRange } from "@/lib/lab-time";
 import { useLatestSearchParams } from "@/lib/use-search-params";
 import { earlyEnd } from "@/reservations/booking";
+import { QuotaSummary } from "@/reservations/QuotaSummary";
+import {
+  DISPLAY_STATUS_LABELS,
+  DISPLAY_STATUS_VARIANTS,
+  describeGpus,
+  displayStatus,
+} from "@/reservations/reservation-status";
 import {
   canCancel,
   cancelReservation,
   getQuota,
+  getReservationCalendar,
   listReservations,
   quotaKey,
   RESERVATION_STATUS_LABELS,
   reservationsKey,
   reservationsListKey,
+  saveFile,
   wouldEndEarly,
 } from "@/reservations/reservations-api";
 
 const STATUSES = Object.keys(RESERVATION_STATUS_LABELS) as ReservationStatus[];
-
-const STATUS_VARIANTS: Record<
-  ReservationStatus,
-  "default" | "secondary" | "outline" | "destructive"
-> = {
-  pending: "secondary",
-  approved: "default",
-  rejected: "destructive",
-  cancelled: "outline",
-  expired: "outline",
-  completed: "outline",
-};
 
 interface ListParams {
   page: number;
@@ -98,30 +96,9 @@ function QuotaBar() {
       />
     );
   }
-  const { used_hours: used, quota_hours: total, remaining_hours: remaining } = quota.data;
-  const percent = total > 0 ? Math.min(100, Math.round((used / total) * 100)) : 100;
-  const weekStart = formatInLab(quota.data.week_start, quota.data.timezone);
   return (
-    <section aria-labelledby="quota-heading" className="mb-6 grid gap-2 rounded-xl border p-4">
-      <div className="flex flex-wrap items-baseline justify-between gap-2">
-        <h2 id="quota-heading" className="font-medium">
-          GPU-hours this week
-        </h2>
-        <p className="text-sm text-muted-foreground tabular-nums">
-          {used} of {total} used · {remaining} left
-        </p>
-      </div>
-      <div
-        role="progressbar"
-        aria-label="Weekly GPU-hours used"
-        aria-valuemin={0}
-        aria-valuemax={total}
-        aria-valuenow={used}
-        className="h-2 overflow-hidden rounded-full bg-muted"
-      >
-        <div className="h-full rounded-full bg-primary" style={{ width: `${String(percent)}%` }} />
-      </div>
-      <p className="text-xs text-muted-foreground">Week starting {weekStart}.</p>
+    <section aria-label="Weekly quota" className="mb-6 rounded-xl border p-4">
+      <QuotaSummary quota={quota.data} />
     </section>
   );
 }
@@ -193,9 +170,23 @@ function ReservationItem({
 }) {
   const zone = reservation.lab.timezone;
   const cancellable = canCancel(reservation, now);
-  const gpus = reservation.gpu_indexes.length
-    ? `GPU ${reservation.gpu_indexes.join(", ")}`
-    : `${String(reservation.gpu_count)} GPUs`;
+  const [downloading, setDownloading] = useState(false);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
+
+  const downloadCalendar = async () => {
+    setDownloading(true);
+    setDownloadError(null);
+    try {
+      const file = await getReservationCalendar(reservation.id);
+      saveFile(file, `reservation-${reservation.id}.ics`);
+    } catch (failure) {
+      setDownloadError(`Could not download the calendar file. ${describeError(failure)}`);
+    } finally {
+      setDownloading(false);
+    }
+  };
+  const gpus = describeGpus(reservation);
+  const status = displayStatus(reservation, now);
 
   return (
     <li
@@ -214,9 +205,7 @@ function ReservationItem({
             {reservation.lab.name} · {gpus}
           </p>
         </div>
-        <Badge variant={STATUS_VARIANTS[reservation.status]}>
-          {RESERVATION_STATUS_LABELS[reservation.status]}
-        </Badge>
+        <Badge variant={DISPLAY_STATUS_VARIANTS[status]}>{DISPLAY_STATUS_LABELS[status]}</Badge>
       </div>
       <p className="text-sm tabular-nums">
         {formatLabRange(reservation.starts_at, reservation.ends_at, zone)}
@@ -227,18 +216,27 @@ function ReservationItem({
       {reservation.status === "rejected" && reservation.decision_reason && (
         <p className="text-sm">Reason: {reservation.decision_reason}</p>
       )}
-      {error && (
+      {(error ?? downloadError) && (
         <p role="alert" className="text-sm text-destructive">
-          {error}
+          {error ?? downloadError}
         </p>
       )}
-      {cancellable && (
-        <div>
+      <div className="flex flex-wrap gap-2">
+        {cancellable && (
           <Button variant="outline" size="sm" onClick={onCancel}>
             {wouldEndEarly(reservation, now) ? "End early" : "Cancel"}
           </Button>
-        </div>
-      )}
+        )}
+        <Button
+          variant="ghost"
+          size="sm"
+          disabled={downloading}
+          onClick={() => void downloadCalendar()}
+        >
+          <CalendarPlus aria-hidden="true" />
+          {downloading ? "Preparing…" : "Add to calendar"}
+        </Button>
+      </div>
     </li>
   );
 }

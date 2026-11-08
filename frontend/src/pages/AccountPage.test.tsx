@@ -8,6 +8,7 @@ import {
   type FakeRequest,
   makeUser,
   on,
+  emptyDashboard,
   problem,
   signedInAs,
   tokenResponse,
@@ -30,10 +31,7 @@ describe("account page", () => {
   });
 
   it("is linked from the header", async () => {
-    fakeApi(
-      ...signedInAs("student"),
-      on("GET", "/health", () => Response.json({ status: "ok" })),
-    );
+    fakeApi(...signedInAs("student"), emptyDashboard);
     renderRoute("/");
 
     expect(await screen.findByRole("link", { name: "Account settings" })).toHaveAttribute(

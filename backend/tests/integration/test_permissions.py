@@ -18,7 +18,7 @@ from app.core.config import Settings
 from app.main import create_app
 from app.models import GpuModel, Lab, Reservation, Server, User, UserRole
 from app.services import labs, reservations, servers, users
-from tests.integration.reservation_helpers import booking_body, next_saturday
+from tests.integration.reservation_helpers import QUOTA_ZONE, booking_body, next_saturday
 
 pytestmark = pytest.mark.integration
 
@@ -33,6 +33,8 @@ class Access(StrEnum):
     AUTHENTICATED = "authenticated"
     # The owner of the record or an admin; anyone else gets 404.
     OWNER = "owner"
+    # The owner only; anyone else, admins included, gets 404.
+    SELF = "self"
     ADMIN = "admin"
 
 
@@ -209,6 +211,7 @@ MATRIX = [
     RouteCase(
         "POST", "/reservations/{reservation_id}/cancel", Access.OWNER, path_params=_reservation
     ),
+    RouteCase("GET", "/reservations/{reservation_id}.ics", Access.SELF, path_params=_reservation),
     RouteCase("POST", "/reservations/{reservation_id}/approve", Access.ADMIN, path_params=_pending),
     RouteCase(
         "POST",
@@ -217,6 +220,19 @@ MATRIX = [
         body=lambda ctx: {"reason": "Booked for a class"},
         path_params=_pending,
     ),
+    RouteCase(
+        "POST",
+        "/search/slots",
+        Access.AUTHENTICATED,
+        body=lambda ctx: {
+            "gpu_count": 1,
+            "duration_minutes": 60,
+            "earliest": next_saturday(datetime.now(UTC)).isoformat(),
+            "latest": (next_saturday(datetime.now(UTC)) + timedelta(hours=4)).isoformat(),
+        },
+    ),
+    RouteCase("GET", "/stats/overview", Access.AUTHENTICATED),
+    RouteCase("GET", "/stats/utilization", Access.ADMIN),
     # Open to every signed-in user for avatars. Server images are admin-only; that rule
     # lives in the uploads service and is tested in test_uploads_api.
     RouteCase(
@@ -228,13 +244,18 @@ MATRIX = [
 ]
 
 PROTECTED = [
-    case for case in MATRIX if case.access in {Access.AUTHENTICATED, Access.OWNER, Access.ADMIN}
+    case
+    for case in MATRIX
+    if case.access in {Access.AUTHENTICATED, Access.OWNER, Access.SELF, Access.ADMIN}
 ]
-OWNER_ONLY = [case for case in MATRIX if case.access is Access.OWNER]
+OWNER_ONLY = [case for case in MATRIX if case.access in {Access.OWNER, Access.SELF}]
+SELF_ONLY = [case for case in MATRIX if case.access is Access.SELF]
 ADMIN_ONLY = [case for case in MATRIX if case.access is Access.ADMIN]
 # The student caller owns the target reservations.
 CALLABLE_BY_STUDENT = [
-    case for case in MATRIX if case.access in {Access.PUBLIC, Access.AUTHENTICATED, Access.OWNER}
+    case
+    for case in MATRIX
+    if case.access in {Access.PUBLIC, Access.AUTHENTICATED, Access.OWNER, Access.SELF}
 ]
 
 
@@ -362,6 +383,7 @@ async def _student_booking(
             purpose="Training",
         ),
         now=now,
+        quota_zone=QUOTA_ZONE,
     )
     await db.commit()
     return reservation
@@ -455,7 +477,19 @@ async def test_student_is_allowed(
 # --- admin ---
 
 
-ADMIN_CALLABLE = [case for case in MATRIX if case.access is not Access.REFRESH_COOKIE]
+ADMIN_CALLABLE = [
+    case for case in MATRIX if case.access not in {Access.REFRESH_COOKIE, Access.SELF}
+]
+
+
+@pytest.mark.parametrize("case", SELF_ONLY, ids=_ids(SELF_ONLY))
+async def test_admins_get_not_found_on_owner_only_routes(
+    api_client: AsyncClient, admin: Caller, targets: Targets, case: RouteCase
+) -> None:
+    """A calendar file is the owner's own; an admin is not its owner."""
+    response = await call(api_client, case, Context.of(admin.user, targets), admin.headers)
+
+    assert_problem(response, 404, "reservation-not-found")
 
 
 @pytest.mark.parametrize("case", ADMIN_CALLABLE, ids=_ids(ADMIN_CALLABLE))

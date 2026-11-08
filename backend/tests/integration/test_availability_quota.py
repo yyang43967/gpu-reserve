@@ -2,6 +2,7 @@
 
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pytest
 from fastapi import FastAPI
@@ -12,7 +13,7 @@ from app.core.exceptions import InvalidAvailabilityWindow, QuotaExceeded, Server
 from app.models import Server, ServerStatus, User, UserRole
 from app.services import reservations, servers
 from app.services.reservations import FreeRun, NewReservation, create_reservation
-from tests.integration.reservation_helpers import add_lab, add_server, add_user
+from tests.integration.reservation_helpers import QUOTA_ZONE, add_lab, add_server, add_user
 from tests.integration.test_admin_users import assert_problem, bearer, create_user, login
 
 pytestmark = pytest.mark.integration
@@ -55,6 +56,7 @@ async def _book(
             purpose="Run",
         ),
         now=NOW,
+        quota_zone=QUOTA_ZONE,
     )
     await db.commit()
 
@@ -260,7 +262,7 @@ async def test_quota_status_counts_this_week_only(
     await _book(db_session, student, server, sunday_late, H, gpus=2)
     await _book(db_session, student, server, SATURDAY + timedelta(days=7), H, gpus=4)
 
-    status = await reservations.quota_status(db_session, student, now=NOW)
+    status = await reservations.quota_status(db_session, student, at=NOW, quota_zone=QUOTA_ZONE)
 
     assert status.week.start == datetime(2030, 1, 7, 8, 0, tzinfo=UTC)
     assert status.week.end == datetime(2030, 1, 14, 8, 0, tzinfo=UTC)
@@ -275,7 +277,7 @@ async def test_full_quota_reports_zero_and_refuses_the_smallest_booking(
     student = await add_user(db_session, "full@example.edu", quota=6)
     await _book(db_session, student, server, SATURDAY, 3 * H, gpus=2)
 
-    status = await reservations.quota_status(db_session, student, now=NOW)
+    status = await reservations.quota_status(db_session, student, at=NOW, quota_zone=QUOTA_ZONE)
     assert status.remaining_minutes == 0
 
     with pytest.raises(QuotaExceeded):
@@ -288,7 +290,7 @@ async def test_half_hours_are_reported_as_fractions(
     student = await add_user(db_session, "half@example.edu", quota=3)
     await _book(db_session, student, server, SATURDAY, 90 * M, gpus=1)
 
-    status = await reservations.quota_status(db_session, student, now=NOW)
+    status = await reservations.quota_status(db_session, student, at=NOW, quota_zone=QUOTA_ZONE)
 
     assert (status.used_minutes, status.remaining_minutes) == (90, 90)
 
@@ -305,6 +307,94 @@ async def test_quota_through_the_api(api_client: AsyncClient, headers: dict[str,
     start = datetime.fromisoformat(body["week_start"])
     end = datetime.fromisoformat(body["week_end"])
     assert start <= datetime.now(UTC) < end
+
+
+async def test_quota_status_reports_the_week_containing_at(
+    db_session: AsyncSession, student: User, server: Server
+) -> None:
+    """A booking next week is checked against next week, so a client can ask for it."""
+    await _book(db_session, student, server, SATURDAY, H, gpus=1)
+    await _book(db_session, student, server, SATURDAY + timedelta(days=7), 2 * H, gpus=2)
+
+    next_week = await reservations.quota_status(
+        db_session, student, at=SATURDAY + timedelta(days=7), quota_zone=QUOTA_ZONE
+    )
+
+    assert next_week.week.start == datetime(2030, 1, 14, 8, 0, tzinfo=UTC)
+    assert next_week.used_minutes == 4 * 60
+
+
+BERLIN = ZoneInfo("Europe/Berlin")
+# Sunday 13 January 2030, 23:00 UTC: Sunday afternoon in Los Angeles, but already
+# Monday 00:00 in Berlin, so it opens the next Berlin quota week.
+SUNDAY_LATE_UTC = datetime(2030, 1, 13, 23, 0, tzinfo=UTC)
+
+
+async def test_quota_weeks_follow_the_configured_zone_not_the_lab(
+    db_session: AsyncSession, server: Server
+) -> None:
+    """The lab is in Los Angeles; with a Berlin quota zone, Sunday 23:00 UTC belongs to
+    the next week. With a Los Angeles quota zone it is the same week and is refused."""
+    berlin_user = await add_user(db_session, "berlin@example.edu", quota=2)
+    la_user = await add_user(db_session, "la@example.edu", quota=2)
+    for user, zone in ((berlin_user, BERLIN), (la_user, QUOTA_ZONE)):
+        await create_reservation(
+            db_session,
+            user,
+            NewReservation(
+                server_id=server.id,
+                gpu_count=2,
+                starts_at=SATURDAY,
+                ends_at=SATURDAY + H,
+                purpose="Run",
+            ),
+            now=NOW,
+            quota_zone=zone,
+        )
+        await db_session.commit()
+
+    late = NewReservation(
+        server_id=server.id,
+        gpu_count=1,
+        starts_at=SUNDAY_LATE_UTC,
+        ends_at=SUNDAY_LATE_UTC + H,
+        purpose="Run",
+    )
+    await create_reservation(db_session, berlin_user, late, now=NOW, quota_zone=BERLIN)
+    await db_session.commit()
+    with pytest.raises(QuotaExceeded):
+        await create_reservation(db_session, la_user, late, now=NOW, quota_zone=QUOTA_ZONE)
+    await db_session.rollback()
+    await db_session.refresh(berlin_user)
+
+    status = await reservations.quota_status(db_session, berlin_user, at=NOW, quota_zone=BERLIN)
+    assert status.timezone == "Europe/Berlin"
+    assert status.week.start == datetime(2030, 1, 6, 23, 0, tzinfo=UTC)
+    assert status.used_minutes == 2 * 60
+
+
+async def test_quota_at_through_the_api(api_client: AsyncClient, headers: dict[str, str]) -> None:
+    at = datetime.now(UTC) + timedelta(days=9)
+
+    response = await api_client.get(
+        "/api/v1/me/quota", params={"at": at.isoformat()}, headers=headers
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert (
+        datetime.fromisoformat(body["week_start"]) <= at < datetime.fromisoformat(body["week_end"])
+    )
+
+
+async def test_quota_at_must_have_an_offset(
+    api_client: AsyncClient, headers: dict[str, str]
+) -> None:
+    response = await api_client.get(
+        "/api/v1/me/quota", params={"at": "2030-01-07T10:00:00"}, headers=headers
+    )
+
+    assert response.status_code == 422
 
 
 def test_quota_hours_are_numbers_in_the_schema(running_app: FastAPI) -> None:

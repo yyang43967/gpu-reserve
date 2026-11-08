@@ -15,7 +15,7 @@ from app.models import Gpu, GpuAllocation, Reservation, Server, User
 from app.services import reservations
 from app.services.booking_rules import Interval
 from app.services.reservations import NewReservation, create_reservation
-from tests.integration.reservation_helpers import add_lab, add_server, add_user
+from tests.integration.reservation_helpers import QUOTA_ZONE, add_lab, add_server, add_user
 
 pytestmark = pytest.mark.integration
 
@@ -32,7 +32,7 @@ async def world(db_session: AsyncSession) -> tuple[User, Server, list[Gpu]]:
     owner = await add_user(db_session, "owner@example.edu")
     user = await add_user(db_session, "student@example.edu")
     server = await add_server(db_session, await add_lab(db_session), gpu_count=2)
-    await create_reservation(db_session, owner, _request(server), now=NOW)
+    await create_reservation(db_session, owner, _request(server), now=NOW, quota_zone=QUOTA_ZONE)
     await db_session.commit()
     gpus = list(
         await db_session.scalars(select(Gpu).where(Gpu.server_id == server.id).order_by(Gpu.index))
@@ -86,7 +86,9 @@ async def test_exclusion_violation_is_retried(
 
     calls = _counting(monkeypatch, stale)
 
-    created = await create_reservation(db_session, user, _request(server), now=NOW)
+    created = await create_reservation(
+        db_session, user, _request(server), now=NOW, quota_zone=QUOTA_ZONE
+    )
     await db_session.commit()
 
     assert len(calls) == 2
@@ -111,12 +113,12 @@ async def test_deadlock_is_retried(
 
     calls = _counting(monkeypatch, deadlock)
 
-    await create_reservation(db_session, user, _request(server), now=NOW)
+    await create_reservation(db_session, user, _request(server), now=NOW, quota_zone=QUOTA_ZONE)
 
     assert len(calls) == 2
 
 
-async def test_retries_stop_after_three_attempts(
+async def test_retries_stop_after_three_retries(
     db_session: AsyncSession,
     world: tuple[User, Server, list[Gpu]],
     monkeypatch: pytest.MonkeyPatch,
@@ -131,9 +133,10 @@ async def test_retries_stop_after_three_attempts(
     monkeypatch.setattr(reservations, "_select_free_gpus", always_stale)
 
     with pytest.raises(AllocationContention):
-        await create_reservation(db_session, user, _request(server), now=NOW)
+        await create_reservation(db_session, user, _request(server), now=NOW, quota_zone=QUOTA_ZONE)
 
-    assert len(calls) == 3
+    # The first attempt plus three retries.
+    assert len(calls) == 4
     await db_session.rollback()
     assert await _count(db_session, Reservation) == 1
 
@@ -152,7 +155,7 @@ async def test_other_integrity_errors_are_not_retried(
     calls = _counting(monkeypatch, missing_gpu)
 
     with pytest.raises(IntegrityError) as caught:
-        await create_reservation(db_session, user, _request(server), now=NOW)
+        await create_reservation(db_session, user, _request(server), now=NOW, quota_zone=QUOTA_ZONE)
 
     assert reservations.sqlstate(caught.value) == "23503"
     assert len(calls) == 1

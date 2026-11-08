@@ -2,7 +2,7 @@ import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { Reservation } from "@/lib/api-types";
-import { fakeApi, healthy, on, page, problem, signedInAs, type FakeRequest } from "@/test/fake-api";
+import { fakeApi, on, page, problem, signedInAs, type FakeRequest } from "@/test/fake-api";
 import { renderRoute } from "@/test/render";
 
 // Saturday 12 January 2030, 09:10 in Los Angeles.
@@ -53,7 +53,6 @@ afterEach(() => {
 function api(list: () => Reservation[], extra: Parameters<typeof fakeApi> = []) {
   return fakeApi(
     ...signedInAs("student"),
-    healthy,
     on("GET", "/me/quota", () => Response.json(quota)),
     on("GET", "/reservations", () => Response.json(page(list()))),
     ...extra,
@@ -84,6 +83,40 @@ describe("my reservations page", () => {
     const tokyo = screen.getByRole("listitem", { name: /h100-tokyo-01/ });
     expect(within(tokyo).getByText("Sun, Jan 13, 09:00 GMT+9 – 11:00 GMT+9")).toBeInTheDocument();
     expect(within(tokyo).getByText("Pending approval")).toBeInTheDocument();
+  });
+
+  it("labels an approved booking in progress as running", async () => {
+    api(() => [
+      reservation({ starts_at: "2030-01-12T17:00:00Z", ends_at: "2030-01-12T19:00:00Z" }),
+    ]);
+    renderRoute("/reservations");
+
+    const item = await screen.findByRole("listitem", { name: /a100-node-01/ });
+    expect(within(item).getByText("Running")).toBeInTheDocument();
+    expect(within(item).queryByText("Approved")).toBeNull();
+    expect(within(item).getByText("Vision Lab · GPU 0, 1")).toBeInTheDocument();
+  });
+
+  it("hides GPU numbers that were never in use but keeps the calendar download", async () => {
+    api(() =>
+      (["rejected", "expired", "cancelled"] as const).map((status, i) =>
+        reservation({
+          id: `r-${status}`,
+          status,
+          starts_at: "2030-01-10T17:00:00Z",
+          ends_at: "2030-01-10T19:00:00Z",
+          server: { id: `s-${String(i)}`, hostname: `${status}-node`, gpu_model: "A100_80GB" },
+        }),
+      ),
+    );
+    renderRoute("/reservations");
+
+    for (const status of ["rejected", "expired", "cancelled"]) {
+      const item = await screen.findByRole("listitem", { name: new RegExp(`${status}-node`) });
+      expect(within(item).getByText("Vision Lab · 2 GPUs")).toBeInTheDocument();
+      expect(within(item).queryByText(/GPU 0/)).toBeNull();
+      expect(within(item).getByRole("button", { name: "Add to calendar" })).toBeInTheDocument();
+    }
   });
 
   it("shows both dates for a reservation that crosses midnight", async () => {
@@ -128,7 +161,6 @@ describe("my reservations page", () => {
   it("asks for only the signed-in admin's own reservations", async () => {
     const requests = fakeApi(
       ...signedInAs("admin", { id: "admin-1" }),
-      healthy,
       on("GET", "/me/quota", () => Response.json(quota)),
       on("GET", "/reservations", () => Response.json(page([]))),
     );
@@ -244,17 +276,18 @@ describe("my reservations page", () => {
 
     const rejected = await screen.findByRole("listitem", { name: /a100-node-01/ });
     expect(within(rejected).getByText("Reason: Class booking")).toBeInTheDocument();
-    expect(within(rejected).queryByRole("button")).toBeNull();
+    expect(within(rejected).queryByRole("button", { name: /Cancel|End early/ })).toBeNull();
     // Approved but already over by the client's clock.
     const past = screen.getByRole("listitem", { name: /past-node/ });
-    expect(within(past).queryByRole("button")).toBeNull();
+    expect(within(past).queryByRole("button", { name: /Cancel|End early/ })).toBeNull();
+    // A calendar file is still available for both.
+    expect(within(past).getByRole("button", { name: "Add to calendar" })).toBeInTheDocument();
   });
 
   it("shows empty, filtered-empty, and error states", async () => {
     let fail = true;
     fakeApi(
       ...signedInAs("student"),
-      healthy,
       on("GET", "/me/quota", () => Response.json(quota)),
       on("GET", "/reservations", () =>
         fail
@@ -271,5 +304,58 @@ describe("my reservations page", () => {
     expect(await screen.findByText("No reservations match this filter")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Show all" }));
     expect(await screen.findByText("No reservations yet")).toBeInTheDocument();
+  });
+
+  it("downloads a reservation as a calendar file", async () => {
+    const createObjectURL = vi.fn(() => "blob:calendar");
+    const revokeObjectURL = vi.fn();
+    vi.stubGlobal("URL", Object.assign(URL, { createObjectURL, revokeObjectURL }));
+    const clicked: string[] = [];
+    const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (
+      this: HTMLAnchorElement,
+    ) {
+      clicked.push(this.download);
+    });
+    const requests = api(
+      () => [reservation()],
+      [
+        on(
+          "GET",
+          "/reservations/r-1.ics",
+          () =>
+            new Response("BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n", {
+              headers: { "Content-Type": "text/calendar; charset=utf-8" },
+            }),
+        ),
+      ],
+    );
+    renderRoute("/reservations");
+
+    const item = await screen.findByRole("listitem", { name: /a100-node-01/ });
+    fireEvent.click(within(item).getByRole("button", { name: "Add to calendar" }));
+
+    await waitFor(() => {
+      expect(clicked).toEqual(["reservation-r-1.ics"]);
+    });
+    const download = requests.find((r) => r.path === "/reservations/r-1.ics");
+    expect(download?.headers.get("Accept")).toBe("text/calendar");
+    expect(download?.headers.get("Authorization")).toBe("Bearer access-token");
+    expect(createObjectURL).toHaveBeenCalledOnce();
+    click.mockRestore();
+  });
+
+  it("explains a failed calendar download on the reservation", async () => {
+    api(
+      () => [reservation()],
+      [on("GET", "/reservations/r-1.ics", () => problem(404, "reservation-not-found"))],
+    );
+    renderRoute("/reservations");
+
+    const item = await screen.findByRole("listitem", { name: /a100-node-01/ });
+    fireEvent.click(within(item).getByRole("button", { name: "Add to calendar" }));
+
+    expect(await within(item).findByRole("alert")).toHaveTextContent(
+      "Could not download the calendar file.",
+    );
   });
 });

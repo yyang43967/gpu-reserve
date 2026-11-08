@@ -97,3 +97,21 @@ async def test_invalid_requests(
     response = await api_client.post(PRESIGN, json=body, headers=student_headers)
 
     assert_problem(response, 422, slug)
+
+
+async def test_presign_is_rate_limited_per_user(
+    api_client: AsyncClient, student_headers: dict[str, str], admin_headers: dict[str, str]
+) -> None:
+    body = {"purpose": "avatar", "content_type": "image/png", "size_bytes": 1024}
+    limit = 30  # the default presign_user_limit
+    for _ in range(limit):
+        response = await api_client.post(PRESIGN, json=body, headers=student_headers)
+        assert response.status_code == 200, response.text
+
+    response = await api_client.post(PRESIGN, json=body, headers=student_headers)
+
+    assert_problem(response, 429, "too-many-requests")
+    assert 0 < int(response.headers["retry-after"]) <= 10 * 60
+    # Another account has its own window.
+    other = await api_client.post(PRESIGN, json=body, headers=admin_headers)
+    assert other.status_code == 200

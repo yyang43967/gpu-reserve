@@ -1,0 +1,95 @@
+# End-to-end test stack, separate from the development stack.
+#
+#   docker compose -f docker-compose.e2e.yml up -d --build --wait
+#   pnpm --dir frontend exec playwright test
+#   docker compose -f docker-compose.e2e.yml down
+#
+# Its own project, ports, and an in-memory database, so a test run never touches
+# development data and can run next to the dev stack. The frontend is not a container:
+# Playwright builds it and serves it with `vite preview` on the host.
+
+name: gpu-reserve-e2e
+
+x-backend-env: &backend-env
+  # "test" allows `python -m app.cli reset-database`, which the tests run first.
+  ENVIRONMENT: test
+  DATABASE_URL: postgresql+asyncpg://gpureserve:gpureserve@postgres:5432/gpureserve
+  REDIS_URL: redis://redis:6379/0
+  CORS_ORIGINS: http://localhost:4173
+  JWT_SECRET: e2e-only-jwt-secret-never-used-anywhere-else
+  REFRESH_COOKIE_SECURE: "false"
+  SMTP_HOST: mailpit
+  SMTP_PORT: "1025"
+  FRONTEND_URL: http://localhost:4173
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: gpureserve
+      POSTGRES_PASSWORD: gpureserve
+      POSTGRES_DB: gpureserve
+    command: postgres -c shared_buffers=64MB -c max_connections=40 -c fsync=off
+    # Thrown away with the container.
+    tmpfs:
+      - /var/lib/postgresql/data
+    mem_limit: 384m
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gpureserve -d gpureserve"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --maxmemory 32mb --maxmemory-policy noeviction --save "" --appendonly no
+    mem_limit: 64m
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  api:
+    build:
+      context: ./backend
+    image: gpu-reserve-api:local
+    environment: *backend-env
+    ports:
+      - "127.0.0.1:18000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    mem_limit: 384m
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/ready', timeout=3)"
+      interval: 3s
+      timeout: 5s
+      retries: 20
+
+  worker:
+    image: gpu-reserve-api:local
+    command: arq app.workers.settings.WorkerSettings
+    environment: *backend-env
+    depends_on:
+      api:
+        condition: service_healthy
+    mem_limit: 256m
+
+  mailpit:
+    image: axllent/mailpit:v1.33
+    ports:
+      # The web UI and API, for asserting on sent mail. SMTP stays on the network.
+      - "127.0.0.1:18025:8025"
+    mem_limit: 64m
+    healthcheck:
+      test: ["CMD", "/mailpit", "readyz"]
+      interval: 3s
+      timeout: 3s
+      retries: 20

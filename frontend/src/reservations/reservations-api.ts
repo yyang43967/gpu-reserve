@@ -1,4 +1,4 @@
-import { apiFetch } from "@/lib/api";
+import { apiFetch, apiFetchBlob } from "@/lib/api";
 import type { Availability, Page, Quota, Reservation, ReservationStatus } from "@/lib/api-types";
 
 export const RESERVATIONS_PAGE_SIZE = 20;
@@ -49,6 +49,11 @@ export function availabilityKey(serverId: string) {
 }
 
 export const quotaKey = [...reservationsKey, "quota"] as const;
+
+/** The quota week containing `at` (an ISO instant), such as a planned booking's start. */
+export function quotaAtKey(at: string) {
+  return [...quotaKey, "at", at] as const;
+}
 
 export function listReservations(
   params: ReservationListParams,
@@ -102,8 +107,13 @@ export function getAvailability(
   );
 }
 
-export function getQuota(signal?: AbortSignal): Promise<Quota> {
-  return apiFetch<Quota>("/me/quota", { signal });
+/**
+ * GPU-hours used and left in one quota week: the current week, or the week containing
+ * `at`. A booking is checked against every week it overlaps.
+ */
+export function getQuota(signal?: AbortSignal, at?: Date): Promise<Quota> {
+  const query = at ? `?${new URLSearchParams({ at: at.toISOString() }).toString()}` : "";
+  return apiFetch<Quota>(`/me/quota${query}`, { signal });
 }
 
 /** Whether the reservation can still be cancelled or ended early, judged at `now`. */
@@ -119,4 +129,28 @@ export function wouldEndEarly(reservation: Reservation, now: Date): boolean {
     new Date(reservation.starts_at) < now &&
     now < new Date(reservation.ends_at)
   );
+}
+
+export const CALENDAR_MEDIA_TYPE = "text/calendar";
+
+/** The reservation as an iCalendar file. Only its owner can download it. */
+export function getReservationCalendar(id: string): Promise<Blob> {
+  return apiFetchBlob(`/reservations/${encodeURIComponent(id)}.ics`, {
+    accept: CALENDAR_MEDIA_TYPE,
+  });
+}
+
+/** Save a file the user asked for, through a temporary link. */
+export function saveFile(blob: Blob, filename: string): void {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  // Revoked on the next turn, after the browser has started the download.
+  setTimeout(() => {
+    URL.revokeObjectURL(url);
+  }, 0);
 }

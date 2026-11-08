@@ -60,6 +60,7 @@ Each entry records the context, the decision, and why. Newest phases at the bott
 - **Context:** The repository is private for now, so Actions minutes are billed. GitHub offers native arm64 runners (`ubuntu-24.04-arm`) to private repositories.
 - **Decision:** Pull requests run lint, type checks, and unit and integration tests on `ubuntu-latest`. Pushes to `main` also build the arm64 image and smoke-test the `core` stack on `ubuntu-24.04-arm`. Playwright will join the `main`-only job in Phase 5.
 - **Why:** Fast, cheap PR feedback, plus a native build of the production architecture without QEMU. The runner labels do not change when the repository goes public.
+- **Outcome:** the Playwright job was added in Phase 5 as its own `main`-only job, also runnable by hand (`workflow_dispatch`). See "End-to-end tests".
 
 ### Integration tests with testcontainers
 - **Decision:** Tests marked `integration` start real Postgres and Redis containers once per session. They run on every PR. Locally, `pytest -m "not integration"` skips them when Docker is off.
@@ -312,9 +313,10 @@ Each entry records the context, the decision, and why. Newest phases at the bott
   - In one transaction, select the server's active GPUs with no overlapping active allocation, ordered by number.
   - Take the lowest `k` and insert the reservation and `k` allocations.
   - If the constraint fires, retry with fresh availability.
-  - If fewer than `k` GPUs are free, return 409 `gpu-unavailable`. After three failed attempts, return 409 `allocation-contention`.
+  - If fewer than `k` GPUs are free, return 409 `gpu-unavailable`. If the first attempt and three retries all lose to other bookings, return 409 `allocation-contention`.
 - **Why it is correct:** the constraint holds no matter how a row is written. Under READ COMMITTED, an insert that overlaps an uncommitted allocation waits for that transaction, then fails once it commits. The retry therefore always sees the winner.
 - **Retry details:**
+  - Up to three retries after the first attempt (`MAX_ALLOCATION_RETRIES = 3`), so at most four attempts. The first version counted three attempts in total. It was changed to count retries, which is the documented behavior; the extra round costs one more savepoint under contention and nothing otherwise.
   - Each attempt runs in a savepoint (`begin_nested`). A failed attempt rolls back only its own inserts. The user and server locks taken before the savepoint stay held.
   - Each attempt builds new `Reservation` and `GpuAllocation` objects. Nothing from a rolled-back savepoint is reused.
   - The retryable error is recognized by SQLSTATE, not by message text: `23P01` (exclusion violation) and `40P01` (deadlock detected). Any other database error, such as a foreign key violation, propagates on the first attempt. A test checks that.
@@ -367,17 +369,34 @@ Each entry records the context, the decision, and why. Newest phases at the bott
 - **Stale quota, found during implementation:** the booking read the quota from the `User` object loaded when the request was authenticated, before the lock. An admin lowering the quota at the same moment was therefore invisible to it. The booking now re-reads `is_active` and the quota after taking the lock. A deterministic test holds the admin's change uncommitted, confirms the booking is blocked, commits, and checks that the booking gets `quota-exceeded`. Removing either the lock on the admin side or the re-read makes the test fail.
 - **Which weeks are checked:** every quota week the new booking overlaps, not only the current one. Otherwise a booking that spills past Monday 00:00 could overfill next week.
 - **Fixed quota timezone:**
-  - The quota week runs from Monday 00:00 to the next Monday 00:00 in one fixed zone, the default lab zone, whichever lab a booking is in. Usage is summed across all labs.
+  - The quota week runs from Monday 00:00 to the next Monday 00:00 in one fixed zone, whichever lab a booking is in. Usage is summed across all labs.
+  - The zone is its own setting, `QUOTA_TIMEZONE` (default `America/Los_Angeles`), validated like a lab zone (IANA name, whole-half-hour offsets). It is passed into the booking and quota functions as an argument.
+  - It is deliberately not derived from the default zone for new labs. The two only look related: one is a form default, the other defines when every user's week resets. If the quota zone followed the lab default, changing that default would silently move every quota week, and bookings already accepted could end up over the quota in the new weeks.
   - A per-lab week was rejected: one user's bookings would be counted in different week windows depending on the lab. Near a week boundary, hours booked in one lab just before its Monday and in another lab just after a later Monday land in different weeks. The user could then hold more than the quota within a single week of either zone.
   - Weeks that contain a daylight saving change are 167 or 169 hours long.
 - **`/me/quota`** uses the same functions as the check (`_load_quota_bookings` and `used_gpu_minutes`), so the number shown is the number enforced. Hours are fractional, because bookings are in half hours.
+- **`/me/quota?at=`** returns the week containing any instant, not only the current week. A booking is checked against the week it falls in, so showing only this week's numbers would let the dialog say "40 hours left" for a booking next week that is then refused. The booking dialog asks for the week of the chosen start. A booking that crosses Monday is still checked against both weeks; the dialog shows the start's week, and the API's `quota-exceeded` detail names the week that overflowed.
+
+### Active-reservation limit
+- **Rule:** a user may hold at most four reservations that are `pending` or `approved` and have not ended (`ends_at > now`).
+- **Running bookings count.** A running booking still holds GPUs. The limit exists to stop one person from holding many slots at once; leaving running ones out would let a user with four running bookings queue four more.
+- **Pending past its start counts** until the expiry job marks it `expired`, because its GPUs are still held until then.
+
+### Peak-hours limit per booking
+- **Rule:** the GPU-hours a single booking spends inside weekday 09:00–18:00 (lab time) may not exceed 4.
+- **Summed across every peak window the booking touches**, not checked per day. The limit is about how much of the busiest time one booking takes, so splitting it by day would let a long booking take 4 GPU-hours of peak time on each of several days.
+- **In practice** this only differs from a per-day check when a booking spans two peak windows, which needs more than 15 hours. That is possible only on servers where an admin raised `max_booking_hours` above the default 12.
+
+### Approval only before the start
+- **Rule:** approving a `pending` reservation whose start has passed returns 409 `invalid-reservation-state`. Rejecting it is still allowed, since that releases the GPUs.
+- **Why:** a pending reservation past its start belongs to the expiry job, which turns it into `expired`. If approval stayed open, an admin and the job could act on the same row at the same moment. The row lock would make the outcome consistent, but it would depend on who came first. The student would also get an approval for time that has already partly passed. A clear cut-off at the start gives one owner per transition: admins before the start, the job after it.
 
 ### Lock order
 - Bookings take the user lock, then the server row.
 - Deactivation takes the user lock, then the user's reservation rows.
-- Approve, reject, and cancel take only the reservation row.
+- Approve, reject, and cancel take the reservation row. Approve then takes the server row `FOR SHARE` (see "Approval checks the server").
 - Server changes take only the server row.
-- No path takes a reservation row and then the user lock, or the server row and then the user lock, so these paths cannot deadlock against each other.
+- No path takes a reservation row and then the user lock, or the server row and then the user lock, or the server row and then a reservation row, so these paths cannot deadlock against each other.
 
 ### Time grid and rules
 - **Granularity is checked in UTC:** `starts_at` and `ends_at` must be whole multiples of 30 minutes since the Unix epoch.
@@ -484,3 +503,138 @@ Each entry records the context, the decision, and why. Newest phases at the bott
 - **No notifications** on approve, reject, cancel, or deactivation.
 - **Lab deactivation and maintenance** leave existing bookings in place. Their owners can still see and cancel them, but nobody tells them.
 - **Approve does not check the server's state:** an admin can approve a pending reservation on a server that has since gone into maintenance.
+  - **Outcome:** fixed in Phase 5. See "Approval checks the server".
+
+## Phase 5 — Jobs, search, polish
+
+### Notifications: a transactional outbox
+- **Context:** approvals, rejections, cancellations, expiries, and reminders send email. Email goes to an outside system, so it cannot be part of the database transaction that makes the change.
+- **Options considered:**
+  1. Send from the request after commit. The request waits on SMTP, and a crash or SMTP outage after the commit loses the email.
+  2. Enqueue an ARQ job after commit. Faster for the request, but a Redis outage or a crash between the commit and the enqueue still loses it.
+  3. Write a `notifications` row in the same transaction as the change, and deliver rows from a worker (chosen).
+- **Decision:** `notify_owner` adds a row next to the change. A committed change always has its row; a rolled-back one never does. A test cancels, flushes, rolls back, and finds no row.
+- **Shape:** one row per `(reservation_id, kind)`, enforced by a unique constraint, with `status` (`pending`, `sent`, `skipped`, `failed`), `attempts`, `next_attempt_at`, and `last_error`. A partial index on `next_attempt_at WHERE status = 'pending'` serves the dispatcher.
+- **At least once:** a send and the update that records it cannot be atomic. A crash in between can send a message twice. That is accepted: a duplicate notice is a nuisance, a missing one can cost someone their booking.
+- **Stale reminders:** the dispatcher re-reads the reservation before sending. A reminder whose reservation is no longer approved, or has already started, is marked `skipped`. Other kinds report a change that did happen and are always sent.
+
+### Who is notified
+- **Rule:** the owner is emailed when someone else changed their reservation, and always for expiry and reminders, which have no actor.
+  - Admin approval, rejection, or cancellation (including ending a running booking early): email.
+  - Deactivation releases every booking with the admin as the actor, so the user gets one email per released booking, even though the account is now inactive. They need to know.
+  - A student cancelling or ending their own booking: no email. They just did it.
+  - An admin deciding their own request: no email, by the same rule.
+- **No "inactive recipients are skipped" rule.** It would contradict the deactivation case, and nothing else needs it: deactivation releases all bookings first, so an inactive account never gets reminders.
+- **Completion** sends nothing. A booking ending on time is not news.
+
+### Sweeping jobs and idempotency
+- **Jobs:** `expire_pending` every minute, `complete_finished` and `queue_reminders` every five minutes. Each is a thin ARQ wrapper around a service function that takes `now`.
+- **`expire_pending`** is set-based, in one transaction: an ORM `UPDATE … SET status = 'expired' WHERE status = 'pending' AND starts_at <= now RETURNING id, user_id`, then one UPDATE deactivating those reservations' allocations, an audit row each (`actor_id NULL`), and one INSERT of `expired` notifications. Only the ids the UPDATE returned are touched afterwards, and those rows are locked by it until commit.
+- **Expiry against approval:** approval requires `now < starts_at` and expiry `starts_at <= now`, so each moment has one owner. If an approval holds the row when the job's UPDATE reaches it, the UPDATE waits, then re-checks its WHERE clause against the committed row (READ COMMITTED). The row is now `approved`, so it is skipped and keeps its GPUs. If the job gets there first, the approval waits on its `FOR UPDATE`, then reads `expired` and is refused. Tests cover both orders; a negative control shows that an approval without its row lock would write `approved` over an expiry and leave a booking holding no GPUs.
+- **`complete_finished`** is one statement: a CTE updates approved reservations with `ends_at <= now` to `completed`, deactivates their allocations, and inserts system audit rows (`actor_id NULL`). `audit_log.actor_id` was already nullable; a test checks the migrated column.
+- **Idempotent by construction:** each statement selects by state (`status = 'approved' AND ends_at <= now`), and the state it writes no longer matches. A second run finds nothing. Reminders rely on the unique `(reservation_id, kind)` constraint with `ON CONFLICT DO NOTHING`. Tests run each job twice.
+- **Races with requests:** the job's UPDATE and a request's `FOR UPDATE` both lock the row. Under READ COMMITTED, whichever waits re-reads the row after the other commits, so a late cancel finds a completed reservation and is refused, and a job finds a cancelled one and skips it.
+- **No overlapping runs, two layers:**
+  1. ARQ cron jobs are `unique`: a tick has one job id, so several workers enqueue it once.
+  2. Consecutive ticks can still overlap if one runs long. Each sweeping job takes `pg_try_advisory_xact_lock(1, hashtext(job_name))` and returns at once when another run holds it. The two-key form uses a key space Postgres keeps separate from the single-key user locks, so a job name can never collide with a user id's hash. A test holds the single-key lock on the same hash and shows the job still runs.
+  The statements are idempotent without the lock. The lock keeps two runs from queueing behind each other on the same rows and doing the same work twice.
+- **Late reminders:** a reminder is queued for approved reservations starting within the next hour. A booking made less than an hour before its start is picked up by the next run, so its reminder can arrive up to five minutes after the booking. Accepted: the person booked moments ago.
+
+### Delivering notifications: one row per transaction
+- **Options considered:**
+  1. Lock due rows with `FOR UPDATE SKIP LOCKED`, send, mark, and commit in one transaction (chosen, with one row per transaction).
+  2. Claim rows by setting an `in_flight` status with a lease expiry and committing, then send outside any transaction and record the result in a second one. Expired leases are reclaimed.
+  3. One dispatcher at a time behind an advisory lock.
+- **Decision:** a loop of short transactions. Each one does `SELECT … WHERE status = 'pending' AND next_attempt_at <= now ORDER BY next_attempt_at LIMIT 1 FOR UPDATE SKIP LOCKED`, prepares the email, sends it, marks the row `sent`, `skipped`, or a retry or failure, and commits. It stops when no row is due or after a per-tick cap (`batch_size`, 50).
+- **Why:**
+  - **Scale:** one instance and a low volume of email. The simplest design that is correct is enough.
+  - **Crash recovery is automatic.** Row locks die with the connection, so a crashed dispatcher leaves its row `pending` and the next tick picks it up. There is no lease to tune and no extra state.
+  - **The duplicate window is one email**, the same as with leases. Committing per row means a crash between the send and the commit can repeat only the message in flight, never a whole batch.
+  - **The lock held during the send blocks nobody.** Only the dispatcher touches notification rows. Holding one through an SMTP call costs one pooled connection for that long, nothing else.
+- **What each part does** (each has a test that removes it):
+  - `FOR UPDATE` is what prevents double sends. Without it, two dispatchers read the same row and both send it.
+  - `SKIP LOCKED` is what keeps dispatchers independent. Without it, a second dispatcher still never double-sends: it waits for the row, re-reads it, and finds it sent. But it waits behind a stuck send instead of delivering other rows.
+  - The per-job advisory lock used by the sweeping jobs is not used here. It would serialize dispatchers and make `SKIP LOCKED` pointless.
+- **Any failure is an attempt**, including an error while building the message, not only transport errors. A row that always fails is given up on after five attempts instead of stopping every tick at the same place. The error is kept in `last_error` (cut to 1,000 characters) and logged.
+- **Database errors while preparing run in a savepoint.** A failed query aborts the whole Postgres transaction, so the failure could not be recorded in it: the commit would fail, the tick would stop, and the row would stay due with its attempts unchanged, the same at every tick. Preparing the message runs inside `begin_nested()`. A database error rolls back to the savepoint only. The row lock was taken before the savepoint, so it is kept, and the attempt is recorded and committed in the same transaction. A test makes the preparation run `SELECT 1 / 0` and checks that the attempt is recorded and the next row is still sent.
+- **When to change:** move to leases (option 2) if sends get slow enough to put pressure on the connection pool, or if the number of workers grows. That removes the connection held during the network call, at the cost of a lease length to choose and rows stuck until it expires after a crash.
+- **Accepted race, stale reminders:** the staleness check reads the reservation without locking it. A cancellation that commits between that read and the send can let one reminder for a cancelled booking through. Locking the reservation row during an SMTP call would block the user's own cancel for the length of the send, which is worse than one unneeded reminder.
+
+### Email
+- **Transports:** an `EmailSender` interface with two implementations. `SmtpSender` uses the standard library's `smtplib` in a worker thread (Mailpit locally). `SesSender` uses the SES v2 API through boto3 with the instance role's credentials, so production needs no SMTP password. `EMAIL_BACKEND` picks one. No new dependencies.
+- **Bodies:** plain text and HTML, from `string.Template`. Every value placed in the HTML is passed through `html.escape`, because purposes and rejection reasons are typed by users. Names and hostnames are escaped too, rather than deciding field by field which ones are trusted. `string.Template` does not re-read substituted values, so a `$` in a purpose stays literal. Tests cover `<script>` in the purpose and the reason.
+- **Times** are shown in the lab's time zone with its abbreviation, as in the app.
+
+### Approval checks the server
+- **Rule:** approving returns 409 `server-unavailable` when the server is not `available` or its lab is inactive. Rejection is still allowed and releases the GPUs.
+- **Locking:** after the reservation row, approval takes the server row `FOR SHARE`, like a booking. A concurrent switch to maintenance (which takes `FOR UPDATE`) either commits first and is seen, or waits for the approval. Server changes never lock reservation rows, so this order cannot deadlock.
+
+### Upload URL rate limit
+- **Rule:** at most 30 presigned upload forms per user per 10 minutes, as a fixed-window counter in Redis (`presign:user:{id}`), the same mechanism as the login limits. Over the limit: 429 `too-many-requests` with `Retry-After`. It fails open on a Redis outage, like the other limits.
+- **Why per user:** each form lets its holder store one file of up to 5 MiB, and every caller is signed in, so the account is the natural unit.
+
+### Slot search
+- **What it answers:** "N GPUs (optionally a model or a minimum memory per GPU) for D minutes, between A and B". Every result starts at or after `earliest` and ends at or before `latest`; `latest` is the latest end, not the latest start, so the window means the same thing as a calendar range. Starts are on the 30-minute grid and strictly after now; an `earliest` in the past moves to the next boundary.
+- **Validation:** the duration is a whole number of half hours (422 from the schema). The window is at most 14 days, and it must still hold the job once times in the past are dropped (422 `invalid-search-window`).
+- **The search applies the booking rules, so results can be booked:** only servers that are `available` in active labs with enough GPUs; starts within the 14-day horizon; durations within the server's `max_booking_hours`; the peak-hours limit; and the caller's weekly quota in every week the result overlaps. A user already holding four reservations gets 409 `too-many-reservations` instead of a list they could not book.
+- **Algorithm:** one query loads the candidate servers, one loads their active allocations over the window. Per server, a difference array gives free GPUs per slot (linear in slots plus allocations; availability uses the same function), and a sliding-window minimum finds every start whose slots all have enough free GPUs. Then the rules filter the starts.
+- **Ranking:** earliest start; then servers that need no approval; then the smallest GPU memory that fits, keeping large GPUs for jobs that need them; then the fewest GPUs left free beside the booking, which limits fragmentation; then hostname. At most 3 results per server, and those 3 do not overlap (greedy: earliest, then the next start at or after its end), so a list is not three copies of "the same slot, 30 minutes later". At most 20 in all.
+- **Advisory only:** booking a result goes through `create_reservation`, which can still refuse it if someone else booked first. A test books the first result.
+- **No HTTP in the service:** `search_slots` takes plain arguments and returns dataclasses, so the assistant's tool can call it directly later.
+
+### Calendar export
+- **Hand-written iCalendar.** One VEVENT with UTC times needs about 60 lines; a library would be a new dependency for that. The parts that are easy to get wrong are tested: TEXT escaping, CRLF endings, and folding at 75 octets (not characters) without splitting a UTF-8 character, using text with 2- and 3-byte characters.
+- **Fields:** `VERSION`, `PRODID`, `UID` (`<reservation id>@gpu-reserve`, stable across downloads), `DTSTAMP`, `DTSTART`/`DTEND` in UTC, `STATUS` (pending is `TENTATIVE`; rejected, cancelled, and expired are `CANCELLED`), summary, location, and a description with the GPU numbers and purpose.
+- **`SEQUENCE`** is the number of audited changes after creation. Calendar apps replace an event when the same UID arrives with a higher sequence, so downloading again after a cancellation updates the entry.
+- **Owner only.** The file is the owner's copy of their booking; an admin who is not the owner gets 404, like any other non-owner. Admins still see the reservation itself through the JSON endpoint.
+- **Route order:** `/{id}.ics` is registered before `/{id}`, which would otherwise match `<id>.ics` and reject it as an invalid UUID.
+
+### Dashboard and utilization numbers
+- **Overview (everyone):** quota for the current quota week, the next three pending or approved bookings that have not ended (a running one first), and the number of the caller's pending requests.
+- **Overview (admins add):** the number of pending requests, GPUs held right now by approved reservations, GPUs on servers that are not retired, and this quota week's utilization.
+- **Utilization:** per server that is not retired, GPU-hours booked (approved and completed) and pending, against GPU-hours available, in a window of at most 31 days (default: the last seven). It sums allocation time clipped to the window. Allocations of reservations ended early were shortened, so only time used counts; GPUs removed since still count, since their bookings happened. Servers in maintenance are included, because time they could not be booked is worth seeing.
+- **Accepted approximation:** available hours use each server's current GPU count and status for the whole window, including past windows. There is no history of capacity changes, so a server that grew from 4 to 8 GPUs last week counts as 8 for all of it. If that ever matters, the fix is an append-only table of capacity changes (server, GPU count, status, from), and integrating over it.
+
+### Test coverage
+- `pytest-cov` measures `app/services` (target 80%). Coverage runs with `concurrency = ["greenlet", "thread"]`: SQLAlchemy's async layer runs ORM code inside greenlets, and without that setting those lines are reported as missed.
+
+### Find a slot in the browser
+- **Which zone the window is typed in:** the search can span labs in different zones, so a typed "08:00" needs a zone. The form has a time zone picker listing the labs' zones. It starts in the browser's zone when a lab uses it, since people usually search in the zone they live in, and otherwise in the first lab's. Results are always shown in each result's own lab zone, like every other time in the app.
+- **Booking a result opens the booking dialog**, prefilled with the server, start, end, and GPU count, instead of booking in one click. A booking needs a purpose, and the dialog already shows the per-field errors (a conflict if someone booked first, the peak limit, quota). The dialog takes any "bookable server" shape, so search results need no extra request for the full server.
+- **Results refresh after booking.** The search query lives under the reservations query key, which every booking invalidates, so a slot that is now taken disappears or shows fewer free GPUs.
+- **Validation in the browser mirrors the API's:** whole or half hours, a window at least as long as the job, at most 14 days. The API stays the authority; its 409 (too many reservations) and 422 (window) are shown as a message without a retry button, since retrying would give the same answer.
+
+### Dashboard, calendar download, utilization page
+- **Dashboard:** one request (`/stats/overview`) fills it. The scaffold's "API status" card is gone, along with the `/health` client it used; readiness is for probes, not people.
+- **Calendar download:** a plain link cannot carry the bearer token, so "Add to calendar" fetches the file through the API client (with the same refresh-on-401), then saves it through a temporary object URL.
+- **"Running" is a display status, worked out in one place.** An approved booking between its start and end is shown as "Running" on both the dashboard and My reservations. The API keeps the stored status (`approved`); the label comes from one shared helper, so the two pages cannot disagree. A pending booking past its start is not called running: it never got its GPUs, and the expiry job will mark it expired within a minute.
+- **GPU numbers only where the GPUs were used.** Rejected, expired, and cancelled reservations show a count ("2 GPUs") instead of "GPU 0, 1". Those GPUs were held only while the request was pending or before the start, and naming them suggests the booking ran on them. Cancelling a running booking makes it completed, so "cancelled" always means it never started.
+- **"Add to calendar" stays on every reservation, including ended ones.** A pending booking may already be in someone's calendar as a tentative event. The file for a rejected, expired, or cancelled booking has `STATUS:CANCELLED` and the same `UID` with a higher `SEQUENCE`, so importing it removes or strikes out that event instead of leaving a phantom booking behind.
+- **Utilization page:** preset periods (last 7 or 30 days, next 7 or 14 days) rather than date inputs. Presets need no answer to "dates in which zone?", which has none for a page spanning labs. A table carries the numbers; the bars are decorative and hidden from screen readers. On a phone, the table scrolls inside its frame instead of the page.
+
+### Demo data seed
+- **Through the services, with a moving clock.** `python -m app.seed` creates the demo data with the same functions the API uses, setting `now` to when each booking or decision would have happened: past bookings are made two days ahead and decided an hour later, current ones just before now. Every rule (no double booking, quota, peak hours, four active reservations) is checked, not assumed, and the data cannot contain states the app could never produce. Expiry and completion are done by the real jobs.
+- **Relative to now.** About 30 reservations are placed in the labs' local time, from 12 days ago to 13 days ahead, plus two running now and one starting within the hour, so every status and the reminder path show up whenever it is run. A test seeds at 72 moments (every 5 hours across two weeks, and around both daylight saving changes) and checks that it succeeds with no overlapping allocations and nothing left that should have expired or completed.
+- **One transaction.** A rule violation leaves nothing behind.
+- **No emails for history.** Notification rows created while replaying the past are deleted at the end. The worker then queues the reminder for the booking that starts within the hour, as it would for any booking.
+- **Passwords from the environment.** `ADMIN_PASSWORD` as for `create-admin`; `SEED_STUDENT_PASSWORD` for all eight students, or a random unusable password when unset. No password is in the code.
+- **Guards:** refuses to run with `ENVIRONMENT=production`, and refuses a database that already has users unless `--reset` is given, which truncates every application table first.
+
+### End-to-end tests
+- **A separate Compose file, not a profile.** The plan was an `e2e` profile in `docker-compose.yml`. A profile would share the development database: the tests empty it before every run, so running them would wipe the data a developer is working with. `docker-compose.e2e.yml` is its own project (`gpu-reserve-e2e`) with its own containers, ports (API on 18000, Mailpit on 18025), and Postgres on `tmpfs`, so it can run next to the development stack and leaves nothing behind. It repeats a few service definitions; that duplication is the price of the isolation.
+- **What runs where:** Postgres, Redis, the API, the worker, and Mailpit in containers, with small memory limits; the frontend is built and served by `vite preview` on the host, started by Playwright, proxying `/api` to the stack. One Chromium. This fits the 8 GB development machine alongside the dev stack.
+- **A known starting state, every run:** global setup runs the migrations, empties the database with `python -m app.cli reset-database` (refused unless `ENVIRONMENT=test`, which only this stack sets), creates an admin with a random password, and adds one lab with an open server and a server that needs approval. Accounts the tests register carry a per-run id.
+- **Times that do not depend on the clock:** bookings start tomorrow at 19:00 or later in the lab's zone: always in the future, inside the horizon, outside peak hours, and a few GPU-hours. The browser runs in Tokyo, a zone no lab uses, so any time taken from the browser's zone instead of the lab's would show up as a failure.
+- **Specs:** a new student registers, finds a slot, books it from the prefilled dialog, and sees it in My reservations; a student requests a restricted server, an admin approves it, and the approval email arrives in Mailpit (read through its API). The email check waits for the worker's next minute tick, up to about 90 seconds.
+- **CI:** a `main`-only job, like the image job, and runnable by hand on any branch. It uploads the HTML report and traces when it fails, and prints the stack's logs.
+
+### Known gap: no application logging configuration
+- **What happens now:** nothing configures Python logging. The API's output comes from uvicorn's own loggers, and the worker's from ARQ's. Records from `app.*` loggers at INFO, such as "expire_pending changed 1 rows" or a dispatch report, are dropped in both processes. Warnings and errors still reach stderr through Python's last-resort handler, without a format or request context. Running the worker against Mailpit showed it: ARQ printed each tick and its return value, and the job's own INFO lines never appeared.
+- **Why it is not fixed here:** the right fix is structured logging, which belongs with the observability work. A plain `basicConfig` now would be replaced then.
+- **Planned fix:**
+  - One `configure_logging(settings)` in `app/core/logging.py`, called at API startup (in the lifespan) and in the worker's `on_startup`, so both processes log the same way.
+  - JSON lines on stdout: timestamp, level, logger, message, and context fields. Level from `LOG_LEVEL`.
+  - A request ID per HTTP request, set by middleware in a context variable and added to every record. Worker records carry the job name and ARQ job id instead.
+  - uvicorn's and ARQ's loggers routed through the same handler, so there is one format.
+  - A test that an `app.*` INFO record is emitted as JSON with the request ID.
+

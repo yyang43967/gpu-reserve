@@ -12,7 +12,7 @@ A short overview. It will be expanded as components are built.
 | Database | PostgreSQL 16 with `btree_gist` and `pgvector` | Source of truth, including double-booking prevention |
 | Cache / queue | Redis 7 | ARQ queue, rate limits, availability cache |
 | Object storage | SeaweedFS locally, S3 in production | Avatars and server images; private bucket, presigned URLs |
-| Email | Mailpit locally | |
+| Email | Mailpit locally, SES in production | Sent by the worker from a `notifications` outbox table |
 
 ## Health
 
@@ -108,7 +108,11 @@ Each server has one GPU row per active GPU, numbered from 0. Reasoning for visib
 | `POST /api/v1/reservations/{id}/cancel` | Owner or admin; a running reservation ends early at the next half hour |
 | `POST /api/v1/reservations/{id}/approve`, `/reject` | Admin decisions on pending reservations; reject requires a reason |
 | `GET /api/v1/servers/{id}/availability` | Free GPUs per 30-minute slot, merged into runs, for up to 14 days |
-| `GET /api/v1/me/quota` | GPU-hours used and left in the current quota week |
+| `GET /api/v1/me/quota` | GPU-hours used and left in the current quota week, or the week containing `?at=` |
+| `GET /api/v1/reservations/{id}.ics` | iCalendar file for one of your own reservations |
+| `POST /api/v1/search/slots` | Ranked (server, start, end) candidates for N GPUs for a duration in a window |
+| `GET /api/v1/stats/overview` | Dashboard numbers; admins also get queue size and GPU usage |
+| `GET /api/v1/stats/utilization` | Admin: booked, pending, and available GPU-hours per server |
 
 Each reservation holds one `gpu_allocations` row per GPU. An exclusion constraint on `(gpu_id, time range) WHERE active` makes double-booking impossible at the database level. Allocation picks the lowest free GPU numbers and retries in a savepoint if another booking takes one first.
 
@@ -125,7 +129,7 @@ sequenceDiagram
     A->>D: SELECT server, lab ... FOR SHARE OF servers
     A->>A: grid, horizon, duration, GPU count, peak hours, server open
     A->>D: count active reservations, load this user's bookings in the quota weeks
-    loop up to 3 attempts, each in a savepoint
+    loop first attempt + up to 3 retries, each in a savepoint
         A->>D: free GPUs (removed_at IS NULL, no overlapping active allocation)
         A->>D: INSERT reservation, then allocations in ascending GPU order
         alt exclusion violation (23P01) or deadlock (40P01)
@@ -181,3 +185,37 @@ sequenceDiagram
 - The bucket is private. Images are read through presigned GET URLs signed at the start of the current hour, so a URL stays the same for an hour and the browser can cache the image.
 - In the browser, the storage POST is a plain `fetch` without the access token or cookies. Saving an upload is a separate form action; an upload that is never saved stays in the bucket (a known gap, see decisions).
 - Locally, SeaweedFS runs in the `storage` and `full` Compose profiles. The API reaches it as `seaweedfs:8333` on the Compose network and signs browser URLs for `localhost:8333`.
+- Upload forms are limited per user (30 per 10 minutes).
+
+## Background jobs and email
+
+The worker runs the ARQ image with a cron schedule. Each task opens a transaction and calls a function in `app/services/jobs.py` with the current time.
+
+| Job | Every | Does |
+|---|---|---|
+| `expire_pending` | minute | Pending reservations past their start become `expired`; GPUs released; owner notified |
+| `complete_finished` | 5 minutes | Approved reservations past their end become `completed`; GPUs released |
+| `queue_reminders` | 5 minutes | Queues a reminder for approved reservations starting within the hour |
+| `dispatch_notifications` | minute | Sends due rows from the outbox, with retries and backoff |
+
+```mermaid
+sequenceDiagram
+    participant A as API
+    participant D as Postgres
+    participant W as Worker
+    participant M as Mail (Mailpit / SES)
+
+    A->>D: approve + insert notification row (one transaction)
+    W->>D: due notification rows
+    W->>D: re-read the reservation (skip stale reminders)
+    W->>M: send
+    W->>D: mark sent, or schedule a retry
+```
+
+- Notifications are written in the same transaction as the change they report, so a committed change always has one and a rolled-back change never does.
+- The sweeping jobs are single idempotent statements and take a per-job advisory lock, so overlapping ticks do not run together.
+
+
+## End-to-end tests
+
+Playwright drives the production build of the frontend (`vite preview`) against `docker-compose.e2e.yml`, a separate Compose project with Postgres in memory, Redis, the API, the worker, and Mailpit. Global setup migrates and empties that database, creates an admin, and adds a lab with two servers. See `frontend/e2e/README.md`.

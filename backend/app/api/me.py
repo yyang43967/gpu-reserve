@@ -1,6 +1,8 @@
 from datetime import UTC, datetime
+from typing import Annotated
 
-from fastapi import APIRouter, BackgroundTasks, Response, status
+from fastapi import APIRouter, BackgroundTasks, Query, Response, status
+from pydantic import AwareDatetime
 
 from app.api import problem_responses
 from app.api.cleanup import delete_after_commit
@@ -11,7 +13,6 @@ from app.schemas.me import ChangePasswordRequest, UpdateProfileRequest
 from app.schemas.reservation import QuotaRead
 from app.schemas.user import UserRead
 from app.services import auth, reservations, users
-from app.services.booking_rules import MINUTES_PER_HOUR
 
 router = APIRouter(
     prefix="/me", tags=["me"], responses=problem_responses(status.HTTP_401_UNAUTHORIZED)
@@ -23,19 +24,28 @@ async def get_me(user: CurrentUser, storage: StorageDep) -> UserRead:
     return UserRead.build(user, storage, datetime.now(UTC))
 
 
-@router.get("/quota")
-async def get_quota(user: CurrentUser, session: SessionDep) -> QuotaRead:
-    """GPU-hours used and left in the current quota week, which runs Monday to Monday
-    in the quota time zone, across all labs."""
-    quota = await reservations.quota_status(session, user, now=datetime.now(UTC))
-    return QuotaRead(
-        week_start=quota.week.start,
-        week_end=quota.week.end,
-        timezone=quota.timezone,
-        used_hours=quota.used_minutes / MINUTES_PER_HOUR,
-        quota_hours=quota.quota_minutes / MINUTES_PER_HOUR,
-        remaining_hours=quota.remaining_minutes / MINUTES_PER_HOUR,
+@router.get("/quota", responses=problem_responses(status.HTTP_422_UNPROCESSABLE_CONTENT))
+async def get_quota(
+    user: CurrentUser,
+    session: SessionDep,
+    settings: SettingsDep,
+    at: Annotated[
+        AwareDatetime | None,
+        Query(
+            description=(
+                "Any instant in the week to report, such as a planned booking's start. "
+                "Defaults to now."
+            )
+        ),
+    ] = None,
+) -> QuotaRead:
+    """GPU-hours used and left in one quota week, which runs Monday to Monday in the
+    quota time zone, across all labs. A booking is checked against every week it
+    overlaps, so `at` lets a client show the week a planned booking falls in."""
+    quota = await reservations.quota_status(
+        session, user, at=at or datetime.now(UTC), quota_zone=settings.quota_zone
     )
+    return QuotaRead.build(quota)
 
 
 @router.patch("", responses=problem_responses(status.HTTP_422_UNPROCESSABLE_CONTENT))

@@ -5,7 +5,7 @@ Times are aware datetimes. Durations are counted in whole minutes, and GPU time 
 GPU-minutes, so every comparison is exact.
 """
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Final
@@ -100,6 +100,33 @@ def ceil_to_grid(moment: datetime) -> datetime:
     """The first grid boundary at or after `moment`."""
     floor = floor_to_grid(moment)
     return floor if floor == moment else floor + SLOT
+
+
+def free_per_slot(window: Interval, gpu_count: int, busy: Sequence[Interval]) -> list[int]:
+    """Free GPUs in each grid slot of `window`, given the allocations that hold GPUs.
+
+    `window` is on the grid. An active GPU has at most one active allocation at any
+    instant, so counting the allocations that overlap a slot counts its busy GPUs.
+    A difference array keeps this linear in slots plus allocations.
+    """
+    slots = window.minutes // (SLOT_SECONDS // 60)
+    change = [0] * (slots + 1)
+    for interval in busy:
+        start = max(interval.start, window.start)
+        end = min(interval.end, window.end)
+        if end <= start:
+            continue
+        first = int((start - window.start).total_seconds()) // SLOT_SECONDS
+        # Allocations are on the grid; rounding up covers a partial last slot anyway.
+        last = -(-int((end - window.start).total_seconds()) // SLOT_SECONDS)
+        change[first] += 1
+        change[last] -= 1
+    free: list[int] = []
+    held = 0
+    for slot in range(slots):
+        held += change[slot]
+        free.append(gpu_count - held)
+    return free
 
 
 # --- rules that need the server's settings ---

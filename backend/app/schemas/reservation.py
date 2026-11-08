@@ -7,6 +7,8 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, StringConstrai
 from app.models import CreatedVia, GpuModel, Reservation, ReservationStatus
 from app.models.reservation import DECISION_REASON_MAX_LENGTH, PURPOSE_MAX_LENGTH
 from app.models.server import MAX_GPUS_PER_SERVER
+from app.services.booking_rules import MINUTES_PER_HOUR
+from app.services.reservations import QuotaStatus
 
 Purpose = Annotated[
     str, StringConstraints(strip_whitespace=True, min_length=1, max_length=PURPOSE_MAX_LENGTH)
@@ -119,8 +121,9 @@ class AvailabilityRead(BaseModel):
 
 
 class QuotaRead(BaseModel):
-    """GPU-hours in the current quota week. Hours can be fractional (bookings are in
-    half hours), so they are numbers, not integers."""
+    """GPU-hours in one quota week (the current one unless another was asked for).
+    Hours can be fractional (bookings are in half hours), so they are numbers, not
+    integers."""
 
     week_start: datetime
     week_end: datetime
@@ -128,3 +131,14 @@ class QuotaRead(BaseModel):
     used_hours: float
     quota_hours: float
     remaining_hours: float
+
+    @classmethod
+    def build(cls, quota: QuotaStatus) -> Self:
+        return cls(
+            week_start=quota.week.start,
+            week_end=quota.week.end,
+            timezone=quota.timezone,
+            used_hours=quota.used_minutes / MINUTES_PER_HOUR,
+            quota_hours=quota.quota_minutes / MINUTES_PER_HOUR,
+            remaining_hours=quota.remaining_minutes / MINUTES_PER_HOUR,
+        )
