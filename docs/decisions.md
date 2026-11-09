@@ -705,8 +705,6 @@ Each entry records the context, the decision, and why. Newest phases at the bott
 
 ## Phase 7 — Agent
 
-This entry starts as the plan and is updated with what was measured once the work is done.
-
 ### Writes happen only after confirmation
 - **Validation is a dry run of the real service.** `propose_reservation` calls `reservations.create_reservation` (with `created_via=assistant`) inside a transaction that is always rolled back, and computes the quota after the booking with `quota_status` in the same transaction. Every rule, lock, and error is exactly the one the web UI gets, and nothing is committed. `cancel_my_reservation` dry-runs `finish_reservation` the same way, so the card can say whether the reservation will be cancelled or ended early. The user's advisory lock is transaction-scoped, so it is released by the rollback; a test books from another session right after a dry run.
 - **The interrupt payload** is `{action, summary: {server, lab, gpus, start, end, timezone, quota_after, status_after, purpose}}`. The stream emits it as `confirmation_required` and stops.
@@ -764,10 +762,41 @@ The system prompt tells the model to: answer only from tool results; cite policy
 
 ### Streaming
 - Events are `data: {json}\n\n`: `status`, `tool_start`, `tool_end`, `token`, `citation`, `confirmation_required`, `done`, `error`. Tokens are taken only from the agent node and only from text content, never from tool-call argument chunks. Tool steps are emitted by the tools themselves through LangGraph's stream writer.
-- Responses carry `Cache-Control: no-cache, no-transform` and `X-Accel-Buffering: no`. The Vite proxy streams as is. Caddy's `reverse_proxy` gets `flush_interval -1`, and its `encode` directive must not compress `text/event-stream`, since a compressor buffers.
+- Responses carry `Cache-Control: no-cache, no-transform` and `X-Accel-Buffering: no`.
+- **Checked through both proxies with a real model.** Through the Vite dev proxy, a 96-token answer arrived as 96 events spread over half a second. `infra/deploy/Caddyfile` holds the API block the deployment will build on: `reverse_proxy` with `flush_interval -1`, and compression for everything except the two streaming routes. Through a local Caddy container with that file, 82 events arrived spread over half a second.
+- **Compression was measured, not assumed.** With compression applied to the stream as well, events still arrived spread out, because Caddy flushes its encoder whenever the proxy flushes. The exclusion stays anyway: event frames are a few dozen bytes, so compressing them saves nothing, and streaming should not depend on an encoder's flush behavior.
 
 ### Tracing
 Langfuse traces every run through its LangChain callback handler, with the thread id as the session and the user's UUID as the user. No email or name is sent. Without both keys the handler is not created and nothing else changes.
 
 ### Tests do not call paid APIs
 Agent tests use a scripted chat model that returns planned messages and tool calls. The test configuration blanks the OpenAI and Langfuse keys and does not read `backend/.env`, so a local test run with real keys on disk still makes no paid calls and sends no traces.
+
+### Model choice for this phase
+- **`gpt-5.4-mini-2026-03-17`, pinned to the dated snapshot.** Of the models available to the project's key, it is the current small model with tool calling. The comparison across models, including a self-hosted one, is the next phase's evaluation; this choice only has to be good enough to build and check the agent against, and cheap enough to run often. A dated snapshot keeps behavior from shifting under the tests and evaluations.
+- **The Responses API.** The first live run failed: chat completions refuse function tools together with a reasoning effort for this model, and the error says to use the Responses API or turn reasoning off. Reasoning stays on at `low` through the Responses API (`use_responses_api=True`). Answers then come back as content blocks, so the server reads `message.text` everywhere rather than `content`.
+- **Plain text answers.** The page renders text, not Markdown, and the first answers used `**bold**`. The prompt asks for plain text and `- ` lists.
+
+### What the live runs found
+- **Hardware advice without the hardware guide.** Asked which GPU suits LoRA on a 7B model, the model listed servers and answered from general knowledge, uncited, recommending a 48 GB card. The prompt now names hardware questions explicitly as policy questions. The same question then searched first, cited the hardware guide, and said a 24 GB card is usually enough, which is what the guide says.
+- **Tracing credentials for the wrong region.** The first traced runs exported nothing: the keys belong to Langfuse's US region and the host pointed at the EU one. Spans are exported in the background, so the only sign was an export error in the logs. The application now checks the keys once at startup, in the background, and logs a clear warning (without the host or keys) when Langfuse rejects them. Tracing failures never affect a run.
+- **The chat lost its own stream on a new conversation.** The page keyed the chat by thread id, so the first message of a new conversation, which creates the thread and puts it in the address, remounted the chat and aborted the stream. The server finished the run anyway, as designed, and a reload showed the card, but the live view was gone. The chat now remounts only when the user picks a conversation. A page test holds a stream open mid-answer and fails on the old behavior.
+
+### Smaller decisions
+- **Ownership is checked before availability.** Without a configured model the run endpoints answer 503, but only after the thread's ownership check, so another user's thread is a 404 either way. The permission matrix covers the assistant routes; conversations are owner-only, like calendar files.
+- **Deleting a user deletes their conversations** (`ON DELETE CASCADE` on threads, messages, and actions). Conversations are not booking history; the audit log keeps the record of every write.
+- **Checkpoints are saved synchronously** (`durability="sync"`), so a step's checkpoint is stored before the next step starts and a crash loses at most the step in progress.
+- **Commands that empty the database empty the checkpoint tables too** (`reset-database`, `seed --reset`, and the test fixtures).
+- **A scripted model for end-to-end tests.** `ASSISTANT_MODEL=scripted:e2e` is refused unless `ENVIRONMENT=test`. It lists servers and proposes one fixed booking, which is enough for the Playwright test: book through the assistant, see the card, reload, see the card again, confirm, find the reservation in My reservations.
+- **No separate query rewriting.** Measured on a fresh blind set (`evals/rag/results.md`): the assistant's own `search_policies` query and the raw question both find 17 of 19 gold sections; ranks improve slightly with the model's query. The assistant already writes its query, so an extra rewriting call would add cost for no measured gain.
+
+### Cost
+- **Traced session** (a hardware question, a booking proposal, and its confirmation): 5 model calls, 6,462 input and 464 output tokens, $0.0096 as computed by Langfuse, about $0.002 per model call. Most input is the system prompt and tool schemas, about 2,000 tokens per call.
+- **All live checks in this phase:** the traced session above, about a dozen untraced runs before the tracing host was corrected (similar in size, so roughly $0.05 at the same rate), and the blind-set study (27,429 input and 725 output tokens, roughly $0.04). Altogether on the order of $0.10.
+- **Prompt caching** is the obvious saving once traffic exists: the system prompt and tool schemas are the same on every call.
+
+### Open items
+- **Evaluation across models** (Phase 8): the dataset, the runner, and the comparison that should confirm or replace this model.
+- **Structured logging** is still missing (see Phase 5). Assistant warnings reach stderr unformatted.
+- **Checkpoints of deleted conversations** stay in the checkpoint tables, which have no foreign key to threads. A periodic cleanup of checkpoints whose thread no longer exists would remove them.
+- **Two write-gated tools only.** Admin actions (approve, reject) are not exposed to the assistant on purpose.
