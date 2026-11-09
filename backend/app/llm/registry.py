@@ -13,7 +13,8 @@ from app.core.config import Environment, Settings
 from app.core.exceptions import AssistantUnavailable
 
 # Reasoning effort for the assistant's model. Low keeps a tool-calling turn fast; the
-# work is choosing tools and arguments, not long derivations.
+# work is choosing tools and arguments, not long derivations. Current OpenAI models only
+# combine reasoning with function tools on the Responses API, so it is used throughout.
 REASONING_EFFORT: Final = "low"
 
 
@@ -31,7 +32,8 @@ def build_chat_model(settings: Settings) -> BaseChatModel:
             openai_api_key=settings.openai_api_key,
             request_timeout=settings.assistant_request_timeout_seconds,
             max_retries=settings.assistant_request_retries,
-            reasoning_effort=REASONING_EFFORT,
+            reasoning={"effort": REASONING_EFFORT},
+            use_responses_api=True,
             stream_usage=True,
         )
     if provider == "scripted":
