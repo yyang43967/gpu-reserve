@@ -1,0 +1,20 @@
+{"id": "n01", "question": "my advisor says our paper deadline is friday, can I grab a whole node for three days straight?", "gold": [], "category": "situation", "author": "blind-phase7"}
+{"id": "n02", "question": "I booked something by mistake for tonight, do I lose my hours if I drop it now?", "gold": [], "category": "situation", "author": "blind-phase7"}
+{"id": "n03", "question": "why is my booking on the H100 box still sitting there grey and not confirmed", "gold": [], "category": "situation", "author": "blind-phase7"}
+{"id": "n04", "question": "how long does someone usually take to look at a request for the big nvidia machines", "gold": [], "category": "situation", "author": "blind-phase7"}
+{"id": "n05", "question": "I need to finetune llama 13b with full precision, which card has enough vram", "gold": [], "category": "situation", "author": "blind-phase7"}
+{"id": "n06", "question": "is a 4090 fine for running stable diffusion inference or is that overkill", "gold": [], "category": "situation", "author": "blind-phase7"}
+{"id": "n07", "question": "can my labmate use my account while I'm travelling", "gold": [], "category": "situation", "author": "blind-phase7"}
+{"id": "n08", "question": "I forgot my password and the reset link isn't coming, who do I talk to", "gold": [], "category": "situation", "author": "blind-phase7"}
+{"id": "n09", "question": "where am I allowed to keep a 2TB dataset on the machines", "gold": [], "category": "situation", "author": "blind-phase7"}
+{"id": "n10", "question": "the server said it's in maintenance, when will it come back", "gold": [], "category": "situation", "author": "blind-phase7"}
+{"id": "n11", "question": "does a booking that I cancelled halfway through still count against me", "gold": [], "category": "situation", "author": "blind-phase7"}
+{"id": "n12", "question": "I'm in the middle of a run and want to stop early, what happens to the rest of my time", "gold": [], "category": "situation", "author": "blind-phase7"}
+{"id": "n13", "question": "how many hours can I use in one week before I'm cut off", "gold": [], "category": "situation", "author": "blind-phase7"}
+{"id": "n14", "question": "can I start a reservation at 9:15", "gold": [], "category": "situation", "author": "blind-phase7"}
+{"id": "n15", "question": "what does it mean when it says too many reservations", "gold": [], "category": "situation", "author": "blind-phase7"}
+{"id": "n16", "question": "I'm new to the lab, what should I do on my first day to get GPU access", "gold": [], "category": "situation", "author": "blind-phase7"}
+{"id": "n17", "question": "how should I acknowledge the cluster in my thesis", "gold": [], "category": "situation", "author": "blind-phase7"}
+{"id": "n18", "question": "is it ok to run a crypto miner overnight when nobody is using the gpus", "gold": [], "category": "situation", "author": "blind-phase7"}
+{"id": "n19", "question": "my request disappeared from the list after the start time, what happened", "gold": [], "category": "situation", "author": "blind-phase7"}
+{"id": "n20", "question": "do I get more hours if my conference deadline is coming up", "gold": [], "category": "situation", "author": "blind-phase7"}
