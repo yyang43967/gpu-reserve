@@ -4,15 +4,19 @@ Off unless both keys are set. Traces carry the thread id as the session and the 
 UUID as the user; never an email or a name.
 """
 
+import asyncio
 import logging
 import uuid
-from typing import Any
+from typing import Any, Final
 
 from langchain_core.callbacks import BaseCallbackHandler
 
 from app.core.config import Settings
 
 logger = logging.getLogger(__name__)
+
+# The one-time credentials check at startup gives up after this long.
+AUTH_CHECK_TIMEOUT_SECONDS: Final = 10.0
 
 
 class Tracing:
@@ -33,6 +37,20 @@ class Tracing:
         from langfuse.langchain import CallbackHandler
 
         return CallbackHandler(public_key=self._public_key)
+
+    async def verify(self) -> bool:
+        """Check the keys once, in the background. Spans are exported asynchronously,
+        so wrong credentials (such as keys from one region with the host of another)
+        would otherwise only show up as export errors deep in the logs."""
+        try:
+            async with asyncio.timeout(AUTH_CHECK_TIMEOUT_SECONDS):
+                return await asyncio.to_thread(self._client.auth_check)
+        except Exception:
+            logger.warning(
+                "Langfuse did not accept the tracing credentials; traces will not be "
+                "exported. Check that LANGFUSE_HOST is the region the keys belong to."
+            )
+            return False
 
     def shutdown(self) -> None:
         try:

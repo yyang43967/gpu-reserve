@@ -136,3 +136,35 @@ def test_registry() -> None:
         Settings(assistant_model="openai:gpt-test", openai_api_key="sk-test")  # type: ignore[arg-type]
     )
     assert chat.model_name == "gpt-test"  # type: ignore[attr-defined]
+
+
+class _Client:
+    def __init__(self, ok: bool) -> None:
+        self.ok = ok
+
+    def auth_check(self) -> bool:
+        if not self.ok:
+            raise RuntimeError("401 Unauthorized")
+        return True
+
+    def shutdown(self) -> None:
+        pass
+
+
+async def test_rejected_tracing_keys_are_reported_once(caplog: pytest.LogCaptureFixture) -> None:
+    from app.agent.tracing import Tracing
+
+    tracing = Tracing(
+        Settings(
+            langfuse_public_key="pk-lf-test",  # type: ignore[arg-type]
+            langfuse_secret_key="sk-lf-test",  # type: ignore[arg-type]
+            langfuse_host="http://langfuse.test",
+        )
+    )
+    tracing._client = _Client(ok=False)  # type: ignore[assignment]
+    assert await tracing.verify() is False
+    assert "did not accept the tracing credentials" in caplog.text
+    assert "sk-lf-test" not in caplog.text
+
+    tracing._client = _Client(ok=True)  # type: ignore[assignment]
+    assert await tracing.verify() is True

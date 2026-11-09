@@ -1,5 +1,7 @@
 """Builds the assistant for the application's lifespan."""
 
+import asyncio
+import contextlib
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -61,6 +63,7 @@ async def assistant_lifespan(
     )
     await pool.open()
     tracing = build_tracing(settings)
+    check = asyncio.create_task(tracing.verify()) if tracing is not None else None
     assistant = Assistant(
         build_graph(model, AsyncPostgresSaver(pool)),
         sessions,
@@ -71,6 +74,10 @@ async def assistant_lifespan(
     try:
         yield assistant
     finally:
+        if check is not None:
+            check.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await check
         await assistant.shutdown()
         await pool.close()
         if tracing is not None:
