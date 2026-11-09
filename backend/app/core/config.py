@@ -119,6 +119,25 @@ class Settings(BaseSettings):
     # out-of-scope ones (evals/rag/results.md), so out-of-scope handling is the prompt's job.
     rag_min_score: float = Field(default=0.0, ge=-1.0, le=1.0)
 
+    # Assistant. "<provider>:<model>"; only the openai provider exists so far. The
+    # scripted provider drives end-to-end tests and is refused outside ENVIRONMENT=test.
+    assistant_model: str = "openai:gpt-5.4-mini-2026-03-17"
+    # Per model request; a run makes several. The whole run is capped separately.
+    assistant_request_timeout_seconds: float = Field(default=30.0, gt=0)
+    assistant_request_retries: int = Field(default=1, ge=0)
+    assistant_run_timeout_seconds: float = Field(default=300.0, gt=0)
+    # Messages and resumes per user, in fixed windows.
+    assistant_minute_limit: int = Field(default=20, gt=0)
+    assistant_day_limit: int = Field(default=200, gt=0)
+    # Langfuse tracing; skipped unless both keys are set.
+    langfuse_public_key: SecretStr | None = None
+    langfuse_secret_key: SecretStr | None = None
+    langfuse_host: str | None = None
+
+    @property
+    def tracing_enabled(self) -> bool:
+        return self.langfuse_public_key is not None and self.langfuse_secret_key is not None
+
     @field_validator(
         "s3_endpoint_url",
         "s3_public_endpoint_url",
@@ -127,6 +146,9 @@ class Settings(BaseSettings):
         "s3_secret_access_key",
         "ses_region",
         "openai_api_key",
+        "langfuse_public_key",
+        "langfuse_secret_key",
+        "langfuse_host",
         mode="before",
     )
     @classmethod
