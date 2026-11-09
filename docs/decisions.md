@@ -60,7 +60,7 @@ Each entry records the context, the decision, and why. Newest phases at the bott
 - **Context:** The repository is private for now, so Actions minutes are billed. GitHub offers native arm64 runners (`ubuntu-24.04-arm`) to private repositories.
 - **Decision:** Pull requests run lint, type checks, and unit and integration tests on `ubuntu-latest`. Pushes to `main` also build the arm64 image and smoke-test the `core` stack on `ubuntu-24.04-arm`. Playwright will join the `main`-only job in Phase 5.
 - **Why:** Fast, cheap PR feedback, plus a native build of the production architecture without QEMU. The runner labels do not change when the repository goes public.
-- **Outcome:** the Playwright job was added in Phase 5 as its own `main`-only job, also runnable by hand (`workflow_dispatch`). See "End-to-end tests".
+- **Outcome:** the Playwright job was added in Phase 5 as its own `main`-only job, also runnable by hand (`workflow_dispatch`). See "End-to-end tests". In Phase 7 the image job became runnable by hand too, so a branch that changes the image's dependencies can be built and smoke-tested on arm64 before it is merged.
 
 ### Integration tests with testcontainers
 - **Decision:** Tests marked `integration` start real Postgres and Redis containers once per session. They run on every PR. Locally, `pytest -m "not integration"` skips them when Docker is off.

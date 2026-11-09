@@ -85,7 +85,7 @@ jobs:
 
   image-and-smoke:
     name: ARM64 image and stack smoke test
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'
     needs: [backend, frontend]
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 20
