@@ -24,3 +24,15 @@ class Base(DeclarativeBase):
 class TimestampMixin:
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(server_default=func.now(), onupdate=func.now())
+
+
+# Tables created and owned by the LangGraph checkpointer (migration 0007 runs its
+# setup()). They are not models, so schema comparison must leave them alone.
+CHECKPOINT_TABLES: Final = frozenset(
+    {"checkpoint_migrations", "checkpoints", "checkpoint_blobs", "checkpoint_writes"}
+)
+
+
+def include_name(name: str | None, type_: str, parent_names: object) -> bool:
+    """Alembic filter: skip the checkpointer's tables when comparing schemas."""
+    return not (type_ == "table" and name in CHECKPOINT_TABLES)

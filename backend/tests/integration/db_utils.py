@@ -6,7 +6,7 @@ from alembic.config import Config
 from sqlalchemy import NullPool, make_url, text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
-from app.db.base import Base
+from app.db.base import CHECKPOINT_TABLES, Base
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]
 
@@ -35,7 +35,10 @@ async def create_database(admin_url: str, name: str) -> str:
 
 
 async def truncate_all(engine: AsyncEngine) -> None:
-    tables = ", ".join(f'"{table.name}"' for table in Base.metadata.sorted_tables)
+    names = [table.name for table in Base.metadata.sorted_tables] + sorted(
+        CHECKPOINT_TABLES - {"checkpoint_migrations"}
+    )
+    tables = ", ".join(f'"{name}"' for name in names)
     async with engine.begin() as conn:
         # Fail fast instead of hanging if a test left a transaction open.
         await conn.execute(text("SET LOCAL lock_timeout = '5s'"))
