@@ -36,3 +36,10 @@ CHECKPOINT_TABLES: Final = frozenset(
 def include_name(name: str | None, type_: str, parent_names: object) -> bool:
     """Alembic filter: skip the checkpointer's tables when comparing schemas."""
     return not (type_ == "table" and name in CHECKPOINT_TABLES)
+
+
+def data_tables() -> list[str]:
+    """Every table holding application data, the checkpointer's included, for commands
+    that empty the database. The migration version tables are left alone."""
+    models = [table.name for table in Base.metadata.sorted_tables]
+    return models + sorted(CHECKPOINT_TABLES - {"checkpoint_migrations"})

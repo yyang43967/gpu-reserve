@@ -22,7 +22,7 @@ from sqlalchemy import text
 from app.core.config import Environment, Settings
 from app.core.exceptions import DomainError
 from app.core.security import PASSWORD_MIN_LENGTH
-from app.db.base import Base
+from app.db.base import data_tables
 from app.db.session import create_engine, create_session_factory
 from app.schemas.auth import PASSWORD_MAX_LENGTH
 from app.services import users
@@ -84,14 +84,15 @@ async def reset_database(settings: Settings) -> str:
     cannot be pointed at development or production data by mistake."""
     if settings.environment is not Environment.TEST:
         raise CommandError("reset-database only runs with ENVIRONMENT=test.")
-    tables = ", ".join(f'"{table.name}"' for table in Base.metadata.sorted_tables)
+    names = data_tables()
+    tables = ", ".join(f'"{name}"' for name in names)
     engine = create_engine(settings)
     try:
         async with engine.begin() as conn:
             await conn.execute(text(f"TRUNCATE {tables} RESTART IDENTITY CASCADE"))
     finally:
         await engine.dispose()
-    return f"Emptied {len(Base.metadata.sorted_tables)} tables."
+    return f"Emptied {len(names)} tables."
 
 
 def _parser() -> argparse.ArgumentParser:
