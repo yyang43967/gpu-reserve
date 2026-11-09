@@ -1,5 +1,5 @@
-"""Fixed-window throttling of login, registration, password changes, and upload URLs,
-stored in Redis.
+"""Fixed-window throttling of login, registration, password changes, upload URLs, and
+assistant runs, stored in Redis.
 
 Both endpoints run argon2, which is deliberately expensive, so unthrottled they invite
 password guessing and make CPU exhaustion cheap. Limits are checked before any hashing.
@@ -61,6 +61,10 @@ class RateLimiter:
             settings.password_change_failure_limit, settings.password_change_window_seconds
         )
         self._presign = Window(settings.presign_user_limit, settings.presign_user_window_seconds)
+        self._assistant = (
+            Window(settings.assistant_minute_limit, 60),
+            Window(settings.assistant_day_limit, 24 * 60 * 60),
+        )
 
     async def check_login(self, *, client_ip: str, email: str) -> None:
         """Count this attempt against the IP; refuse if the IP or email is over its limit."""
@@ -115,6 +119,15 @@ class RateLimiter:
         count = await self._safely(self._hit(f"presign:user:{user_id}", self._presign.seconds))
         if count is not None and count.value > self._presign.limit:
             raise RateLimited(count.ttl, "Too many upload requests. Try again later.")
+
+    async def check_assistant(self, user_id: uuid.UUID) -> None:
+        """Count one assistant run (a message or a confirmation), each of which costs
+        model calls, against a per-minute and a per-day window."""
+        for window in self._assistant:
+            key = f"assistant:{window.seconds}:user:{user_id}"
+            count = await self._safely(self._hit(key, window.seconds))
+            if count is not None and count.value > window.limit:
+                raise RateLimited(count.ttl, "Too many messages to the assistant. Try again later.")
 
     @staticmethod
     def _email_key(email: str) -> str:
