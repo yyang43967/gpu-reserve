@@ -175,6 +175,14 @@ export async function apiFetchBlob(path: string, options: ApiRequestOptions = {}
   return response.blob();
 }
 
+/**
+ * POST and return the response with its body unread, for server-sent events. Same
+ * authentication, refresh, and errors as apiFetch; the caller reads `response.body`.
+ */
+export function apiStream(path: string, body: unknown, signal?: AbortSignal): Promise<Response> {
+  return request(path, { method: "POST", body, signal, accept: "text/event-stream" });
+}
+
 export function apiGet<T>(path: string, signal?: AbortSignal): Promise<T> {
   return apiFetch<T>(path, { signal });
 }

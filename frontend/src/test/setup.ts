@@ -30,6 +30,13 @@ if (!("createObjectURL" in URL)) {
   });
 }
 
+// jsdom does no layout, so it has no scrolling either. The chat scrolls to its end.
+if (!("scrollIntoView" in Element.prototype)) {
+  Object.assign(Element.prototype, {
+    scrollIntoView: () => undefined,
+  });
+}
+
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
