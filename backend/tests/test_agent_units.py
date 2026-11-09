@@ -3,19 +3,22 @@ tool schemas, tracing metadata, and the model registry."""
 
 import json
 import uuid
+from typing import Any
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_openai import ChatOpenAI
 
 from app.agent import sse
 from app.agent.citations import cited_sources
-from app.agent.graph import HISTORY_TOKEN_BUDGET, keep_one_write, trim_history
+from app.agent.graph import HISTORY_TOKEN_BUDGET, build_graph, keep_one_write, trim_history
 from app.agent.prompts import SYSTEM_PROMPT
 from app.agent.state import merge_sources, source_key
 from app.agent.tools import WRITE_GATED_TOOLS, build_tools
 from app.agent.tracing import trace_metadata
 from app.core.config import Environment, Settings
 from app.core.exceptions import AssistantUnavailable
+from app.llm import registry
 from app.llm.registry import build_chat_model
 from app.llm.scripted import ScriptedChatModel
 
@@ -129,13 +132,69 @@ def test_registry() -> None:
     with pytest.raises(AssistantUnavailable):
         build_chat_model(Settings(assistant_model="nonsense"))
     with pytest.raises(AssistantUnavailable):
+        build_chat_model(Settings(assistant_model="unknown:model", openai_api_key="sk-test"))  # type: ignore[arg-type]
+    with pytest.raises(AssistantUnavailable):
         build_chat_model(Settings(assistant_model="scripted:e2e"))
     model = build_chat_model(Settings(assistant_model="scripted:e2e", environment=Environment.TEST))
     assert isinstance(model, ScriptedChatModel)
-    chat = build_chat_model(
+
+
+def _history() -> list[Any]:
+    return [
+        SystemMessage(SYSTEM_PROMPT),
+        HumanMessage("How many hours do I get?"),
+        AIMessage(
+            content=[{"type": "text", "text": ""}],
+            id="msg_server_side_id",
+            tool_calls=[{"name": "get_my_quota", "args": {}, "id": "call_1"}],
+        ),
+        ToolMessage('{"ok": true}', tool_call_id="call_1", name="get_my_quota"),
+        AIMessage("You have 16 GPU-hours left."),
+        HumanMessage("And next week?"),
+    ]
+
+
+def test_openai_keeps_nothing_on_the_provider_side() -> None:
+    model = build_chat_model(
         Settings(assistant_model="openai:gpt-test", openai_api_key="sk-test")  # type: ignore[arg-type]
     )
-    assert chat.model_name == "gpt-test"  # type: ignore[attr-defined]
+    assert isinstance(model, ChatOpenAI)
+    assert model.model_name == "gpt-test"
+    assert model.use_responses_api is True
+    assert model.store is False
+    assert model.use_previous_response_id is False
+    assert model.include == ["reasoning.encrypted_content"]
+
+    payload = model._get_request_payload(_history())
+
+    assert payload["store"] is False
+    assert "previous_response_id" not in payload
+    # The whole trimmed history travels with every request.
+    sent = json.dumps(payload["input"])
+    for text in ("How many hours do I get?", "call_1", "16 GPU-hours", "And next week?"):
+        assert text in sent
+    # Server-side item ids would point at stored responses; none are sent.
+    assert "msg_server_side_id" not in sent
+
+
+def test_a_chat_completions_provider_needs_no_agent_change(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(
+        registry.PROVIDERS, "vllm", registry.Provider(api=registry.Api.CHAT_COMPLETIONS)
+    )
+    model = build_chat_model(
+        Settings(assistant_model="vllm:open-model", openai_api_key="sk-test")  # type: ignore[arg-type]
+    )
+    assert isinstance(model, ChatOpenAI)
+    assert not model.use_responses_api
+
+    payload = model._get_request_payload(_history())
+
+    assert "messages" in payload and "input" not in payload
+    assert "reasoning_effort" not in payload
+    graph = build_graph(model, None)
+    assert {"agent", "tools"} <= set(graph.nodes)
 
 
 class _Client:
