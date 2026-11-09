@@ -239,3 +239,29 @@ Misses:
 
 ## KB edits after the first run
 None yet.
+
+## Fresh blind set and query rewriting (Phase 7)
+
+`blind.jsonl` holds 20 new questions, written as students would ask them and committed before they were labeled. They were labeled afterwards against the document headings only. The acceptance set was not touched.
+
+### How blind it is
+- **Blind to the wording, not to the rules.** No document body was read before the questions were written and labeled. But the author had read the design notes and `kb/README.md`, which state the rules the documents describe (quota size, the time grid, expiry of undecided requests, early release). So these questions are like the earlier "informed" ones in knowing what the rules are, and like the "blind" ones in not knowing how the documents phrase them.
+- **Labels came from headings.** Four questions share half or more of their content words with a gold heading (n08, n10, n15, n17), mostly because the natural word is also the heading's word ("password", "maintenance", "acknowledge"). They were not rewritten, since the set was frozen first.
+- **n18** (running a crypto miner) has no section that clearly answers it, so it has no label and is left out of the hit rate.
+- 19 labeled questions is a small sample: one question is about five points.
+
+### What was compared
+The assistant does not embed the user's message. It calls `search_policies` with a query it writes itself, so it already "rewrites" every question. Two conditions, both through the production retrieval (pgvector, k = 5, no minimum score) on the development database with `text-embedding-3-small`:
+- **raw**: the question as written.
+- **rewritten**: the `query` argument the assistant model (`gpt-5.4-mini-2026-03-17`, the production prompt and tools) produced when made to call `search_policies` for that question.
+
+| condition | hit@5 | hit@1 | MRR |
+|---|---|---|---|
+| raw | 17/19 | 8/19 | 0.585 |
+| rewritten | 17/19 | 9/19 | 0.645 |
+
+- **The same hit rate, with different misses.** Raw misses n01 (a three-day whole-node booking) and n11 (does a cancelled running booking count); the rewritten queries find both at ranks 1 and 2. Rewritten misses n08 (the query drifted to "who to contact") and n12 (it asked about quota rather than where the booking ends); raw finds both.
+- **Ranks improve a little** (hit@1 +1, MRR +0.06), within the two-question margin used for every other retrieval decision.
+- **Decision:** no separate rewriting step before retrieval. The assistant already writes its own query, and an extra model call per search would add latency and cost for no measurable gain on this set. The useful lesson is that the model's query sometimes adds context the user did not ask about (n08, n12); the prompt tells it to use a self-contained question in the policies' terms.
+- **Higher than the Phase 6 blind subset (7/10)**, likely because the author knew the rules, as above. The roughly 70% estimate for questions from people who have never read anything about the rules stands.
+- **Cost:** the 19 model calls used 27,429 input and 725 output tokens; the embeddings are negligible. The run was done by hand against the live API; replaying it from recorded embeddings belongs with the evaluation runner.
