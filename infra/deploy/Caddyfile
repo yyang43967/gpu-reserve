@@ -1,0 +1,20 @@
+# The API behind Caddy. The production deployment builds on this block (domain, TLS,
+# security headers); what is here is what the assistant's streaming depends on.
+#
+# API_SITE_ADDRESS is the API's domain in production; a plain ":8080" serves HTTP for
+# local checks. API_UPSTREAM is the API container on the Compose network.
+
+{$API_SITE_ADDRESS::8080} {
+	# Assistant runs answer with server-sent events. A compressor buffers its output,
+	# so streaming responses are left uncompressed; everything else may be compressed.
+	@compressible not {
+		method POST
+		path /api/v1/assistant/threads/*/messages /api/v1/assistant/threads/*/resume
+	}
+	encode @compressible zstd gzip
+
+	reverse_proxy {$API_UPSTREAM:api:8000} {
+		# Write each event to the client as soon as the API sends it.
+		flush_interval -1
+	}
+}
