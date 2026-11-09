@@ -9,7 +9,7 @@ from sqlalchemy import NullPool, text
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from app.db.base import Base
+from app.db.base import CHECKPOINT_TABLES, Base, include_name
 from tests.integration.db_utils import alembic_config, create_database
 
 pytestmark = pytest.mark.integration
@@ -17,7 +17,8 @@ pytestmark = pytest.mark.integration
 
 async def _schema_diff(url: str) -> list[Any]:
     def compare(conn: Connection) -> list[Any]:
-        context = MigrationContext.configure(conn, opts={"compare_type": True})
+        opts = {"compare_type": True, "include_name": include_name}
+        context = MigrationContext.configure(conn, opts=opts)
         return list(compare_metadata(context, Base.metadata))
 
     engine = create_async_engine(url, poolclass=NullPool)
@@ -58,6 +59,8 @@ def test_migrations_match_models_and_downgrade_cleanly(postgres_url: str) -> Non
 
     command.upgrade(config, "head")
     assert asyncio.run(_schema_diff(url)) == []
+    # The checkpointer's tables come from its own setup(), run by migration 0007.
+    assert set(asyncio.run(_leftovers(url))["tables"]) >= CHECKPOINT_TABLES
     assert asyncio.run(_leftovers(url))["extensions"] == ["btree_gist", "vector"]
 
     command.downgrade(config, "base")

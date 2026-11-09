@@ -277,3 +277,35 @@ async def test_throttled_password_change_does_no_password_work(
 
     assert response.status_code == 429
     assert counter.calls == 0
+
+
+async def test_assistant_limits_per_minute_and_day(
+    make_settings: Callable[..., Settings], redis_url: str
+) -> None:
+    import uuid
+
+    from app.core.exceptions import RateLimited
+    from app.services.rate_limit import RateLimiter
+
+    redis = Redis.from_url(redis_url)
+    try:
+        limiter = RateLimiter(redis, make_settings())
+        user = uuid.uuid4()
+        for _ in range(20):
+            await limiter.check_assistant(user)
+        with pytest.raises(RateLimited) as minute:
+            await limiter.check_assistant(user)
+        assert 0 < minute.value.retry_after_seconds <= 60
+
+        daily = RateLimiter(
+            redis, make_settings(assistant_minute_limit=1000, assistant_day_limit=3)
+        )
+        other = uuid.uuid4()
+        for _ in range(3):
+            await daily.check_assistant(other)
+        with pytest.raises(RateLimited) as day:
+            await daily.check_assistant(other)
+        assert day.value.retry_after_seconds > 60
+    finally:
+        await redis.flushdb()
+        await redis.aclose()

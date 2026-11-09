@@ -36,7 +36,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.cli import CommandError, read_password, validate_password
 from app.core.config import Environment, Settings
 from app.core.exceptions import DomainError
-from app.db.base import Base
+from app.db.base import data_tables
 from app.db.session import create_engine, create_session_factory
 from app.models import GpuModel, Notification, Reservation, ServerStatus, User, UserRole
 from app.services import jobs, labs, reservations, servers, users
@@ -349,7 +349,8 @@ async def _is_empty(session: AsyncSession) -> bool:
 
 async def reset(session: AsyncSession) -> None:
     """Empty every application table (not the migration version)."""
-    tables = ", ".join(f'"{table.name}"' for table in Base.metadata.sorted_tables)
+    names = data_tables()
+    tables = ", ".join(f'"{name}"' for name in names)
     await session.execute(text(f"TRUNCATE {tables} RESTART IDENTITY CASCADE"))
 
 

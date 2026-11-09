@@ -25,6 +25,7 @@ STATUS_BY_KIND: Final[Mapping[ErrorKind, int]] = {
     ErrorKind.FORBIDDEN: status.HTTP_403_FORBIDDEN,
     ErrorKind.INVALID: status.HTTP_422_UNPROCESSABLE_CONTENT,
     ErrorKind.RATE_LIMITED: status.HTTP_429_TOO_MANY_REQUESTS,
+    ErrorKind.UNAVAILABLE: status.HTTP_503_SERVICE_UNAVAILABLE,
 }
 
 VALIDATION_SLUG: Final = "validation-failed"

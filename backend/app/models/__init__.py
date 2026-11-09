@@ -1,4 +1,5 @@
 from app.models.audit import AuditLog
+from app.models.chat import ActionOutcome, AssistantAction, ChatMessage, ChatRole, ChatThread
 from app.models.kb_chunk import KbChunk
 from app.models.lab import Lab
 from app.models.notification import (
@@ -14,7 +15,12 @@ from app.models.user import User, UserRole
 
 __all__ = [
     "MAX_DELIVERY_ATTEMPTS",
+    "ActionOutcome",
+    "AssistantAction",
     "AuditLog",
+    "ChatMessage",
+    "ChatRole",
+    "ChatThread",
     "CreatedVia",
     "Gpu",
     "GpuAllocation",

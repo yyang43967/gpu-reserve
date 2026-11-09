@@ -21,6 +21,8 @@ x-backend-env: &backend-env
   SMTP_HOST: mailpit
   SMTP_PORT: "1025"
   FRONTEND_URL: http://localhost:4173
+  # A scripted stand-in for the assistant's model: deterministic, and no API key.
+  ASSISTANT_MODEL: scripted:e2e
 
 services:
   postgres:

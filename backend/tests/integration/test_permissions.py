@@ -16,8 +16,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
 from app.main import create_app
-from app.models import GpuModel, Lab, Reservation, Server, User, UserRole
-from app.services import labs, reservations, servers, users
+from app.models import ChatThread, GpuModel, Lab, Reservation, Server, User, UserRole
+from app.services import assistant_threads, labs, reservations, servers, users
 from tests.integration.reservation_helpers import QUOTA_ZONE, booking_body, next_saturday
 
 pytestmark = pytest.mark.integration
@@ -50,6 +50,8 @@ class Targets:
     # Upcoming reservations of the student caller: one approved, one pending.
     reservation: Reservation
     pending: Reservation
+    # A conversation of the student caller.
+    thread: ChatThread
 
 
 @dataclass(frozen=True)
@@ -61,6 +63,7 @@ class Context:
     server: Server
     reservation: Reservation
     pending: Reservation
+    thread: ChatThread
 
     @classmethod
     def of(cls, caller: User, targets: Targets) -> "Context":
@@ -72,6 +75,7 @@ class Context:
             server=targets.server,
             reservation=targets.reservation,
             pending=targets.pending,
+            thread=targets.thread,
         )
 
 
@@ -83,6 +87,11 @@ class RouteCase:
     # Builds a valid request body for a successful call.
     body: Callable[[Context], dict[str, Any]] | None = None
     path_params: Callable[[Context], dict[str, str]] = field(default=lambda ctx: {})
+    # What a caller who may not see the record gets.
+    not_found: str = "reservation-not-found"
+    # Statuses besides 2xx that show the caller got past authorization, for routes whose
+    # success depends on more than permissions.
+    accepted: frozenset[int] = frozenset()
 
     @property
     def id(self) -> str:
@@ -114,6 +123,15 @@ def _reservation(ctx: Context) -> dict[str, str]:
 
 def _pending(ctx: Context) -> dict[str, str]:
     return {"reservation_id": str(ctx.pending.id)}
+
+
+def _thread(ctx: Context) -> dict[str, str]:
+    return {"thread_id": str(ctx.thread.id)}
+
+
+# The permission tests run without an assistant model, so the two run routes answer 503
+# once the caller is let through.
+_NO_MODEL = frozenset({503})
 
 
 MATRIX = [
@@ -241,6 +259,34 @@ MATRIX = [
         Access.AUTHENTICATED,
         body=lambda ctx: {"purpose": "avatar", "content_type": "image/png", "size_bytes": 1000},
     ),
+    RouteCase("POST", "/assistant/threads", Access.AUTHENTICATED),
+    RouteCase("GET", "/assistant/threads", Access.AUTHENTICATED),
+    # Conversations are private: admins get 404 on other people's, like strangers.
+    RouteCase(
+        "GET",
+        "/assistant/threads/{thread_id}/messages",
+        Access.SELF,
+        path_params=_thread,
+        not_found="thread-not-found",
+    ),
+    RouteCase(
+        "POST",
+        "/assistant/threads/{thread_id}/messages",
+        Access.SELF,
+        body=lambda ctx: {"content": "hello"},
+        path_params=_thread,
+        not_found="thread-not-found",
+        accepted=_NO_MODEL,
+    ),
+    RouteCase(
+        "POST",
+        "/assistant/threads/{thread_id}/resume",
+        Access.SELF,
+        body=lambda ctx: {"decision": "confirm"},
+        path_params=_thread,
+        not_found="thread-not-found",
+        accepted=_NO_MODEL,
+    ),
 ]
 
 PROTECTED = [
@@ -354,7 +400,14 @@ async def targets(db_session: AsyncSession, student: Caller) -> Targets:
         server=server,
         reservation=reservation,
         pending=pending,
+        thread=await _thread_of(db_session, student.user),
     )
+
+
+async def _thread_of(db: AsyncSession, user: User) -> ChatThread:
+    thread = await assistant_threads.create_thread(db, user, "Booking help")
+    await db.commit()
+    return thread
 
 
 async def _student_booking(
@@ -403,8 +456,8 @@ def assert_problem(response: Response, status: int, slug: str) -> None:
     assert response.json()["type"].endswith(f"/{slug}")
 
 
-def assert_allowed(response: Response) -> None:
-    assert 200 <= response.status_code < 300, response.text
+def assert_allowed(response: Response, case: RouteCase) -> None:
+    assert 200 <= response.status_code < 300 or response.status_code in case.accepted, response.text
 
 
 # --- anonymous ---
@@ -462,7 +515,7 @@ async def test_other_students_get_not_found_on_owner_routes(
 
     response = await call(api_client, case, Context.of(stranger.user, targets), stranger.headers)
 
-    assert_problem(response, 404, "reservation-not-found")
+    assert_problem(response, 404, case.not_found)
 
 
 @pytest.mark.parametrize("case", CALLABLE_BY_STUDENT, ids=_ids(CALLABLE_BY_STUDENT))
@@ -471,7 +524,7 @@ async def test_student_is_allowed(
 ) -> None:
     response = await call(api_client, case, Context.of(student.user, targets), student.headers)
 
-    assert_allowed(response)
+    assert_allowed(response, case)
 
 
 # --- admin ---
@@ -486,10 +539,10 @@ ADMIN_CALLABLE = [
 async def test_admins_get_not_found_on_owner_only_routes(
     api_client: AsyncClient, admin: Caller, targets: Targets, case: RouteCase
 ) -> None:
-    """A calendar file is the owner's own; an admin is not its owner."""
+    """A calendar file or a conversation is the owner's own; an admin is not its owner."""
     response = await call(api_client, case, Context.of(admin.user, targets), admin.headers)
 
-    assert_problem(response, 404, "reservation-not-found")
+    assert_problem(response, 404, case.not_found)
 
 
 @pytest.mark.parametrize("case", ADMIN_CALLABLE, ids=_ids(ADMIN_CALLABLE))
@@ -498,4 +551,4 @@ async def test_admin_is_allowed(
 ) -> None:
     response = await call(api_client, case, Context.of(admin.user, targets), admin.headers)
 
-    assert_allowed(response)
+    assert_allowed(response, case)

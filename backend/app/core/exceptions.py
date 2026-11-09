@@ -15,6 +15,8 @@ class ErrorKind(StrEnum):
     FORBIDDEN = "forbidden"
     INVALID = "invalid"
     RATE_LIMITED = "rate_limited"
+    # A dependency the request needs is not configured or not reachable.
+    UNAVAILABLE = "unavailable"
 
 
 class DomainError(Exception):
@@ -316,3 +318,38 @@ class InvalidUtilizationWindow(DomainError):
     kind = ErrorKind.INVALID
     type_slug = "invalid-utilization-window"
     title = "Invalid utilization window"
+
+
+# --- assistant ---
+
+
+class ThreadNotFound(DomainError):
+    kind = ErrorKind.NOT_FOUND
+    type_slug = "thread-not-found"
+    title = "Conversation not found"
+
+
+class AssistantBusy(DomainError):
+    """Another run is in progress on the same conversation."""
+
+    kind = ErrorKind.CONFLICT
+    type_slug = "assistant-busy"
+    title = "The assistant is still answering"
+
+
+class NothingToConfirm(DomainError):
+    kind = ErrorKind.CONFLICT
+    type_slug = "nothing-to-confirm"
+    title = "Nothing is waiting for confirmation"
+
+
+class AssistantUnavailable(DomainError):
+    kind = ErrorKind.UNAVAILABLE
+    type_slug = "assistant-unavailable"
+    title = "The assistant is not available"
+
+
+class PolicySearchUnavailable(DomainError):
+    kind = ErrorKind.UNAVAILABLE
+    type_slug = "policy-search-unavailable"
+    title = "Policy search is not available"

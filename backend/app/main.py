@@ -4,10 +4,13 @@ from typing import Final
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from langchain_core.language_models import BaseChatModel
 from redis.asyncio import Redis
 
+from app.agent.setup import assistant_lifespan
 from app.api import (
     API_PREFIX,
+    assistant,
     auth,
     health,
     labs,
@@ -22,6 +25,7 @@ from app.api import (
 from app.core.config import Settings, get_settings
 from app.core.errors import register_error_handlers
 from app.db.session import create_engine, create_session_factory
+from app.rag.embeddings import Embedder
 from app.services.storage import ObjectStorage, S3Storage
 
 # Exactly what the frontend sends, so a page on an allowed origin cannot use any other
@@ -30,7 +34,14 @@ CORS_ALLOWED_METHODS: Final = ("GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS
 CORS_ALLOWED_HEADERS: Final = ("Authorization", "Content-Type")
 
 
-def create_app(settings: Settings | None = None, storage: ObjectStorage | None = None) -> FastAPI:
+def create_app(
+    settings: Settings | None = None,
+    storage: ObjectStorage | None = None,
+    *,
+    chat_model: BaseChatModel | None = None,
+    embedder: Embedder | None = None,
+) -> FastAPI:
+    """`chat_model` and `embedder` replace the configured ones, for tests."""
     settings = settings or get_settings()
 
     @asynccontextmanager
@@ -41,7 +52,11 @@ def create_app(settings: Settings | None = None, storage: ObjectStorage | None =
         app.state.session_factory = create_session_factory(engine)
         app.state.redis = redis
         try:
-            yield
+            async with assistant_lifespan(
+                settings, app.state.session_factory, chat_model=chat_model, embedder=embedder
+            ) as agent:
+                app.state.assistant = agent
+                yield
         finally:
             await redis.aclose()
             await engine.dispose()
@@ -71,6 +86,7 @@ def create_app(settings: Settings | None = None, storage: ObjectStorage | None =
     app.include_router(search.router, prefix=API_PREFIX)
     app.include_router(stats.router, prefix=API_PREFIX)
     app.include_router(uploads.router, prefix=API_PREFIX)
+    app.include_router(assistant.router, prefix=API_PREFIX)
 
     return app
 
