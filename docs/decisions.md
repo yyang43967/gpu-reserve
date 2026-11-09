@@ -804,3 +804,4 @@ Agent tests use a scripted chat model that returns planned messages and tool cal
 - **Structured logging** is still missing (see Phase 5). Assistant warnings reach stderr unformatted.
 - **Checkpoints of deleted conversations** stay in the checkpoint tables, which have no foreign key to threads. A periodic cleanup of checkpoints whose thread no longer exists would remove them.
 - **Two write-gated tools only.** Admin actions (approve, reject) are not exposed to the assistant on purpose.
+- **Encrypted reasoning is tied to the model that produced it.** It is stored with the messages in the checkpoint and sent back to the same model on later calls. If a thread continues on a different model (a changed `ASSISTANT_MODEL`, or evaluations switching models), those items have to be stripped or ignored before sending. Phase 8 handles it, with a test that a thread started on one model continues on another.
