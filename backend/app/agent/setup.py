@@ -3,9 +3,11 @@
 import asyncio
 import contextlib
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
+from datetime import datetime
 
+from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.language_models import BaseChatModel
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from psycopg import AsyncConnection
@@ -14,6 +16,7 @@ from psycopg_pool import AsyncConnectionPool
 from sqlalchemy import make_url
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.agent.context import utc_now
 from app.agent.graph import build_graph
 from app.agent.runner import Assistant
 from app.agent.tracing import build_tracing
@@ -42,9 +45,12 @@ async def assistant_lifespan(
     *,
     chat_model: BaseChatModel | None = None,
     embedder: Embedder | None = None,
+    clock: Callable[[], datetime] = utc_now,
+    callbacks: Sequence[BaseCallbackHandler] = (),
 ) -> AsyncIterator[Assistant | None]:
     """The assistant, or None when its model is not configured (the API then answers
-    503). Tests pass a scripted model and a fake embedder."""
+    503). Tests pass a scripted model and a fake embedder; the evaluation runner also
+    passes a fixed clock and a callback that records each model call."""
     try:
         model = chat_model or build_chat_model(settings)
     except AssistantUnavailable as exc:
@@ -70,6 +76,8 @@ async def assistant_lifespan(
         settings,
         embedder=embedder or build_embedder(settings),
         tracing=tracing,
+        clock=clock,
+        callbacks=callbacks,
     )
     try:
         yield assistant

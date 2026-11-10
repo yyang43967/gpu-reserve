@@ -1,0 +1,164 @@
+{
+  "assistant_model": "openai:gpt-5.4-mini-2026-03-17",
+  "backoff_seconds": [
+    15.0,
+    60.0
+  ],
+  "case_attempts": 3,
+  "cases": [
+    "book-explicit-01",
+    "book-weekend-01",
+    "book-timezone-01",
+    "book-approval-01",
+    "book-approval-02",
+    "book-job-01",
+    "book-job-02",
+    "peak-limit-01",
+    "peak-limit-02",
+    "quota-exceeded-01",
+    "grid-01",
+    "horizon-01",
+    "too-long-01",
+    "too-many-01",
+    "maintenance-01",
+    "past-start-01",
+    "conflict-taken-01",
+    "conflict-race-01",
+    "cancel-future-01",
+    "end-early-01",
+    "cancel-ambiguous-01",
+    "cancel-declined-01",
+    "cancel-completed-01",
+    "clarify-count-01",
+    "clarify-time-01",
+    "clarify-server-01",
+    "clarify-purpose-01",
+    "clarify-vague-01",
+    "clarify-nextweek-01",
+    "slots-evening-01",
+    "slots-h100-01",
+    "slots-memory-01",
+    "quota-remaining-01",
+    "policy-quota-01",
+    "policy-peak-01",
+    "policy-end-early-01",
+    "policy-approval-01",
+    "policy-storage-01",
+    "policy-citing-01",
+    "policy-notcovered-01",
+    "policy-notcovered-02",
+    "hardware-lora-7b-01",
+    "hardware-full-13b-01",
+    "hardware-70b-inference-01",
+    "hardware-nvlink-01",
+    "oos-code-01",
+    "oos-cluster-01",
+    "oos-shopping-01",
+    "oos-cloud-01",
+    "other-list-01",
+    "other-cancel-01",
+    "other-admin-claim-01",
+    "other-admin-real-01",
+    "inject-purpose-own-01",
+    "inject-notes-01",
+    "inject-purpose-field-01",
+    "inject-peak-claim-01",
+    "inject-cancel-more-01",
+    "change-count-01",
+    "change-shorter-01",
+    "change-server-01",
+    "change-undo-01",
+    "change-later-01"
+  ],
+  "cold_start_seconds": 1.4016599159222096,
+  "concurrency": 4,
+  "dataset": "evals/agent/cases.jsonl",
+  "dataset_sha256": "2295a0bc73662c89c3489785bbd3514c0638039e58f82a6f8041a1d97b265ca9",
+  "eval_now": "2026-11-10T15:00:00+00:00",
+  "finished_at": "2026-11-10T05:25:09.075486+00:00",
+  "git_commit": "39c3ec8e058d8e2593354768e249481241e6ab3f",
+  "git_dirty": false,
+  "model": "gpt-5.4-mini-2026-03-17",
+  "packages": {
+    "anthropic": "2.7.0",
+    "langchain-anthropic": "1.7.10",
+    "langchain-core": "1.7.6",
+    "langchain-openai": "1.7.4",
+    "langgraph": "1.2.20",
+    "langgraph-checkpoint-postgres": "3.2.0",
+    "openai": "3.46.0"
+  },
+  "prompt_sha256": "f8b70e49df78ed82b34177c9c9204b92612d8592bc76233940b31966735d8dec",
+  "provider": "openai",
+  "reasoning": "effort=low",
+  "repeat": 1,
+  "reported_models": [
+    "gpt-5.4-mini-2026-03-17"
+  ],
+  "request_retries": 0,
+  "request_timeout_seconds": 90.0,
+  "run_id": "pilot-20261110-0523-gpt-5.4-mini-2026-03-17-effort-low-r1",
+  "run_timeout_seconds": 600.0,
+  "started_at": "2026-11-10T05:23:38.791746+00:00",
+  "summary": {
+    "by_category": {
+      "booking": {
+        "passed": 7,
+        "total": 7
+      },
+      "cancel": {
+        "passed": 4,
+        "total": 5
+      },
+      "clarify": {
+        "passed": 1,
+        "total": 6
+      },
+      "conflict": {
+        "passed": 1,
+        "total": 2
+      },
+      "hardware": {
+        "passed": 4,
+        "total": 4
+      },
+      "injection": {
+        "passed": 5,
+        "total": 5
+      },
+      "multi_turn": {
+        "passed": 5,
+        "total": 5
+      },
+      "other_users": {
+        "passed": 3,
+        "total": 4
+      },
+      "out_of_scope": {
+        "passed": 4,
+        "total": 4
+      },
+      "policy": {
+        "passed": 6,
+        "total": 8
+      },
+      "rule_violation": {
+        "passed": 8,
+        "total": 9
+      },
+      "slots": {
+        "passed": 4,
+        "total": 4
+      }
+    },
+    "cases": 63,
+    "excluded": 0,
+    "passed": 52,
+    "scored": 63,
+    "statuses": {
+      "ok": 63
+    },
+    "wrong_cards": 2
+  },
+  "tag": "pilot"
+}

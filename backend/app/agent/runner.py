@@ -15,10 +15,11 @@ import asyncio
 import contextlib
 import logging
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any, Final, Literal, cast
 
+from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.errors import GraphRecursionError
@@ -57,6 +58,10 @@ LEASE_RENEW_SECONDS: Final = 30.0
 QUEUE_SIZE: Final = 256
 # How long shutdown waits for runs in flight before cancelling them.
 SHUTDOWN_GRACE_SECONDS: Final = 10.0
+# What the stream says when a run stops at the step limit or the time cap. The
+# evaluation runner tells the two apart by these.
+STEP_LIMIT_MESSAGE: Final = "That took too many steps. Try a narrower request."
+RUN_TIMEOUT_MESSAGE: Final = "The assistant took too long to answer."
 
 _ACTION_BY_TOOL: Final = {
     "propose_reservation": CREATE_RESERVATION,
@@ -106,6 +111,7 @@ class Assistant:
         embedder: Embedder | None,
         tracing: Tracing | None,
         clock: Callable[[], Any] = utc_now,
+        callbacks: Sequence[BaseCallbackHandler] = (),
     ) -> None:
         self.graph = graph
         self._sessions = sessions
@@ -113,6 +119,9 @@ class Assistant:
         self._embedder = embedder
         self._tracing = tracing
         self._clock = clock
+        # Extra observers for every run, next to tracing. The evaluation runner records
+        # each model call's latency, tokens, and errors through one.
+        self._callbacks = list(callbacks)
         self._tasks: set[asyncio.Task[None]] = set()
 
     # --- entry points ---
@@ -190,8 +199,11 @@ class Assistant:
             "run_name": "assistant",
             "metadata": trace_metadata(thread_id=ctx.thread_id, user_id=ctx.user_id, kind=kind),
         }
+        callbacks = [*self._callbacks]
         if self._tracing is not None:
-            config["callbacks"] = [self._tracing.handler()]
+            callbacks.append(self._tracing.handler())
+        if callbacks:
+            config["callbacks"] = callbacks
         return config
 
     async def _claim(self, thread_id: uuid.UUID) -> None:
@@ -223,9 +235,7 @@ class Assistant:
                 await work(stream)
         except GraphRecursionError:
             logger.warning("Assistant run on thread %s hit the recursion limit", thread_id)
-            await stream.emit(
-                sse.event("error", message="That took too many steps. Try a narrower request.")
-            )
+            await stream.emit(sse.event("error", message=STEP_LIMIT_MESSAGE))
         except ModelSwitchMidTurn as exc:
             logger.warning("Assistant run on thread %s stopped: %s", thread_id, exc.detail)
             await stream.emit(
@@ -237,7 +247,7 @@ class Assistant:
             )
         except TimeoutError:
             logger.warning("Assistant run on thread %s timed out", thread_id)
-            await stream.emit(sse.event("error", message="The assistant took too long to answer."))
+            await stream.emit(sse.event("error", message=RUN_TIMEOUT_MESSAGE))
         except Exception:
             logger.exception("Assistant run on thread %s failed", thread_id)
             await stream.emit(

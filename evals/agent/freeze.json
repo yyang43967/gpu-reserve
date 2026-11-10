@@ -1,0 +1,8 @@
+{
+  "note": "Final runs are made from the commit that adds this file, with a clean tree.",
+  "dataset": "evals/agent/cases.jsonl",
+  "dataset_sha256": "f8e34440747070e74bcd9110630c35a76607ab3d102a0215c6129adc943f8640",
+  "rubric_version": "2",
+  "rubric_sha256": "7d6fd67f86378a432bf780c2afb9d8890d4a277d89460005c223ffb79da7f147",
+  "prompt_and_tools_sha256": "f8b70e49df78ed82b34177c9c9204b92612d8592bc76233940b31966735d8dec"
+}

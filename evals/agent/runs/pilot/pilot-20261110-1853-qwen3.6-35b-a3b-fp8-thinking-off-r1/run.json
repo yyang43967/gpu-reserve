@@ -1,0 +1,171 @@
+{
+  "assistant_model": "vllm:Qwen/Qwen3.6-35B-A3B-FP8",
+  "backoff_seconds": [
+    15.0,
+    60.0
+  ],
+  "case_attempts": 3,
+  "cases": [
+    "book-explicit-01",
+    "book-weekend-01",
+    "book-timezone-01",
+    "book-approval-01",
+    "book-approval-02",
+    "book-job-01",
+    "book-job-02",
+    "peak-limit-01",
+    "peak-limit-02",
+    "quota-exceeded-01",
+    "grid-01",
+    "horizon-01",
+    "too-long-01",
+    "too-many-01",
+    "maintenance-01",
+    "past-start-01",
+    "conflict-taken-01",
+    "conflict-race-01",
+    "cancel-future-01",
+    "end-early-01",
+    "cancel-ambiguous-01",
+    "cancel-declined-01",
+    "cancel-completed-01",
+    "clarify-count-01",
+    "clarify-time-01",
+    "clarify-server-01",
+    "clarify-purpose-01",
+    "clarify-vague-01",
+    "clarify-nextweek-01",
+    "slots-evening-01",
+    "slots-h100-01",
+    "slots-memory-01",
+    "quota-remaining-01",
+    "policy-quota-01",
+    "policy-peak-01",
+    "policy-end-early-01",
+    "policy-approval-01",
+    "policy-storage-01",
+    "policy-citing-01",
+    "policy-notcovered-01",
+    "policy-notcovered-02",
+    "hardware-lora-7b-01",
+    "hardware-full-13b-01",
+    "hardware-70b-inference-01",
+    "hardware-nvlink-01",
+    "oos-code-01",
+    "oos-cluster-01",
+    "oos-shopping-01",
+    "oos-cloud-01",
+    "other-list-01",
+    "other-cancel-01",
+    "other-admin-claim-01",
+    "other-admin-real-01",
+    "inject-purpose-own-01",
+    "inject-notes-01",
+    "inject-purpose-field-01",
+    "inject-peak-claim-01",
+    "inject-cancel-more-01",
+    "change-count-01",
+    "change-shorter-01",
+    "change-server-01",
+    "change-undo-01",
+    "change-later-01"
+  ],
+  "cold_start_seconds": 138.33283762505744,
+  "concurrency": 4,
+  "dataset": "evals/agent/cases.jsonl",
+  "dataset_sha256": "f8e34440747070e74bcd9110630c35a76607ab3d102a0215c6129adc943f8640",
+  "eval_now": "2026-11-10T15:00:00+00:00",
+  "finished_at": "2026-11-10T18:54:52.981120+00:00",
+  "git_commit": "8e1c60dad97002d686b391d3ef2221f54184309d",
+  "git_dirty": false,
+  "model": "Qwen/Qwen3.6-35B-A3B-FP8",
+  "packages": {
+    "anthropic": "2.7.0",
+    "langchain-anthropic": "1.7.10",
+    "langchain-core": "1.7.6",
+    "langchain-openai": "1.7.4",
+    "langgraph": "1.2.20",
+    "langgraph-checkpoint-postgres": "3.2.0",
+    "openai": "3.46.0"
+  },
+  "prompt_sha256": "f8b70e49df78ed82b34177c9c9204b92612d8592bc76233940b31966735d8dec",
+  "provider": "vllm",
+  "query_embeddings_sha256": "7593b707a8a67b8a241cd96df0d0597e4816f5c85beb9db46a0a3f4753de594a",
+  "reasoning": "thinking=off",
+  "repeat": 1,
+  "reported_models": [
+    "Qwen/Qwen3.6-35B-A3B-FP8"
+  ],
+  "request_retries": 0,
+  "request_timeout_seconds": 90.0,
+  "run_id": "pilot-20261110-1853-qwen3.6-35b-a3b-fp8-thinking-off-r1",
+  "run_timeout_seconds": 600.0,
+  "serving": {
+    "gpu": "L40S",
+    "model_revision": "c653bba46dfa06e9658dcc0b0dc87fe4685f14a2",
+    "vllm_version": "0.32.0"
+  },
+  "started_at": "2026-11-10T18:53:09.362357+00:00",
+  "summary": {
+    "by_category": {
+      "booking": {
+        "passed": 2,
+        "total": 7
+      },
+      "cancel": {
+        "passed": 2,
+        "total": 5
+      },
+      "clarify": {
+        "passed": 4,
+        "total": 6
+      },
+      "conflict": {
+        "passed": 1,
+        "total": 2
+      },
+      "hardware": {
+        "passed": 3,
+        "total": 4
+      },
+      "injection": {
+        "passed": 3,
+        "total": 5
+      },
+      "multi_turn": {
+        "passed": 4,
+        "total": 5
+      },
+      "other_users": {
+        "passed": 4,
+        "total": 4
+      },
+      "out_of_scope": {
+        "passed": 4,
+        "total": 4
+      },
+      "policy": {
+        "passed": 4,
+        "total": 8
+      },
+      "rule_violation": {
+        "passed": 3,
+        "total": 9
+      },
+      "slots": {
+        "passed": 3,
+        "total": 4
+      }
+    },
+    "cases": 63,
+    "excluded": 0,
+    "passed": 37,
+    "scored": 63,
+    "statuses": {
+      "ok": 51,
+      "step_limit": 12
+    },
+    "wrong_cards": 2
+  },
+  "tag": "pilot"
+}

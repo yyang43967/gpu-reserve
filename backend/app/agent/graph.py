@@ -8,7 +8,13 @@ from collections.abc import Sequence
 from typing import Any, Final
 
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
+from langchain_core.messages import (
+    AIMessage,
+    BaseMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+)
 from langchain_core.messages.utils import count_tokens_approximately, trim_messages
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
@@ -19,7 +25,7 @@ from app.agent.context import AgentContext
 from app.agent.prompts import SYSTEM_PROMPT
 from app.agent.reasoning import prepare_for_model
 from app.agent.state import AgentState
-from app.agent.tools import WRITE_GATED_TOOLS, build_tools, format_tool_error
+from app.agent.tools import WRITE_GATED_TOOLS, build_tools, dumps_result, format_tool_error
 from app.llm.names import chat_model_name
 
 # Graph steps per run. Each model call and each tool round is one step, so this allows
@@ -81,6 +87,61 @@ def handle_refusal(message: AIMessage) -> AIMessage:
     )
 
 
+def answer_unparsed_calls(message: AIMessage) -> list[ToolMessage]:
+    """Error results for a response with tool calls whose arguments could not be parsed.
+
+    Without them the graph would see no tool calls and end the run with an empty
+    answer. Every call in the message is answered, the parsed ones too (as not run),
+    so the model never has an unanswered call in its history, and the model's own
+    message is kept as it was."""
+    if not message.invalid_tool_calls:
+        return []
+    errors = [
+        ToolMessage(
+            dumps_result(
+                {
+                    "ok": False,
+                    "error": {
+                        "type": "invalid-arguments",
+                        "title": "Invalid arguments",
+                        "detail": "The arguments of this call could not be parsed as JSON. "
+                        "Send the call again with valid arguments.",
+                    },
+                }
+            ),
+            tool_call_id=call.get("id") or "",
+            name=call.get("name") or "unknown",
+        )
+        for call in message.invalid_tool_calls
+    ]
+    errors += [
+        ToolMessage(
+            dumps_result(
+                {
+                    "ok": False,
+                    "error": {
+                        "type": "not-run",
+                        "title": "Not run",
+                        "detail": "Another call in the same message could not be parsed, so "
+                        "none of them ran. Send one call at a time.",
+                    },
+                }
+            ),
+            tool_call_id=call["id"] or "",
+            name=call["name"],
+        )
+        for call in message.tool_calls
+    ]
+    return errors
+
+
+def route(state: AgentState) -> str:
+    """Tool calls go to the tools; answered unparsable calls go back to the model."""
+    if isinstance(state["messages"][-1], ToolMessage):
+        return AGENT_NODE
+    return str(tools_condition(dict(state)))
+
+
 def build_graph(
     model: BaseChatModel, checkpointer: BaseCheckpointSaver[Any] | None
 ) -> CompiledStateGraph[AgentState, AgentContext, AgentState, AgentState]:
@@ -92,12 +153,18 @@ def build_graph(
         history = prepare_for_model(trim_history(state["messages"]), model_name)
         response = await bound.ainvoke(history)
         assert isinstance(response, AIMessage)  # noqa: S101 - chat models return AIMessage
-        return {"messages": [keep_one_write(handle_refusal(response))]}
+        response = handle_refusal(response)
+        errors = answer_unparsed_calls(response)
+        if errors:
+            return {"messages": [response, *errors]}
+        return {"messages": [keep_one_write(response)]}
 
     graph = StateGraph(AgentState, context_schema=AgentContext)
     graph.add_node(AGENT_NODE, agent)
     graph.add_node(TOOLS_NODE, ToolNode(tools, handle_tool_errors=format_tool_error))
     graph.add_edge(START, AGENT_NODE)
-    graph.add_conditional_edges(AGENT_NODE, tools_condition, {"tools": TOOLS_NODE, END: END})
+    graph.add_conditional_edges(
+        AGENT_NODE, route, {"tools": TOOLS_NODE, AGENT_NODE: AGENT_NODE, END: END}
+    )
     graph.add_edge(TOOLS_NODE, AGENT_NODE)
     return graph.compile(checkpointer=checkpointer)

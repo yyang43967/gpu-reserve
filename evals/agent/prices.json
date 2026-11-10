@@ -1,0 +1,9 @@
+{
+  "as_of": "2026-11-09",
+  "note": "USD per million tokens; GPU in USD per hour. Input is uncached input; output includes reasoning.",
+  "models": {
+    "gpt-5.4-mini": {"input": 0.75, "cache_read": 0.075, "cache_write": 0.75, "output": 4.5},
+    "claude-haiku-5-5": {"input": 0.10, "cache_read": 0.01, "cache_write": 0.125, "output": 0.50}
+  },
+  "gpu_per_hour": {"L40S": 1.95, "H100": 3.95}
+}
