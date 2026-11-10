@@ -2,7 +2,9 @@
 
 vLLM serves `Qwen/Qwen3.6-35B-A3B-FP8` behind an OpenAI-compatible API on one Modal
 GPU. The backend reaches it with `ASSISTANT_MODEL=vllm:Qwen/Qwen3.6-35B-A3B-FP8`,
-`VLLM_BASE_URL=<endpoint>/v1`, and `VLLM_API_KEY`.
+`VLLM_BASE_URL=<endpoint>/v1`, and `VLLM_API_KEY`. `VLLM_ENABLE_THINKING=true` or `false`
+turns Qwen's reasoning on or off for each request; left empty, the model's default (on)
+applies.
 
 ## Configuration
 
