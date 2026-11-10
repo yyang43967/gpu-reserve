@@ -110,10 +110,16 @@ def slug(text: str) -> str:
     return re.sub(r"[^a-z0-9.]+", "-", text.lower()).strip("-")
 
 
-def run_id(settings: Settings, started: datetime, repeat: int) -> str:
+def run_id(settings: Settings, started: datetime, repeat: int, tag: str | None = None) -> str:
     model = settings.assistant_model.partition(":")[2].rsplit("/", 1)[-1]
     reasoning = reasoning_setting(settings).replace("=", "-")
-    return f"{started:%Y%m%d-%H%M}-{slug(model)}-{reasoning}-r{repeat}"
+    prefix = f"{slug(tag)}-" if tag else ""
+    return f"{prefix}{started:%Y%m%d-%H%M}-{slug(model)}-{reasoning}-r{repeat}"
+
+
+def run_directory(name: str, tag: str | None) -> Path:
+    """Tagged runs (such as pilots) are kept apart from the runs that are compared."""
+    return RUNS_DIR / slug(tag) / name if tag else RUNS_DIR / name
 
 
 def run_config(
@@ -122,6 +128,7 @@ def run_config(
     *,
     run: str,
     repeat: int,
+    tag: str | None = None,
     cases_path: Path,
     case_ids: Sequence[str],
     commit: str,
@@ -134,6 +141,7 @@ def run_config(
     provider, _, model = settings.assistant_model.partition(":")
     config: dict[str, Any] = {
         "run_id": run,
+        "tag": tag,
         "repeat": repeat,
         "assistant_model": settings.assistant_model,
         "provider": provider,

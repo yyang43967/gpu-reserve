@@ -157,6 +157,9 @@ def report(
     by_config: dict[str, list[Run]] = defaultdict(list)
     for run in runs:
         by_config[run.label].append(run)
+    tags = {run.config.get("tag") for run in runs}
+    if len(tags) > 1:
+        raise CompareError(f"the runs mix tags {sorted(map(str, tags))}; compare like with like")
     datasets = {run.config["dataset_sha256"] for run in runs}
     if len(datasets) > 1:
         raise CompareError("the runs used different versions of the dataset")

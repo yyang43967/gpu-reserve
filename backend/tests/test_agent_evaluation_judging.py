@@ -316,3 +316,35 @@ def test_hand_labels_are_matched_to_answers_by_their_opaque_id() -> None:
     text = report(runs, CASES, PRICES, labels)
     # Both judges said pass on both criteria; the hand labels agree on one of two.
     assert "| gpt-5.4-mini (effort=low) | 4/4 (100%) | 1/2 (50%) | 1/2 (50%) |" in text
+
+
+def test_usage_fields_match_what_the_providers_report() -> None:
+    """Shapes recorded from real responses on 2026-11-09. Anthropic's raw usage had
+    input_tokens 4, cache_creation_input_tokens 2992, output_tokens 27; OpenAI's raw
+    input_tokens include cached tokens and output_tokens include reasoning."""
+    from app.agent.evaluation.recorder import cache_write_tokens
+
+    anthropic_details = {
+        "cache_read": 0,
+        "cache_creation": 0,
+        "ephemeral_5m_input_tokens": 2992,
+        "ephemeral_1h_input_tokens": 0,
+    }
+    assert cache_write_tokens(anthropic_details) == 2992
+    call = {
+        "model": "claude-haiku-5-5-20261001",
+        "input_tokens": 2996,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": cache_write_tokens(anthropic_details),
+        "output_tokens": 27,
+    }
+    # 4 uncached at $0.10, 2,992 written at $0.125, 27 out at $0.50, per million.
+    assert call_cost(call, PRICES) == pytest.approx((0.4 + 374.0 + 13.5) / 1_000_000)
+    assert cache_write_tokens({"cache_read": 1408, "cache_creation": 0}) == 0
+
+
+def test_pilot_runs_are_not_compared_with_results() -> None:
+    pilot = run("gpt-5.4-mini", 1, ALL)
+    pilot.config["tag"] = "pilot"
+    with pytest.raises(CompareError, match="mix tags"):
+        report([pilot, run("claude-haiku-5-5", 1, ALL)], CASES, PRICES)

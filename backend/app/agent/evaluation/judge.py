@@ -28,6 +28,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel, ValidationError
 
 from app.agent.evaluation.cases import Case
+from app.agent.evaluation.recorder import cache_write_tokens
 
 PRIMARY_JUDGE: Final = "anthropic:claude-haiku-5-5"
 SECOND_JUDGE: Final = "openai:gpt-5.4-mini-2026-03-17"
@@ -131,7 +132,7 @@ def _usage(message: AIMessage, judgment: Judgment) -> None:
     details = usage.get("input_token_details") or {}
     judgment.input_tokens += usage.get("input_tokens", 0)
     judgment.cache_read_tokens += details.get("cache_read", 0) or 0
-    judgment.cache_write_tokens += details.get("cache_creation", 0) or 0
+    judgment.cache_write_tokens += cache_write_tokens(details)
     judgment.output_tokens += usage.get("output_tokens", 0)
 
 

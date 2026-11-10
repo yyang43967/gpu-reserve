@@ -13,6 +13,7 @@ Failures are sorted into three kinds, because they are scored differently:
 
 import time
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
@@ -35,6 +36,16 @@ class Failure(StrEnum):
 
 
 _RETRYABLE_STATUS = 429
+_CACHE_WRITE_LIFETIMES = ("ephemeral_5m_input_tokens", "ephemeral_1h_input_tokens")
+
+
+def cache_write_tokens(details: Mapping[str, Any]) -> int:
+    """Tokens written to the prompt cache. langchain-anthropic leaves `cache_creation`
+    at 0 and reports the writes by lifetime instead (`ephemeral_5m_input_tokens`,
+    `ephemeral_1h_input_tokens`); their sum is the provider's
+    `cache_creation_input_tokens`."""
+    by_lifetime = sum(int(details.get(k) or 0) for k in _CACHE_WRITE_LIFETIMES)
+    return max(int(details.get("cache_creation") or 0), by_lifetime)
 
 
 def classify(exc: BaseException) -> Failure:
@@ -103,7 +114,7 @@ class Recorder(AsyncCallbackHandler):
                 call.input_tokens = usage.get("input_tokens", 0)
                 call.output_tokens = usage.get("output_tokens", 0)
                 call.cache_read_tokens = details_in.get("cache_read", 0) or 0
-                call.cache_write_tokens = details_in.get("cache_creation", 0) or 0
+                call.cache_write_tokens = cache_write_tokens(details_in)
                 call.reasoning_tokens = details_out.get("reasoning", 0) or 0
         self.calls.append(call)
 

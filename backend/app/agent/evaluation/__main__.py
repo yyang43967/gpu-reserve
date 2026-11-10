@@ -48,10 +48,10 @@ from app.agent.evaluation.record import (
     QUERY_EMBEDDINGS_PATH,
     RESULTS_DIR,
     RUBRIC_PATH,
-    RUNS_DIR,
     git_state,
     read_cases,
     run_config,
+    run_directory,
     run_id,
     summary,
     write_run,
@@ -227,7 +227,7 @@ async def run(args: argparse.Namespace) -> int:
             started = datetime.now(UTC)
             results = await run_cases(runner, cases)
             finished = datetime.now(UTC)
-            name = run_id(settings, started, repeat)
+            name = run_id(settings, started, repeat, args.tag)
             reported = [
                 str(call["model"]) for r in results for call in r.model_calls if call.get("model")
             ]
@@ -236,6 +236,7 @@ async def run(args: argparse.Namespace) -> int:
                 options,
                 run=name,
                 repeat=repeat,
+                tag=args.tag,
                 cases_path=args.cases,
                 case_ids=[case.id for case in cases],
                 commit=commit,
@@ -245,7 +246,7 @@ async def run(args: argparse.Namespace) -> int:
                 finished=finished,
                 reported_models=reported,
             )
-            write_run(RUNS_DIR / name, config, results)
+            write_run(run_directory(name, args.tag), config, results)
             totals = summary(results)
             print(
                 f"{name}: {totals['passed']}/{totals['scored']} passed, "
@@ -362,6 +363,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         "It biases against slow configurations, so compared runs do not use it.",
     )
     go.add_argument("--allow-dirty", action="store_true")
+    go.add_argument(
+        "--tag",
+        help="Mark runs that are not results, e.g. 'pilot'; they go to runs/<tag>/.",
+    )
     grade = commands.add_parser("judge", help="Two judges on every judged case of runs.")
     grade.add_argument("runs", type=Path, nargs="+")
     grade.add_argument("--cases", type=Path, default=CASES_PATH)
