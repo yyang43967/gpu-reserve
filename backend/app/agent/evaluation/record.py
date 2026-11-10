@@ -32,6 +32,7 @@ from app.llm.registry import PROVIDERS
 REPO_ROOT: Final = Path(__file__).resolve().parents[4]
 EVALS_DIR: Final = REPO_ROOT / "evals" / "agent"
 CASES_PATH: Final = EVALS_DIR / "cases.jsonl"
+CASES_MD_PATH: Final = EVALS_DIR / "cases.md"
 RUNS_DIR: Final = EVALS_DIR / "runs"
 QUERY_EMBEDDINGS_PATH: Final = EVALS_DIR / "query_embeddings.json.gz"
 SERVING_FILE: Final = REPO_ROOT / "serving" / "modal_vllm.py"
@@ -160,7 +161,7 @@ def run_config(
 
 
 def summary(results: Sequence[CaseResult]) -> dict[str, Any]:
-    scored = [r for r in results if r.status != "infra"]
+    scored = [r for r in results if not r.excluded]
     by_category: dict[str, list[int]] = {}
     for result in scored:
         counts = by_category.setdefault(result.category, [0, 0])
@@ -170,7 +171,7 @@ def summary(results: Sequence[CaseResult]) -> dict[str, Any]:
         "cases": len(results),
         "scored": len(scored),
         "passed": sum(r.passed for r in scored),
-        "excluded_infra": len(results) - len(scored),
+        "excluded": len(results) - len(scored),
         "wrong_cards": sum(r.wrong_cards for r in scored),
         "statuses": dict(sorted(Counter(r.status for r in results).items())),
         "by_category": {k: {"passed": v[0], "total": v[1]} for k, v in sorted(by_category.items())},

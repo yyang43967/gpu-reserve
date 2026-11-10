@@ -54,6 +54,10 @@ class Options:
     run_timeout_seconds: float = 600.0
     concurrency: int = 4
     backoff_seconds: Sequence[float] = DEFAULT_BACKOFF_SECONDS
+    # A wall-clock budget for the whole run, e.g. to bound GPU time. Cases still
+    # running or waiting when it runs out are marked `aborted` and left out of the
+    # scores; they say nothing about the model.
+    budget_seconds: float | None = None
 
     @property
     def attempts(self) -> int:
@@ -75,12 +79,18 @@ def eval_settings(settings: Settings, options: Options) -> Settings:
     )
 
 
+ABORTED: Final = "aborted"
+# Statuses that say nothing about the model.
+EXCLUDED: Final = frozenset({Failure.INFRA.value, ABORTED})
+
+
 @dataclass
 class CaseResult:
     id: str
     category: str
     attempts: int
-    # ok: the run finished; timeout or error: the model failed; infra: left out.
+    # ok: the run finished. timeout, step_limit, error: the model failed. infra and
+    # aborted: left out of the scores (see EXCLUDED).
     status: str
     passed: bool
     path: int | None = None
@@ -97,7 +107,15 @@ class CaseResult:
     db_created: list[dict[str, Any]] = field(default_factory=list)
     db_changed: dict[str, dict[str, Any]] = field(default_factory=dict)
     actions: list[str] = field(default_factory=list)
+    # The case ended on a card left open (`leave`), so nothing was written for it.
+    open_card: bool = False
+    # Run again at the end of the run after being left out for infrastructure errors.
+    rerun: bool = False
     seconds: float = 0.0
+
+    @property
+    def excluded(self) -> bool:
+        return self.status in EXCLUDED
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -137,6 +155,7 @@ def _result(
         db_created=created,
         db_changed=changed,
         actions=seen.actions,
+        open_card=transcript.open_card,
         seconds=seconds,
     )
 
@@ -149,6 +168,9 @@ class CaseRunner:
     embedder: Embedder
     options: Options
     sleep: Callable[[float], Any] = asyncio.sleep
+    # Builds a model for one case once its names are resolved. Dataset validation uses
+    # it to replay each case's expected calls with a scripted model.
+    model_for: Callable[[Case, Names], BaseChatModel] | None = None
 
     def __post_init__(self) -> None:
         self._next_index = 0
@@ -194,11 +216,13 @@ class CaseRunner:
             user = await user_by_email(session, case.user)
             thread = await threads.create_thread(session, user, None)
             servers = await server_ids(session)
+        known = Names(servers=servers, reservations=_purposes(before))
+        model = self.model if self.model_for is None else self.model_for(case, known)
         recorder = Recorder()
         async with assistant_lifespan(
             settings,
             sessions,
-            chat_model=self.model,
+            chat_model=model,
             embedder=self.embedder,
             clock=lambda: EVAL_NOW,
             callbacks=[recorder],
@@ -211,11 +235,10 @@ class CaseRunner:
                 thread_id=thread.id,
                 sessions=sessions,
                 recorder=recorder,
-                run_timeout_seconds=settings.assistant_run_timeout_seconds,
                 quota_zone=quota_zone,
             )
         after = await reservation_snapshot(sessions)
-        purposes = {row["purpose"]: uuid.UUID(rid) for rid, row in {**before, **after}.items()}
+        purposes = _purposes({**before, **after})
         seen = Observed(
             transcript=transcript,
             before=before,
@@ -229,16 +252,48 @@ class CaseRunner:
         )
 
 
+def _purposes(snapshot: dict[str, dict[str, Any]]) -> dict[str, uuid.UUID]:
+    return {row["purpose"]: uuid.UUID(rid) for rid, row in snapshot.items()}
+
+
+def _aborted(case: Case) -> CaseResult:
+    return CaseResult(
+        id=case.id, category=case.category.value, attempts=0, status=ABORTED, passed=False
+    )
+
+
 async def run_cases(runner: CaseRunner, cases: Sequence[Case]) -> list[CaseResult]:
+    """Every case, `concurrency` at a time, within the budget if one is set. Cases left
+    out for infrastructure errors get one more try at the end, when a rate limit or an
+    outage has had time to pass."""
     gate = asyncio.Semaphore(runner.options.concurrency)
+    loop = asyncio.get_running_loop()
+    budget = runner.options.budget_seconds
+    deadline = None if budget is None else loop.time() + budget
 
     async def one(case: Case) -> CaseResult:
         async with gate:
-            result = await runner.run(case)
+            if deadline is None:
+                result = await runner.run(case)
+            else:
+                left = deadline - loop.time()
+                if left <= 0:
+                    return _aborted(case)
+                try:
+                    result = await asyncio.wait_for(runner.run(case), left)
+                except TimeoutError:
+                    return _aborted(case)
             logger.info("%s %s (%s)", case.id, "pass" if result.passed else "fail", result.status)
             return result
 
-    return list(await asyncio.gather(*(one(case) for case in cases)))
+    results = list(await asyncio.gather(*(one(case) for case in cases)))
+    retry = [i for i, r in enumerate(results) if r.status == Failure.INFRA.value]
+    if retry:
+        again = await asyncio.gather(*(one(cases[i]) for i in retry))
+        for i, result in zip(retry, again, strict=True):
+            result.rerun = True
+            results[i] = result
+    return results
 
 
 async def warm_up(model: BaseChatModel) -> float:

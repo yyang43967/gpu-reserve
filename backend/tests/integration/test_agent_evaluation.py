@@ -96,7 +96,8 @@ def booking_case(gpus: int = 2, **overrides: Any) -> dict[str, Any]:
         "id": "book-explicit-01",
         "category": "booking",
         "user": ADA,
-        "turns": [{"say": f"Book 2 GPUs on {HOST} {START} to {END}", "decisions": ["confirm"]}],
+        "outcome": "Booked after confirmation.",
+        "turns": [{"say": f"Book 2 GPUs on {HOST} {START} to {END}"}],
         "expect": {
             "calls": [
                 {
@@ -105,7 +106,14 @@ def booking_case(gpus: int = 2, **overrides: Any) -> dict[str, Any]:
                 }
             ],
             "forbidden": ["cancel_my_reservation"],
-            "cards": [{"action": "create_reservation", "server": HOST, "gpus": gpus}],
+            "cards": [
+                {
+                    "action": "create_reservation",
+                    "server": HOST,
+                    "gpus": gpus,
+                    "decision": "confirm",
+                }
+            ],
             "db": {
                 "created": [{"user": ADA, "server": HOST, "gpu_count": gpus, "status": "approved"}]
             },
@@ -151,6 +159,7 @@ async def test_an_unplanned_card_is_cancelled(
         "id": "clarify-count-01",
         "category": "clarify",
         "user": ADA,
+        "outcome": "Asks how many GPUs.",
         "turns": [{"say": "Book me some GPUs tomorrow morning"}],
         "expect": {
             "forbidden": ["propose_reservation", "cancel_my_reservation"],
@@ -173,13 +182,13 @@ async def test_a_new_message_supersedes_a_card_left_open(
         id="change-count-01",
         category="multi_turn",
         turns=[
-            {"say": f"Book 2 GPUs on {HOST} {START} to {END}", "decisions": ["leave"]},
-            {"say": "Actually, make it 4 GPUs.", "decisions": ["confirm"]},
+            {"say": f"Book 2 GPUs on {HOST} {START} to {END}"},
+            {"say": "Actually, make it 4 GPUs."},
         ],
     )
     data["expect"]["cards"] = [
-        {"action": "create_reservation", "gpus": 2},
-        {"action": "create_reservation", "gpus": 4},
+        {"action": "create_reservation", "gpus": 2, "decision": "leave"},
+        {"action": "create_reservation", "gpus": 4, "decision": "confirm"},
     ]
     data["expect"]["actions"] = ["superseded", "confirmed"]
     result = await run_one(runner_for(databases, make_settings, booker([2, 4])), data)
@@ -203,8 +212,9 @@ async def test_a_hook_runs_between_the_card_and_the_click(
     data = booking_case(
         id="conflict-taken-01",
         category="conflict",
-        turns=[{"say": "Book it", "decisions": ["confirm"], "before_decision": [taken]}],
+        turns=[{"say": "Book it"}],
     )
+    data["expect"]["cards"][0]["before_decision"] = [taken]
     data["expect"]["errors"] = ["gpu-unavailable"]
     data["expect"]["db"] = {
         "created": [{"user": ALAN, "server": HOST, "gpu_count": 4, "status": "approved"}]
@@ -288,3 +298,107 @@ async def test_hitting_the_run_cap_is_a_timeout(
     result = await run_one(runner, booking_case())
     assert result.status == "timeout"
     assert result.attempts == 1
+
+
+async def test_a_card_left_open_at_the_end_writes_nothing(
+    databases: Databases, make_settings: Callable[..., Settings]
+) -> None:
+    data = booking_case(id="leave-open-01")
+    data["expect"]["cards"][0]["decision"] = "leave"
+    data["expect"]["db"] = {}
+    data["expect"]["actions"] = []
+    result = await run_one(runner_for(databases, make_settings, booker([2])), data)
+    # Scored like any other card: compared with the expected one, and the diff must
+    # show that nothing was written for it.
+    assert result.passed, result.checks
+    assert result.open_card
+    assert result.db_created == []
+    assert [s["ended_with"] for s in result.segments] == ["card"]
+
+
+async def test_the_step_limit_is_a_model_failure(
+    databases: Databases, make_settings: Callable[..., Settings]
+) -> None:
+    def loops(messages: list[BaseMessage]) -> AIMessage:
+        return _call("get_my_quota")
+
+    result = await run_one(runner_for(databases, make_settings, loops), booking_case())
+    assert result.status == "step_limit"
+    assert result.attempts == 1
+    assert not result.excluded
+
+
+async def test_cases_past_the_run_budget_are_aborted_not_failed(
+    databases: Databases, make_settings: Callable[..., Settings]
+) -> None:
+    options = Options(budget_seconds=0.5, concurrency=1, backoff_seconds=(0.0,))
+    settings = eval_settings(make_settings(), options)
+
+    def slow(messages: list[BaseMessage]) -> AIMessage:
+        time.sleep(1.0)
+        return AIMessage("Slow answer.")
+
+    runner = CaseRunner(
+        databases, settings, ScriptedChatModel(responder=slow), FakeEmbedder(), options
+    )
+    cases = [Case.model_validate(booking_case(id=f"book-slow-0{i}")) for i in (1, 2)]
+    results = await run_cases(runner, cases)
+    assert [r.status for r in results] == ["aborted", "aborted"]
+    assert all(r.excluded for r in results)
+
+
+async def test_cases_left_out_for_infrastructure_get_one_more_try_at_the_end(
+    databases: Databases, make_settings: Callable[..., Settings]
+) -> None:
+    fails = {"left": OPTIONS.attempts}
+    book = booker([2])
+
+    def outage(messages: list[BaseMessage]) -> AIMessage:
+        if fails["left"]:
+            fails["left"] -= 1
+            raise Unavailable
+        return book(messages)
+
+    result = await run_one(runner_for(databases, make_settings, outage), booking_case())
+    assert result.passed
+    assert result.rerun
+
+
+async def test_validation_replays_expectations_through_the_services(
+    databases: Databases, make_settings: Callable[..., Settings]
+) -> None:
+    from app.agent.evaluation.oracle import replay_cases
+
+    good = booking_case(id="book-good-01")
+    good["expect"]["calls"][0]["args"].update({"ends_at": END, "purpose": {"contains": "LoRA"}})
+    # Claims the evening booking breaks the peak rule; the rules accept it.
+    wrong = {
+        "id": "peak-wrong-01",
+        "category": "rule_violation",
+        "user": ADA,
+        "outcome": "Refused for peak hours.",
+        "turns": [{"say": "Book 2 GPUs this evening"}],
+        "expect": [
+            {
+                "calls": [
+                    {
+                        "name": "propose_reservation",
+                        "args": {
+                            "server": HOST,
+                            "gpu_count": 2,
+                            "starts_at": START,
+                            "ends_at": END,
+                            "purpose": "Evening run",
+                        },
+                    }
+                ],
+                "errors": ["peak-hours-limit"],
+            },
+            {"forbidden": ["propose_reservation"]},
+        ],
+    }
+    runner = runner_for(databases, make_settings, booker([2]))
+    problems = await replay_cases(runner, [Case.model_validate(good), Case.model_validate(wrong)])
+    assert all(p.startswith("peak-wrong-01 outcome 1:") for p in problems), problems
+    assert any("error:peak-hours-limit" in p for p in problems)
+    assert any("cards" in p for p in problems)

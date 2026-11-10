@@ -2,8 +2,10 @@
 how a failed call failed.
 
 Failures are sorted into three kinds, because they are scored differently:
-- `timeout`: the model did not answer within the request timeout. A slow model is the
-  model's problem, so this counts as a failed case.
+- `timeout`: a model request hit the request timeout, or the case's run hit the
+  assistant's run cap. A slow model is the model's problem, so this counts as a failed
+  case. (`step_limit`, when the model keeps calling tools past the graph's step limit,
+  is decided by the driver and also counts.)
 - `infra`: rate limits, server errors, and lost connections. These say nothing about
   the model; the runner retries the case and leaves it out if they persist.
 - `error`: anything else, such as a request the provider rejected. Counted as failed.
@@ -26,6 +28,8 @@ from app.agent.reasoning import message_model
 
 class Failure(StrEnum):
     TIMEOUT = "timeout"
+    # The run stopped at the graph's step limit: the model kept calling tools.
+    STEP_LIMIT = "step_limit"
     INFRA = "infra"
     ERROR = "error"
 

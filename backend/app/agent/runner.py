@@ -58,6 +58,10 @@ LEASE_RENEW_SECONDS: Final = 30.0
 QUEUE_SIZE: Final = 256
 # How long shutdown waits for runs in flight before cancelling them.
 SHUTDOWN_GRACE_SECONDS: Final = 10.0
+# What the stream says when a run stops at the step limit or the time cap. The
+# evaluation runner tells the two apart by these.
+STEP_LIMIT_MESSAGE: Final = "That took too many steps. Try a narrower request."
+RUN_TIMEOUT_MESSAGE: Final = "The assistant took too long to answer."
 
 _ACTION_BY_TOOL: Final = {
     "propose_reservation": CREATE_RESERVATION,
@@ -231,9 +235,7 @@ class Assistant:
                 await work(stream)
         except GraphRecursionError:
             logger.warning("Assistant run on thread %s hit the recursion limit", thread_id)
-            await stream.emit(
-                sse.event("error", message="That took too many steps. Try a narrower request.")
-            )
+            await stream.emit(sse.event("error", message=STEP_LIMIT_MESSAGE))
         except ModelSwitchMidTurn as exc:
             logger.warning("Assistant run on thread %s stopped: %s", thread_id, exc.detail)
             await stream.emit(
@@ -245,7 +247,7 @@ class Assistant:
             )
         except TimeoutError:
             logger.warning("Assistant run on thread %s timed out", thread_id)
-            await stream.emit(sse.event("error", message="The assistant took too long to answer."))
+            await stream.emit(sse.event("error", message=RUN_TIMEOUT_MESSAGE))
         except Exception:
             logger.exception("Assistant run on thread %s failed", thread_id)
             await stream.emit(

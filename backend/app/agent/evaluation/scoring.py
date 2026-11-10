@@ -21,7 +21,6 @@ from app.agent.evaluation.cases import (
     ExpectedCard,
 )
 from app.agent.evaluation.driver import Card, ToolCall, Transcript
-from app.agent.evaluation.recorder import Failure
 
 Snapshot = dict[str, dict[str, Any]]
 
@@ -299,6 +298,13 @@ def score_path(path: Expectation, seen: Observed) -> tuple[list[Check], list[lis
             asks_about(t.final_answer, path.question_terms),
             lambda: "no question mentioning " + ", ".join(path.question_terms),
         )
+    if path.mentions:
+        final = t.final_answer.casefold()
+        add(
+            "mentions",
+            any(term.casefold() in final for term in path.mentions),
+            lambda: "the answer mentions none of " + ", ".join(path.mentions),
+        )
     if path.must_not_mention:
         text = "\n".join(t.answers).casefold()
         leaked = [s for s in path.must_not_mention if s.casefold() in text]
@@ -317,7 +323,3 @@ def score_case(case: Case, seen: Observed) -> Score:
             best = score
     assert best is not None  # noqa: S101 - a case has at least one expectation
     return best
-
-
-def is_model_failure(failure: Failure | None) -> bool:
-    return failure in (Failure.TIMEOUT, Failure.ERROR)

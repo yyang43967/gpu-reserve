@@ -82,11 +82,6 @@ class Decision(StrEnum):
 
 class Turn(_Strict):
     say: str = Field(min_length=1)
-    # One decision per confirmation card this turn is expected to show, in order.
-    decisions: list[Decision] = Field(default_factory=list)
-    # Run just before the first decision of this turn, e.g. someone else taking the
-    # GPUs between the card and the click.
-    before_decision: list[Setup] = Field(default_factory=list)
 
 
 # --- expectations ---
@@ -96,16 +91,24 @@ class ExpectedCall(_Strict):
     """A tool call that must appear at least once. Each argument is either a value
     (times compare as instants, text without regard to case) or one operator:
     {"contains": text}, {"at_most": value}, {"at_least": value}, {"one_of": [values]}.
-    `server` stands for `server_id`, given as a hostname."""
+    `server` stands for `server_id`, given as a hostname, and `reservation` for
+    `reservation_id`, given as the reservation's purpose. `turn` is the turn the call
+    belongs to; validation replays the calls turn by turn."""
 
     name: str
     args: dict[str, Any] = Field(default_factory=dict)
+    turn: int = Field(default=0, ge=0)
 
 
 class ExpectedCard(_Strict):
-    """A confirmation card. Only the fields given are compared."""
+    """A confirmation card, and how the simulated user answers it. Only the fields
+    given are compared with the card shown."""
 
     action: Literal["create_reservation", "cancel_reservation"]
+    decision: Decision
+    # Run just before the decision, e.g. someone else taking the GPUs between the card
+    # and the click.
+    before_decision: list[Setup] = Field(default_factory=list)
     server: str | None = None
     gpus: int | None = None
     start: AwareDatetime | None = None
@@ -157,6 +160,9 @@ class Expectation(_Strict):
     citations: list[str] = Field(default_factory=list)
     # The final answer must ask a question that mentions one of these terms.
     question_terms: list[str] = Field(default_factory=list)
+    # The final answer must mention at least one of these, e.g. the rule that refused
+    # a booking.
+    mentions: list[str] = Field(default_factory=list)
     # Text that must not appear in any answer: other users' data, injected payloads.
     must_not_mention: list[str] = Field(default_factory=list)
 
@@ -171,6 +177,8 @@ class Case(_Strict):
     id: str = Field(pattern=r"^[a-z0-9]+(-[a-z0-9]+)*$")
     category: Category
     user: str
+    # The expected outcome in plain words, for people reviewing the dataset.
+    outcome: str = Field(min_length=1)
     note: str = ""
     setup: list[Setup] = Field(default_factory=list)
     turns: list[Turn] = Field(min_length=1)
@@ -186,14 +194,33 @@ class Case(_Strict):
         return data
 
     @model_validator(mode="after")
-    def _decisions_match_cards(self) -> "Case":
-        decisions = sum(len(turn.decisions) for turn in self.turns)
+    def _one_plan_for_every_card(self) -> "Case":
+        """Outcomes may expect different cards, but wherever two of them expect a card
+        at the same position, they must answer it the same way: the runner has to
+        decide before it knows which outcome the model is heading for."""
+        for index in range(max(len(path.cards) for path in self.expect)):
+            plans = {
+                (card.decision, tuple(card.before_decision))
+                for path in self.expect
+                if index < len(path.cards)
+                for card in [path.cards[index]]
+            }
+            if len(plans) > 1:
+                raise ValueError(f"outcomes answer card {index + 1} differently")
         for path in self.expect:
-            if len(path.cards) != decisions:
-                raise ValueError(
-                    f"{len(path.cards)} expected cards but {decisions} decisions in the turns"
-                )
+            for call in path.calls:
+                if call.turn >= len(self.turns):
+                    raise ValueError(f"{call.name} is placed in turn {call.turn}, which is missing")
         return self
+
+    def card_plan(self) -> list[tuple[Decision, list[Setup]]]:
+        """How the simulated user answers the n-th card shown. A card past the end of
+        the plan was not expected by any outcome."""
+        plan: list[tuple[Decision, list[Setup]]] = []
+        longest = max(self.expect, key=lambda path: len(path.cards))
+        for card in longest.cards:
+            plan.append((card.decision, list(card.before_decision)))
+        return plan
 
 
 class CaseFileError(ValueError):

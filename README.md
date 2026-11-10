@@ -92,7 +92,8 @@ The agent evaluation runs every case in `evals/agent/cases.jsonl` against the mo
 
 ```bash
 cd backend
-uv run python -m app.agent.evaluation validate        # check the dataset against the seed data
+uv run python -m app.agent.evaluation validate        # replay every case's expectations through the services
+uv run python -m app.agent.evaluation describe        # regenerate evals/agent/cases.md
 uv run python -m app.agent.evaluation run --repeat 2  # two runs of ASSISTANT_MODEL
 ```
 

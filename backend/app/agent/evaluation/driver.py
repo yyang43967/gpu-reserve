@@ -1,11 +1,11 @@
 """Plays one case against an assistant: sends each turn, answers each confirmation card,
 and keeps everything the scorer needs.
 
-Cards are answered from the case's `decisions`. A card the case did not plan for is
-counted and answered with cancel, so the runner never confirms anything a case did not
-ask for. Every card is still confirmed or cancelled as planned when its details differ
-from the expected ones: the scorer records the mismatch, and the database diff shows
-what the confirmation actually wrote.
+The n-th card shown is answered as the case's outcomes plan for their n-th card. A card
+no outcome expects is counted and answered with cancel, so the runner never confirms
+anything a case did not ask for. A planned card is still confirmed or cancelled as
+planned when its details differ from the expected ones: the scorer records the
+mismatch, and the database diff shows what the confirmation actually wrote.
 """
 
 import json
@@ -22,7 +22,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.agent.evaluation.cases import EVAL_NOW, Case, Decision
 from app.agent.evaluation.database import apply_setup
 from app.agent.evaluation.recorder import Failure, Recorder
-from app.agent.runner import Assistant, RunStream
+from app.agent.runner import (
+    RUN_TIMEOUT_MESSAGE,
+    STEP_LIMIT_MESSAGE,
+    Assistant,
+    RunStream,
+)
 
 
 class InfraFailure(RuntimeError):
@@ -70,7 +75,8 @@ class Transcript:
     citations: list[dict[str, Any]] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     tool_calls: list[ToolCall] = field(default_factory=list)
-    unused_decisions: int = 0
+    # The last card was left open (`leave`) and no later turn superseded it.
+    open_card: bool = False
     failure: Failure | None = None
 
     @property
@@ -107,13 +113,11 @@ async def play(
     thread_id: uuid.UUID,
     sessions: async_sessionmaker[AsyncSession],
     recorder: Recorder,
-    run_timeout_seconds: float,
     quota_zone: ZoneInfo,
 ) -> Transcript:
     transcript = Transcript()
+    plan = case.card_plan()
     for index, turn in enumerate(case.turns):
-        decisions = list(turn.decisions)
-        hooks_pending = bool(turn.before_decision)
         kind = "message"
         started = time.perf_counter()
         stream = await assistant.start_message(user_id, thread_id, turn.say)
@@ -133,29 +137,26 @@ async def play(
             transcript.segments.append(Segment(kind, index, seconds, ended))
             if errors:
                 transcript.errors.extend(errors)
-                transcript.failure = _failure(recorder, seconds, run_timeout_seconds)
+                transcript.failure = _failure(recorder, errors[0])
                 if transcript.failure is Failure.INFRA:
                     raise InfraFailure(errors[0])
-                transcript.unused_decisions += len(decisions)
                 transcript.tool_calls = await _trace(assistant, thread_id)
                 return transcript
             if card is None:
                 break
             payload = card["payload"]
-            planned = bool(decisions)
-            decision = decisions.pop(0) if planned else Decision.CANCEL
-            if planned and hooks_pending:
-                await apply_setup(
-                    sessions,
-                    turn.before_decision,
-                    now=EVAL_NOW,
-                    quota_zone=quota_zone,
-                )
-                hooks_pending = False
+            position = len(transcript.cards)
+            planned = position < len(plan)
+            decision, hooks = plan[position] if planned else (Decision.CANCEL, [])
+            if hooks:
+                await apply_setup(sessions, hooks, now=EVAL_NOW, quota_zone=quota_zone)
             transcript.cards.append(
                 Card(index, str(payload.get("action")), dict(payload["summary"]), decision, planned)
             )
             if decision is Decision.LEAVE:
+                # The card stays open. A later turn supersedes it; after the last turn
+                # it is simply left pending, with nothing written.
+                transcript.open_card = index == len(case.turns) - 1
                 break
             kind = "resume"
             started = time.perf_counter()
@@ -163,7 +164,6 @@ async def play(
                 "confirm" if decision is Decision.CONFIRM else "cancel"
             )
             stream = await assistant.start_resume(user_id, thread_id, answer)
-        transcript.unused_decisions += len(decisions)
     transcript.tool_calls = await _trace(assistant, thread_id)
     return transcript
 
@@ -175,12 +175,15 @@ async def _trace(assistant: Assistant, thread_id: uuid.UUID) -> list[ToolCall]:
     return tool_trace(messages)
 
 
-def _failure(recorder: Recorder, seconds: float, run_timeout_seconds: float) -> Failure:
-    """Why a segment ended in an error event. The run cap shows no failed model call;
-    it is recognized by the segment having lasted the whole cap."""
+def _failure(recorder: Recorder, message: str) -> Failure:
+    """Why a segment ended in an error event. A failed model call decides it; otherwise
+    the assistant's own message says whether it hit the step limit or the per-case time
+    cap. Both count against the model."""
     worst = recorder.worst_failure()
     if worst is not None:
         return worst
-    if seconds >= run_timeout_seconds:
+    if message == STEP_LIMIT_MESSAGE:
+        return Failure.STEP_LIMIT
+    if message == RUN_TIMEOUT_MESSAGE:
         return Failure.TIMEOUT
     return Failure.ERROR

@@ -31,10 +31,11 @@ def case(**overrides: Any) -> dict[str, Any]:
         "id": "book-01",
         "category": "booking",
         "user": "ada.lovelace@example.edu",
-        "turns": [{"say": "Book two GPUs", "decisions": ["confirm"]}],
+        "outcome": "Booked after confirmation.",
+        "turns": [{"say": "Book two GPUs"}],
         "expect": {
             "calls": [{"name": "propose_reservation", "args": {"server": "nlp-a100-01"}}],
-            "cards": [{"action": "create_reservation", "gpus": 2}],
+            "cards": [{"action": "create_reservation", "gpus": 2, "decision": "confirm"}],
         },
     }
     data.update(overrides)
@@ -49,9 +50,26 @@ def test_a_single_expectation_becomes_a_list() -> None:
     assert len(parsed.expect) == 1
 
 
-def test_cards_must_match_the_planned_decisions() -> None:
-    with pytest.raises(ValueError, match="1 expected cards but 0 decisions"):
-        Case.model_validate(case(turns=[{"say": "Book two GPUs"}]))
+def test_outcomes_may_differ_in_cards_but_not_in_how_a_card_is_answered() -> None:
+    card = {"action": "create_reservation", "gpus": 2}
+    two = Case.model_validate(
+        case(expect=[{"cards": [{**card, "decision": "confirm"}]}, {"cards": []}])
+    )
+    assert [d for d, _ in two.card_plan()] == ["confirm"]
+    with pytest.raises(ValueError, match="answer card 1 differently"):
+        Case.model_validate(
+            case(
+                expect=[
+                    {"cards": [{**card, "decision": "confirm"}]},
+                    {"cards": [{**card, "decision": "cancel"}]},
+                ]
+            )
+        )
+
+
+def test_a_call_must_be_placed_in_an_existing_turn() -> None:
+    with pytest.raises(ValueError, match="placed in turn 1"):
+        Case.model_validate(case(expect={"calls": [{"name": "get_my_quota", "turn": 1}]}))
 
 
 def test_unknown_fields_are_rejected() -> None:
@@ -81,7 +99,13 @@ def test_dataset_problems_name_unknown_users_servers_tools_and_arguments() -> No
                     {"name": "find_slots", "args": {"user_id": "x"}},
                     {"name": "book_now"},
                 ],
-                "cards": [{"action": "create_reservation", "reservation": "Unknown purpose"}],
+                "cards": [
+                    {
+                        "action": "create_reservation",
+                        "reservation": "Unknown purpose",
+                        "decision": "confirm",
+                    }
+                ],
             },
         )
     )
@@ -107,12 +131,18 @@ def test_reservations_added_by_the_case_are_known() -> None:
                     "purpose": "Tokenizer ablation",
                 }
             ],
-            turns=[{"say": "Cancel my tokenizer booking", "decisions": ["confirm"]}],
+            turns=[{"say": "Cancel my tokenizer booking"}],
             expect={
                 "calls": [
                     {"name": "cancel_my_reservation", "args": {"reservation": "Tokenizer ablation"}}
                 ],
-                "cards": [{"action": "cancel_reservation", "reservation": "Tokenizer ablation"}],
+                "cards": [
+                    {
+                        "action": "cancel_reservation",
+                        "reservation": "Tokenizer ablation",
+                        "decision": "confirm",
+                    }
+                ],
             },
         )
     )
@@ -244,3 +274,164 @@ def status_error(cls: type[Exception], status: int) -> Exception:
 )
 def test_failures_are_classified(error: Exception, kind: Failure) -> None:
     assert classify(error) is kind
+
+
+# --- a case with two acceptable outcomes ---
+
+PEAK_CASE: dict[str, Any] = {
+    "id": "peak-limit-01",
+    "category": "rule_violation",
+    "user": "ada.lovelace@example.edu",
+    "outcome": "Not booked: 16 GPU-hours inside peak time is over the 4 GPU-hour limit.",
+    "turns": [{"say": "Book 4 GPUs on nlp-a100-01 tomorrow 10:00-14:00 for pretraining"}],
+    "expect": [
+        {
+            "calls": [
+                {
+                    "name": "propose_reservation",
+                    "args": {
+                        "server": "nlp-a100-01",
+                        "gpu_count": 4,
+                        "starts_at": f"2026-11-11T10:00:00{NY}",
+                        "ends_at": f"2026-11-11T14:00:00{NY}",
+                        "purpose": {"contains": "pretraining"},
+                    },
+                }
+            ],
+            "errors": ["peak-hours-limit"],
+            "mentions": ["peak"],
+        },
+        {"forbidden": ["propose_reservation"], "mentions": ["peak"]},
+    ],
+}
+SERVER_ID = "00000000-0000-0000-0000-000000000001"
+
+
+def peak_transcript(*, proposed: bool, result: dict[str, Any] | None, answer: str) -> Any:
+    from app.agent.evaluation.driver import ToolCall, Transcript
+
+    calls = []
+    if proposed:
+        args = {
+            "server_id": SERVER_ID,
+            "gpu_count": 4,
+            "starts_at": f"2026-11-11T10:00:00{NY}",
+            "ends_at": f"2026-11-11T14:00:00{NY}",
+            "purpose": "Pretraining run",
+        }
+        calls.append(ToolCall("propose_reservation", args, result))
+    return Transcript(answers=[answer], tool_calls=calls)
+
+
+def score_peak(transcript: Any, cards: list[Card] | None = None) -> Score:
+    import uuid as _uuid
+
+    from app.agent.evaluation.scoring import Observed, score_case
+
+    transcript.cards = cards or []
+    seen = Observed(
+        transcript=transcript,
+        before={},
+        after={},
+        actions=[],
+        names=Names(servers={"nlp-a100-01": _uuid.UUID(SERVER_ID)}, reservations={}),
+    )
+    return score_case(Case.model_validate(PEAK_CASE), seen)
+
+
+REFUSED = {"ok": False, "error": {"type": "peak-hours-limit"}}
+
+
+def test_proposing_and_getting_the_peak_error_passes_the_first_outcome() -> None:
+    score = score_peak(
+        peak_transcript(proposed=True, result=REFUSED, answer="That is over the peak limit.")
+    )
+    assert score.passed
+    assert score.path == 0
+
+
+def test_explaining_without_proposing_passes_the_second_outcome() -> None:
+    score = score_peak(
+        peak_transcript(proposed=False, result=None, answer="Peak time allows 4 GPU-hours.")
+    )
+    assert score.passed
+    assert score.path == 1
+
+
+def test_a_peak_case_fails_without_an_explanation_or_with_a_card() -> None:
+    silent = score_peak(peak_transcript(proposed=True, result=REFUSED, answer="I can't."))
+    assert not silent.passed
+    # A card no outcome expects is a wrong card in every outcome.
+    shown = score_peak(
+        peak_transcript(proposed=True, result={"ok": True}, answer="Please confirm (peak)."),
+        cards=[Card(0, "create_reservation", {"gpus": 4}, "cancel", False)],
+    )
+    assert not shown.passed
+    assert shown.wrong_cards == 1
+
+
+# --- pairing configurations ---
+
+
+def rows(**status_and_pass: tuple[str, bool]) -> list[dict[str, Any]]:
+    return [{"id": i, "status": s, "passed": p} for i, (s, p) in status_and_pass.items()]
+
+
+def test_a_case_passes_a_configuration_only_if_it_passes_every_run() -> None:
+    from app.agent.evaluation.pairing import strict_outcomes
+
+    outcomes = strict_outcomes(
+        [
+            rows(a=("ok", True), b=("ok", True), c=("ok", False), d=("infra", False)),
+            rows(a=("ok", True), b=("ok", False), c=("ok", False), d=("ok", True)),
+        ]
+    )
+    assert outcomes == {"a": True, "b": False, "c": False, "d": None}
+
+
+def test_a_case_left_out_anywhere_is_dropped_from_every_comparison() -> None:
+    from app.agent.evaluation.pairing import common_cases, pair
+
+    configs = {
+        "gpt": {"a": True, "b": False, "c": True},
+        "haiku": {"a": True, "b": True, "c": None},
+        "qwen": {"a": False, "b": True, "c": True},
+    }
+    common = common_cases(configs)
+    assert common.cases == ["a", "b"]
+    assert common.dropped == {"c": ["haiku"]}
+    assert pair(configs["gpt"], configs["qwen"], common.cases).only_a == 1
+    assert pair(configs["gpt"], configs["qwen"], common.cases).only_b == 1
+
+
+# --- the assistant without the evaluation's additions ---
+
+
+def test_an_assistant_built_without_clock_or_callbacks_behaves_as_before() -> None:
+    import inspect
+    import uuid as _uuid
+    from typing import cast
+    from unittest.mock import MagicMock
+
+    from app.agent.context import utc_now
+    from app.agent.runner import Assistant
+    from app.agent.setup import assistant_lifespan
+    from app.core.config import Settings
+
+    assistant = Assistant(
+        cast(Any, None), cast(Any, None), Settings(_env_file=None), embedder=None, tracing=None
+    )
+    ctx = assistant._context(_uuid.uuid4(), _uuid.uuid4())
+    assert ctx.clock is utc_now
+    assert "callbacks" not in assistant._config(ctx, "message")
+
+    tracing = MagicMock()
+    traced = Assistant(
+        cast(Any, None), cast(Any, None), Settings(_env_file=None), embedder=None, tracing=tracing
+    )
+    callbacks = traced._config(ctx, "message")["callbacks"]
+    assert callbacks == [tracing.handler.return_value]
+
+    defaults = inspect.signature(assistant_lifespan).parameters
+    assert defaults["clock"].default is utc_now
+    assert tuple(defaults["callbacks"].default) == ()
