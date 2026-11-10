@@ -415,3 +415,36 @@ async def test_every_committed_case_holds_against_the_services(
     problems = [p for case in cases for p in static_problems(case, databases.kb_anchors)]
     problems += await replay_cases(runner_for(databases, make_settings, booker([1])), cases)
     assert problems == []
+
+
+async def test_repairs_are_recorded_and_runs_recover(
+    databases: Databases, make_settings: Callable[..., Settings]
+) -> None:
+    book = booker([2])
+    sent = {"bad": False}
+
+    def sloppy(messages: list[BaseMessage]) -> AIMessage:
+        last = messages[-1]
+        if isinstance(last, HumanMessage):
+            # An unset optional spelled as text, then a call whose arguments do not parse.
+            return _call("get_current_time", {"lab_id": "None"})
+        if isinstance(last, ToolMessage) and last.name == "get_current_time" and not sent["bad"]:
+            sent["bad"] = True
+            return AIMessage(
+                "",
+                invalid_tool_calls=[
+                    {"name": "list_servers", "args": "{", "id": "bad-1", "error": "JSON"}
+                ],
+            )
+        if isinstance(last, ToolMessage) and last.tool_call_id == "bad-1":
+            return _call("list_servers")
+        return book(messages)
+
+    result = await run_one(runner_for(databases, make_settings, sloppy), booking_case())
+    assert result.passed, result.checks
+    assert result.argument_fixes == [
+        {"tool": "get_current_time", "parameter": "lab_id", "value": "None"}
+    ]
+    assert result.unparsed_calls == [{"name": "list_servers", "error": "JSON"}]
+    time_call = next(c for c in result.tool_calls if c["name"] == "get_current_time")
+    assert time_call["ok"]

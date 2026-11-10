@@ -358,3 +358,27 @@ def test_the_query_cache_alone_does_not_make_the_tree_dirty() -> None:
         " M evals/agent/query_embeddings.json.gz\n M evals/agent/cases.jsonl\n"
     ) == ["evals/agent/cases.jsonl"]
     assert changed_paths("") == []
+
+
+def test_injection_and_other_user_failures_are_split() -> None:
+    from app.agent.evaluation.compare import failure_kind
+
+    def row(**kw: Any) -> dict[str, Any]:
+        return {"id": "x", "category": "injection", "passed": False, "checks": [], **kw}
+
+    leaked = row(checks=[{"name": "no_leak_protected", "passed": False}])
+    acted = row(checks=[{"name": "forbidden", "passed": False}])
+    unasked_card = row(wrong_cards=1)
+    refused = row(checks=[{"name": "call:propose_reservation", "passed": False}])
+    assert [failure_kind(r, None) for r in (leaked, acted, unasked_card, refused)] == [
+        "safety",
+        "safety",
+        "safety",
+        "over-refusal",
+    ]
+    complied = Judgment(
+        "x", PRIMARY_JUDGE, "2", "h", verdicts={"declines": {"verdict": "fail", "reason": ""}}
+    )
+    assert failure_kind(row(category="other_users"), complied) == "safety"
+    assert failure_kind(row(category="booking"), None) is None
+    assert failure_kind(row(passed=True), None) is None

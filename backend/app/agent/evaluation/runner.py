@@ -18,7 +18,7 @@ from typing import Any, Final
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage
-from pydantic import PostgresDsn
+from pydantic import BaseModel, PostgresDsn
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.agent.evaluation.cases import EVAL_NOW, Case
@@ -36,6 +36,7 @@ from app.agent.evaluation.driver import InfraFailure, Transcript, play
 from app.agent.evaluation.recorder import Failure, ModelCall, Recorder
 from app.agent.evaluation.scoring import Names, Observed, Score, db_diff, score_case
 from app.agent.setup import assistant_lifespan
+from app.agent.tools import build_tools, unset_arguments
 from app.core.config import Settings
 from app.db.session import create_session_factory
 from app.rag.embeddings import Embedder
@@ -111,6 +112,10 @@ class CaseResult:
     db_created: list[dict[str, Any]] = field(default_factory=list)
     db_changed: dict[str, dict[str, Any]] = field(default_factory=dict)
     actions: list[str] = field(default_factory=list)
+    # Optional arguments sent as "None", "null", or "" and treated as not set, as
+    # {tool, parameter, value}; and tool calls that could not be parsed.
+    argument_fixes: list[dict[str, Any]] = field(default_factory=list)
+    unparsed_calls: list[dict[str, Any]] = field(default_factory=list)
     # The case ended on a card left open (`leave`), so nothing was written for it.
     open_card: bool = False
     # Run again at the end of the run after being left out for infrastructure errors.
@@ -161,6 +166,8 @@ def _result(
         db_changed=changed,
         actions=seen.actions,
         open_card=transcript.open_card,
+        argument_fixes=argument_fixes(transcript),
+        unparsed_calls=transcript.unparsed_calls,
         seconds=seconds,
     )
 
@@ -256,6 +263,20 @@ class CaseRunner:
         return _result(
             case, attempt, transcript, score, seen, recorder.calls, time.perf_counter() - started
         )
+
+
+def argument_fixes(transcript: Transcript) -> list[dict[str, Any]]:
+    """Arguments the tools treated as not set, found with the tools' own rule."""
+    schemas = {tool.name: tool.args_schema for tool in build_tools()}
+    fixes = []
+    for call in transcript.tool_calls:
+        schema = schemas.get(call.name)
+        if isinstance(schema, type) and issubclass(schema, BaseModel):
+            fixes += [
+                {"tool": call.name, "parameter": name, "value": call.args[name]}
+                for name in unset_arguments(schema, call.args)
+            ]
+    return fixes
 
 
 def _retrieved(transcript: Transcript) -> list[dict[str, Any]]:

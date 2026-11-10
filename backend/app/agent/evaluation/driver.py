@@ -75,6 +75,8 @@ class Transcript:
     citations: list[dict[str, Any]] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     tool_calls: list[ToolCall] = field(default_factory=list)
+    # Tool calls whose arguments could not be parsed, as {name, error}.
+    unparsed_calls: list[dict[str, Any]] = field(default_factory=list)
     # The last card was left open (`leave`) and no later turn superseded it.
     open_card: bool = False
     failure: Failure | None = None
@@ -140,7 +142,9 @@ async def play(
                 transcript.failure = _failure(recorder, errors[0])
                 if transcript.failure is Failure.INFRA:
                     raise InfraFailure(errors[0])
-                transcript.tool_calls = await _trace(assistant, thread_id)
+                transcript.tool_calls, transcript.unparsed_calls = await _trace(
+                    assistant, thread_id
+                )
                 return transcript
             if card is None:
                 break
@@ -164,15 +168,26 @@ async def play(
                 "confirm" if decision is Decision.CONFIRM else "cancel"
             )
             stream = await assistant.start_resume(user_id, thread_id, answer)
-    transcript.tool_calls = await _trace(assistant, thread_id)
+    transcript.tool_calls, transcript.unparsed_calls = await _trace(assistant, thread_id)
     return transcript
 
 
-async def _trace(assistant: Assistant, thread_id: uuid.UUID) -> list[ToolCall]:
+def unparsed_calls(messages: list[BaseMessage]) -> list[dict[str, Any]]:
+    return [
+        {"name": call.get("name"), "error": call.get("error")}
+        for message in messages
+        if isinstance(message, AIMessage)
+        for call in message.invalid_tool_calls
+    ]
+
+
+async def _trace(
+    assistant: Assistant, thread_id: uuid.UUID
+) -> tuple[list[ToolCall], list[dict[str, Any]]]:
     config: RunnableConfig = {"configurable": {"thread_id": str(thread_id)}}
     state = await assistant.graph.aget_state(config)
     messages: list[BaseMessage] = state.values.get("messages", []) if state.values else []
-    return tool_trace(messages)
+    return tool_trace(messages), unparsed_calls(messages)
 
 
 def _failure(recorder: Recorder, message: str) -> Failure:

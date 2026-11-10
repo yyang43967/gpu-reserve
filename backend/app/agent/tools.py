@@ -27,7 +27,15 @@ from langchain_core.tools import BaseTool, InjectedToolArg, StructuredTool
 from langgraph.errors import GraphBubbleUp
 from langgraph.prebuilt import ToolRuntime
 from langgraph.types import Command, interrupt
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, SkipValidation, ValidationError
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    Field,
+    SkipValidation,
+    ValidationError,
+    model_validator,
+)
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -75,10 +83,40 @@ _COMPARED: Final = {
 Runtime = ToolRuntime[AgentContext, dict[str, Any]]
 
 
+# How models spell "not set" for an optional argument besides leaving it out: JSON null
+# arrives as None, but some models write Python's None or null as text, or "".
+UNSET_SPELLINGS: Final = frozenset({"None", "null", ""})
+
+
+def unset_arguments(schema: type[BaseModel], args: dict[str, Any]) -> list[str]:
+    """Declared arguments whose value spells "not set" and whose field allows None.
+    Undeclared arguments are never included: they still fail validation."""
+    return [
+        name
+        for name, value in args.items()
+        if isinstance(value, str)
+        and value in UNSET_SPELLINGS
+        and name in schema.model_fields
+        and schema.model_fields[name].default is None
+        and not schema.model_fields[name].is_required()
+    ]
+
+
 class _Args(BaseModel):
     model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
     # Filled by LangGraph and hidden from the model's schema.
     runtime: Annotated[SkipValidation[Any], InjectedToolArg] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _drop_unset(cls, data: Any) -> Any:
+        """An optional argument sent as "None", "null", or "" means "not set", the same
+        as leaving it out. The model's message is not changed; only the arguments the
+        tool receives are."""
+        if not isinstance(data, dict):
+            return data
+        unset = set(unset_arguments(cls, data))
+        return {k: v for k, v in data.items() if k not in unset} if unset else data
 
 
 # --- result helpers ---
