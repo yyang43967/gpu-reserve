@@ -349,6 +349,17 @@ class AssistantUnavailable(DomainError):
     title = "The assistant is not available"
 
 
+class ModelSwitchMidTurn(DomainError):
+    """The model changed in the middle of a tool loop. A provider may require its own
+    reasoning on the assistant message whose calls it is continuing (Anthropic does), and
+    another model's reasoning cannot stand in for it, so a switch is only allowed where a
+    new user message starts a turn."""
+
+    kind = ErrorKind.CONFLICT
+    type_slug = "model-switch-mid-turn"
+    title = "The model changed in the middle of a step"
+
+
 class PolicySearchUnavailable(DomainError):
     kind = ErrorKind.UNAVAILABLE
     type_slug = "policy-search-unavailable"
