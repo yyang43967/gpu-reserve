@@ -99,8 +99,8 @@ def render(cases: Sequence[Case]) -> str:
         f"{len(cases)} cases, {judged} also judged: "
         + ", ".join(f"{k} {v}" for k, v in sorted(counts.items())),
         "",
-        "| Id | Category | User says | Expected | Checks |",
-        "|---|---|---|---|---|",
+        "| Id | Category | User | User says | Expected | Checks |",
+        "|---|---|---|---|---|---|",
     ]
     for case in cases:
         said = " / ".join(f"“{turn.say}”" for turn in case.turns)
@@ -113,7 +113,8 @@ def render(cases: Sequence[Case]) -> str:
         if case.judge is not None:
             checks += "; judged: " + ", ".join(case.judge.criteria)
         lines.append(
-            f"| {case.id} | {case.category.value} | {_cell(said)} | {_cell(case.outcome)} "
+            f"| {case.id} | {case.category.value} | {case.user.split('@')[0]} | {_cell(said)} "
+            f"| {_cell(case.outcome)} "
             f"| {_cell(checks)} |"
         )
     return "\n".join(lines) + "\n"

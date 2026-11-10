@@ -435,3 +435,23 @@ def test_an_assistant_built_without_clock_or_callbacks_behaves_as_before() -> No
     defaults = inspect.signature(assistant_lifespan).parameters
     assert defaults["clock"].default is utc_now
     assert tuple(defaults["callbacks"].default) == ()
+
+
+# --- the committed dataset ---
+
+
+def test_the_dataset_loads_and_names_only_seeded_things() -> None:
+    from app.agent.evaluation.record import CASES_PATH
+
+    cases = load_cases(CASES_PATH)
+    assert len(cases) >= 50
+    assert dataset_problems(cases) == []
+
+
+def test_cases_md_is_generated_from_the_dataset() -> None:
+    from app.agent.evaluation.describe import render
+    from app.agent.evaluation.record import CASES_MD_PATH, CASES_PATH
+
+    assert CASES_MD_PATH.read_text(encoding="utf-8") == render(load_cases(CASES_PATH)), (
+        "evals/agent/cases.md is stale: run `python -m app.agent.evaluation describe`"
+    )

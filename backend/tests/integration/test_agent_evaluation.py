@@ -402,3 +402,17 @@ async def test_validation_replays_expectations_through_the_services(
     assert all(p.startswith("peak-wrong-01 outcome 1:") for p in problems), problems
     assert any("error:peak-hours-limit" in p for p in problems)
     assert any("cards" in p for p in problems)
+
+
+async def test_every_committed_case_holds_against_the_services(
+    databases: Databases, make_settings: Callable[..., Settings]
+) -> None:
+    from app.agent.evaluation.cases import load_cases
+    from app.agent.evaluation.oracle import replay_cases, static_problems
+    from app.agent.evaluation.record import CASES_PATH
+
+    cases = load_cases(CASES_PATH)
+    settings = make_settings()
+    problems = [p for case in cases for p in static_problems(case, settings.kb_dir)]
+    problems += await replay_cases(runner_for(databases, make_settings, booker([1])), cases)
+    assert problems == []

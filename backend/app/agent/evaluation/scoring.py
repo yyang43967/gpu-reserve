@@ -105,13 +105,22 @@ def matches(expected: Any, actual: Any) -> bool:
     return equal(expected, actual)
 
 
+def _named(value: Any, ids: dict[str, uuid.UUID]) -> Any:
+    """An expected hostname or purpose as an id. With an operator, such as
+    {"contains": "LoRA"} for a reservation the model named itself, every id whose name
+    satisfies it is accepted."""
+    if isinstance(value, dict):
+        return {"one_of": [str(i) for name, i in ids.items() if matches(value, name)]}
+    return str(ids.get(value, value))
+
+
 def _call_args(call: ExpectedCall, names: Names) -> dict[str, Any]:
     args: dict[str, Any] = {}
     for key, value in call.args.items():
         if key == "server":
-            args["server_id"] = str(names.servers.get(value, value))
+            args["server_id"] = _named(value, names.servers)
         elif key == "reservation":
-            args["reservation_id"] = str(names.reservations.get(value, value))
+            args["reservation_id"] = _named(value, names.reservations)
         else:
             args[key] = value
     return args

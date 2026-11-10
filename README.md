@@ -88,7 +88,7 @@ Admins manage accounts, labs, and servers under `/admin` in the web app.
 
 ### Assistant evaluation
 
-The agent evaluation runs every case in `evals/agent/cases.jsonl` against the model in `ASSISTANT_MODEL`. Each case gets its own copy of a template database (migrated, seeded, and holding the knowledge base), with the clock fixed so relative dates mean the same day in every run. The database role in `DATABASE_URL` must be allowed to create databases; the Compose Postgres user is.
+The agent evaluation runs every case in `evals/agent/cases.jsonl` (readable as `evals/agent/cases.md`) against the model in `ASSISTANT_MODEL`. Each case gets its own copy of a template database (migrated, seeded, and holding the knowledge base), with the clock fixed so relative dates mean the same day in every run. The database role in `DATABASE_URL` must be allowed to create databases; the Compose Postgres user is.
 
 ```bash
 cd backend

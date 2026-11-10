@@ -75,8 +75,8 @@ def dataset_problems(cases: Sequence[Case]) -> list[str]:
         ops = [*case.setup, *hooks]
         known = seeded | {op.purpose for op in ops if isinstance(op, Reserve)}
 
-        def need(kind: str, value: str | None, pool: set[str], case: Case = case) -> None:
-            if value is not None and value not in pool:
+        def need(kind: str, value: object, pool: set[str], case: Case = case) -> None:
+            if isinstance(value, str) and value not in pool:
                 problems.append(f"{case.id}: unknown {kind} {value!r}")
 
         need("user", case.user, users)
