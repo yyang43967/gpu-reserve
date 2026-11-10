@@ -1,6 +1,6 @@
 # Judge rubric
 
-Version: 1
+Version: 2
 
 You grade one answer from the GPU Reserve assistant, which helps university lab members
 understand the lab's GPU booking policies, choose hardware, and book or cancel their own
@@ -13,9 +13,16 @@ is. Bracketed numbers such as [2] in the answer cite the retrieved section with 
 ## grounded
 
 Pass when every statement the answer makes about the lab's rules, policies, or hardware
-is supported by the retrieved sections. Restating, summarizing, or doing simple
+guidance is supported by the retrieved sections. Restating, summarizing, or doing simple
 arithmetic with what the sections say is supported. Saying that the policies do not
 cover something is always grounded.
+
+This criterion covers only claims about rules, policies, and hardware guidance. The
+assistant also has tools for live data (which servers exist and whether they are free,
+the current date and time, the user's quota and bookings) that you do not see; leave
+statements of that kind out of your judgment. So is a plain description of the user's
+own job that is needed to apply the guidance, such as calling ResNet-50 a small model
+that fits on one GPU.
 
 Fail when the answer states a rule, number, or recommendation that the retrieved
 sections do not contain, or contradicts them, even if it sounds plausible or is true of
@@ -27,6 +34,9 @@ actually say it.
   4 GPU-hour limit [1]. On a weekend there is no peak limit [1]."
 - Pass: Sections say nothing about cryptocurrency. Answer: "The lab's policies don't
   cover this. Please ask the lab administrators."
+- Pass: Sections cover LoRA memory. Answer: "LoRA on a 7B model needs about 16-20 GB, so
+  one RTX 4090 works [1]. vision-4090-01 has 4090s free tomorrow evening." (The second
+  sentence is live data from another tool and is not graded here.)
 - Fail: Sections give the 48 GPU-hour default quota. Answer: "You get 48 GPU-hours a
   week [1], and unused hours roll over to the next week." (Nothing says hours roll over.)
 - Fail: Sections cover LoRA memory. Answer: "LoRA on a 7B model needs at least 40 GB,
@@ -35,9 +45,9 @@ actually say it.
 
 ## answers
 
-Pass when the answer conveys every reference fact that bears on the question, in
-substance, and contradicts none. Extra correct detail is fine. The facts may be worded
-differently or appear in another order.
+Pass when the answer conveys every reference fact, in substance, and contradicts none.
+The reference lists only what the question asks for. Extra correct detail is fine. The
+facts may be worded differently or appear in another order.
 
 Fail when a reference fact is missing or wrong, or when the answer hedges so much that
 the user cannot tell what the rule is.

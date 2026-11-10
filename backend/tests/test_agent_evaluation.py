@@ -526,3 +526,35 @@ def test_citation_anchors_come_from_the_ingested_chunks() -> None:
     assert static_problems(cited, anchors) == [
         "book-01 outcome 1: no section 'nowhere' in kb_chunks"
     ]
+
+
+@pytest.mark.parametrize(
+    ("answer", "terms", "asked"),
+    [
+        # Answers from the pilot runs that ask for the missing detail without a "?".
+        (
+            "I still need the booking times:\n- start time\n- end time\n\n"
+            "Please send both in the lab's local time.",
+            ["time", "start"],
+            True,
+        ),
+        (
+            "To book 2 GPUs for your LoRA fine-tune, I need:\n\n- Start date and time\n"
+            "- End date and time",
+            ["date", "time"],
+            True,
+        ),
+        ("Please choose the server and I'll try to book 2 GPUs.", ["server"], True),
+        ("Tell me the day and time next week, and I'll check.", ["day"], True),
+        (
+            "You have two:\n- DPO run\n- SD run\n\nWhich one do you want to cancel?",
+            ["which one"],
+            True,
+        ),
+        # Statements that are not requests, even when a term appears.
+        ("I booked the start time you asked for.", ["start"], False),
+        ("The server is nlp-l40s-01. Anything else?", ["server"], False),
+    ],
+)
+def test_requests_without_a_question_mark_count(answer: str, terms: list[str], asked: bool) -> None:
+    assert asks_about(answer, terms) is asked

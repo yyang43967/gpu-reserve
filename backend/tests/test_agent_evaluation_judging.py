@@ -71,7 +71,7 @@ def test_percentile_interpolates() -> None:
 
 def test_the_rubric_has_a_version_and_covers_every_criterion_in_use() -> None:
     rubric = Rubric.load(RUBRIC_PATH)
-    assert rubric.version == "1"
+    assert rubric.version == "2"
     assert len(rubric.sha256) == 64
     used = {c for case in load_cases(CASES_PATH) if case.judge for c in case.judge.criteria}
     assert used == {"grounded", "answers", "declines"}
@@ -81,7 +81,7 @@ def test_the_rubric_has_a_version_and_covers_every_criterion_in_use() -> None:
 
 def test_judged_cases() -> None:
     judged = [case for case in load_cases(CASES_PATH) if case.judge is not None]
-    assert len(judged) == 17
+    assert len(judged) == 18
     assert all(case.judge and case.judge.reference for case in judged)
 
 

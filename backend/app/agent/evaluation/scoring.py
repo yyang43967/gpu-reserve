@@ -10,7 +10,7 @@ import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any
+from typing import Any, Final
 
 from app.agent.evaluation.cases import (
     Case,
@@ -226,12 +226,53 @@ def check_db(
 
 # --- text ---
 
-_QUESTION = re.compile(r"[^.!?\n]*\?")
+_SENTENCE = re.compile(r"[^.!?\n]*[.!?]?")
+# Ways of asking for a detail without a question mark: "Please send the start time",
+# "Tell me the day", "I still need: - start time".
+_REQUEST_MARKERS: Final = (
+    "please send",
+    "please tell",
+    "please choose",
+    "please pick",
+    "please provide",
+    "please share",
+    "please confirm",
+    "please let me know",
+    "tell me",
+    "let me know",
+    "send me",
+    "i need",
+    "i still need",
+)
+_BULLET = re.compile(r"^\s*(?:[-*•]|\d+[.)])\s+")
+
+
+def requests(text: str) -> list[str]:
+    """The parts of an answer that ask the user for something: sentences ending in a
+    question mark or containing a request phrase. A request line that ends with a colon
+    also takes the list right after it ("I need: - start time - end time")."""
+    found: list[str] = []
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        for sentence in _SENTENCE.findall(line):
+            lowered = sentence.casefold().strip()
+            if lowered and (
+                lowered.endswith("?") or any(marker in lowered for marker in _REQUEST_MARKERS)
+            ):
+                found.append(lowered)
+        if line.rstrip().endswith(":") and found and found[-1] in line.casefold():
+            items = []
+            for following in lines[i + 1 :]:
+                if _BULLET.match(following):
+                    items.append(following.casefold())
+                elif following.strip():
+                    break
+            found[-1] = " ".join([found[-1], *items])
+    return found
 
 
 def asks_about(text: str, terms: Sequence[str]) -> bool:
-    questions = [q.casefold() for q in _QUESTION.findall(text)]
-    return any(term.casefold() in q for q in questions for term in terms)
+    return any(term.casefold() in request for request in requests(text) for term in terms)
 
 
 def cites(citations: Sequence[dict[str, Any]], wanted: Sequence[str]) -> bool:
