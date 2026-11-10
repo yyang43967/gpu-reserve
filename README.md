@@ -104,6 +104,29 @@ uv run python -m app.agent.evaluation compare ../evals/agent/runs/<run>...    # 
 
 `run` needs the model's API key (or `VLLM_BASE_URL` and `VLLM_API_KEY`), and `OPENAI_API_KEY` for policy-search queries that are not yet in `evals/agent/query_embeddings.json.gz`. It refuses a working tree with uncommitted changes unless given `--allow-dirty`, which the run records. The query embedding cache is the one exception: runs add to it, each run records its hash, and it is committed after the last run of a series. Each run writes `evals/agent/runs/<run id>/run.json` (the full configuration) and `cases.jsonl.gz` (one row per case). `judge` needs both `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` and adds `judgments.jsonl.gz` to each run; `compare` reads the runs, verdicts, and hand labels and writes `evals/agent/results/<date>.md`.
 
+## Results
+
+The assistant was evaluated on 63 cases (bookings, rule violations, conflicts, cancellations, clarifying questions, slot search, policy and hardware questions, out-of-scope requests, other users' data, prompt injection, and changes of mind), two runs per configuration from one frozen commit. A case passes a configuration only if it passed both runs (strict). Detail: [evals/agent/results/2026-11-10.md](evals/agent/results/2026-11-10.md).
+
+| Configuration | Strict | Runs 1, 2 | Wrong cards (runs 1, 2) | Turn p50 / p95 | Cost per run |
+|---|---|---|---|---|---|
+| claude-haiku-5-5, effort low | **58/63 (92%)** | 59, 61 | 0, 0 | 2.7 / 8.1 s | $0.05–0.07 |
+| gpt-5.4-mini, effort low | 50/63 (79%) | 55, 54 | 0, 2 | 2.9 / 7.4 s | $0.24–0.25 |
+| Qwen3.6-35B-A3B, thinking on (vLLM, L40S) | 48/63 (76%) | 54, 53 | 1, 0 | 9.4 / 36.0 s | $0.16–0.18 GPU |
+| Qwen3.6-35B-A3B, thinking off (vLLM, L40S) | 23/63 (37%) | 33, 28 | 1, 5 | 3.0 / 10.0 s | $0.06 GPU |
+
+- **Pairwise** (exact McNemar on strict outcomes, Holm-corrected over 6 pairs): Haiku beats gpt-5.4-mini (9 vs 1 disagreeing cases, Holm p = 0.043) and Qwen thinking on (12 vs 2, p = 0.039); Qwen thinking off is worse than every other configuration (p < 0.001); Qwen thinking on vs gpt-5.4-mini shows no significant difference (8 vs 10, p = 0.815). Every conclusion is the same when the second judge decides the judged cases.
+- **Safety:** 0 safety failures on injection and other users' data in every run. Wrong cards (a confirmation card that did not match the request, or one nobody asked for) are in the table; every such card was answered as planned or cancelled, and the database diff shows what it wrote.
+- **Cost of the whole final evaluation:** OpenAI $0.49, Anthropic $0.12, Modal GPU about $0.60 for one 18.5-minute deploy (including a 259 s cold start), judging $0.27.
+
+### Limitations
+
+- **The checkers were revised against the gpt-5.4-mini and Haiku pilot answers.** Mention lists, question phrasing, and two rubric points were fixed after reading their pilot transcripts, so for those two models the checks are partly in-sample; for Qwen they are out-of-sample.
+- **The argument normalization fired only for Qwen.** Optional arguments sent as "None", "null", or "" were treated as not set 66 and 52 times (thinking on) and 14 and 6 times (thinking off), and never for the hosted models. Qwen's scores therefore include that repair; in the pilot before it, 29 of 63 thinking-on cases ran out of steps.
+- **Hand labels cover hosted answers only.** The primary judge agreed with blind hand labels on 55 of 60 verdicts, all on gpt-5.4-mini and Haiku answers; no Qwen answer was labeled.
+- **Low reasoning effort only** for the hosted models; Qwen was run with thinking on and off.
+- **Small sample.** With 63 cases, only disagreeing cases carry information, and the strictest Holm threshold needs at least an 8-0 split. The Haiku-vs-gpt-5.4-mini result (Holm p = 0.043) sits just under the line and is fragile; it also partly reflects consistency, since under the strict rule a case that passes one run and fails the other counts as failed, and gpt-5.4-mini's two runs disagreed on 9 cases against Haiku's 4.
+
 ## Repository layout
 
 | Path | Contents |
