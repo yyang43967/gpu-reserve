@@ -2,15 +2,20 @@
 write path, the read/commit race, and Redis outages."""
 
 import asyncio
+import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from datetime import UTC, datetime, timedelta
+from typing import NoReturn
 
 import pytest
 from httpx import AsyncClient
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
+from app.core.config import Settings
+from app.core.security import create_access_token
 from app.db.session import create_session_factory
 from app.models import Reservation, Server, User, UserRole
 from app.services import jobs, reservations, servers
@@ -520,3 +525,105 @@ async def test_a_booking_shows_in_availability_read_just_before_it(
     )
     assert booked.status_code == 201, booked.text
     assert await free() == [1]
+
+
+# --- the increment after a commit fails open ---
+
+
+@asynccontextmanager
+async def silent_redis() -> AsyncIterator[str]:
+    """A TCP server that accepts connections and never answers, like a hung Redis.
+    Yields its redis:// URL."""
+    held: list[asyncio.StreamWriter] = []
+
+    async def accept(_reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        held.append(writer)
+
+    server = await asyncio.start_server(accept, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    try:
+        yield f"redis://127.0.0.1:{port}/0"
+    finally:
+        for writer in held:
+            writer.close()
+        server.close()
+        await server.wait_closed()
+
+
+async def book_through_the_api(
+    make_settings: Callable[..., Settings],
+    client_for: Callable[[Settings], AbstractAsyncContextManager[AsyncClient]],
+    db_session: AsyncSession,
+    redis_url: str,
+) -> float:
+    """Book through an app whose Redis is at `redis_url`; check that the booking was
+    answered with 201 and committed, and return how long the request took."""
+    settings = make_settings(redis_url=redis_url)
+    user = await add_user(db_session, "ada@example.edu")
+    target = await add_server(db_session, await add_lab(db_session), gpu_count=2)
+    token, _ = create_access_token(
+        user.id, secret=settings.jwt_secret.get_secret_value(), ttl=timedelta(minutes=15)
+    )
+    start = next_saturday(datetime.now(UTC))
+
+    async with client_for(settings) as client:
+        began = time.monotonic()
+        response = await client.post(
+            "/api/v1/reservations",
+            json=booking_body(target.id, start, hours=1),
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        elapsed = time.monotonic() - began
+
+    assert response.status_code == 201, response.text
+    stored = await db_session.get(Reservation, uuid.UUID(response.json()["id"]))
+    assert stored is not None and stored.server_id == target.id
+    return elapsed
+
+
+async def test_a_booking_is_created_when_redis_refuses_connections(
+    make_settings: Callable[..., Settings],
+    client_for: Callable[[Settings], AbstractAsyncContextManager[AsyncClient]],
+    db_session: AsyncSession,
+) -> None:
+    await book_through_the_api(
+        make_settings, client_for, db_session, f"redis://{UNREACHABLE_HOST}/0"
+    )
+
+
+async def test_a_booking_is_created_when_redis_hangs(
+    make_settings: Callable[..., Settings],
+    client_for: Callable[[Settings], AbstractAsyncContextManager[AsyncClient]],
+    db_session: AsyncSession,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    async with silent_redis() as url:
+        elapsed = await book_through_the_api(make_settings, client_for, db_session, url)
+
+    # Bounded by the invalidation timeout (0.15 s), not by Redis: without the limit the
+    # request would wait forever. A fixed bound, so raising the timeout fails the test.
+    assert elapsed < 1.0
+    assert "Could not invalidate cached availability" in caplog.text
+
+
+class ExplodingRedis:
+    """Fails in a way no Redis client error describes."""
+
+    def pipeline(self, **_: object) -> NoReturn:
+        raise RuntimeError("unexpected")
+
+
+async def test_an_unexpected_error_after_the_commit_is_logged_not_raised(
+    job_engine: AsyncEngine,
+    student: User,
+    server: Server,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    cache = AvailabilityCache(ExplodingRedis(), ttl_seconds=TTL)  # type: ignore[arg-type]
+    exploding = create_session_factory(job_engine, availability_cache=cache)
+
+    reservation = await book(exploding, student, server)
+
+    async with exploding() as session:
+        assert await session.get(Reservation, reservation.id) is not None
+    assert "RuntimeError: unexpected" in caplog.text

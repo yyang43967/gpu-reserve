@@ -64,6 +64,10 @@ DAY: Final = timedelta(days=1)
 # A slow Redis must not make availability slower than the database; past this, the
 # cache gives up for the request.
 REDIS_TIMEOUT_SECONDS: Final = 0.5
+# The increment runs inside commit(), after the data is committed, so it holds up the
+# response of every write. It gets a tighter limit than reads; if Redis misses it, the
+# TTL bounds how long entries stay stale.
+INVALIDATION_TIMEOUT_SECONDS: Final = 0.15
 _REDIS_ERRORS: Final = (RedisError, OSError, TimeoutError)
 
 # Keys in Session.info. The cache is placed there by the session factory
@@ -221,14 +225,19 @@ class AvailabilityCache:
         }
 
     async def bump(self, server_ids: Collection[uuid.UUID]) -> None:
-        """Move each server to a new generation, so no earlier entry is read again."""
+        """Move each server to a new generation, so no earlier entry is read again.
+
+        Never raises: it runs after a commit, and the write it follows has happened.
+        Cancellation (a BaseException) still propagates, since the task is being torn
+        down and nobody is waiting for its answer.
+        """
         try:
-            async with asyncio.timeout(REDIS_TIMEOUT_SECONDS):
+            async with asyncio.timeout(INVALIDATION_TIMEOUT_SECONDS):
                 async with self._redis.pipeline(transaction=False) as pipe:
                     for server_id in sorted(server_ids):
                         pipe.incr(generation_key(server_id))
                     await pipe.execute()
-        except _REDIS_ERRORS:
+        except Exception:
             logger.warning(
                 "Could not invalidate cached availability of %d servers; entries expire "
                 "within %d s",
