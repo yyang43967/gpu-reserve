@@ -771,6 +771,7 @@ Langfuse traces every run through its LangChain callback handler, with the threa
 
 ### Tests do not call paid APIs
 Agent tests use a scripted chat model that returns planned messages and tool calls. The test configuration blanks the OpenAI and Langfuse keys and does not read `backend/.env`, so a local test run with real keys on disk still makes no paid calls and sends no traces.
+- **Outcome:** blank keys turned out not to be enough. In Phase 8, a test whose mock had not taken effect reached the real API with a fake key. See "Tests cannot reach the network".
 
 ### Model choice for this phase
 - **`gpt-5.4-mini-2026-03-17`, pinned to the dated snapshot.** Of the models available to the project's key, it is the current small model with tool calling. The comparison across models, including a self-hosted one, is the next phase's evaluation; this choice only has to be good enough to build and check the agent against, and cheap enough to run often. A dated snapshot keeps behavior from shifting under the tests and evaluations.
@@ -804,7 +805,8 @@ Agent tests use a scripted chat model that returns planned messages and tool cal
 - **Structured logging** is still missing (see Phase 5). Assistant warnings reach stderr unformatted.
 - **Checkpoints of deleted conversations** stay in the checkpoint tables, which have no foreign key to threads. A periodic cleanup of checkpoints whose thread no longer exists would remove them.
 - **Two write-gated tools only.** Admin actions (approve, reject) are not exposed to the assistant on purpose.
-- **Encrypted reasoning is tied to the model that produced it.** It is stored with the messages in the checkpoint and sent back to the same model on later calls. If a thread continues on a different model (a changed `ASSISTANT_MODEL`, or evaluations switching models), those items have to be stripped or ignored before sending. Handled in Phase 8 (see "Reasoning stays with the model that wrote it").
+- **Encrypted reasoning is tied to the model that produced it.** It is stored with the messages in the checkpoint and sent back to the same model on later calls. If a thread continues on a different model (a changed `ASSISTANT_MODEL`, or evaluations switching models), those items have to be stripped or ignored before sending.
+  - **Outcome:** done in Phase 8. See "Reasoning stays with the model that wrote it".
 
 ## Phase 8 — Evaluation and models
 
@@ -858,3 +860,4 @@ Agent tests use a scripted chat model that returns planned messages and tool cal
 - **Blank keys were not enough.** Tests already blanked every API key. A mock that silently did not take effect still sent a real request with a fake key: it was rejected, but nothing stopped it from leaving the machine.
 - **Decision:** pytest-socket now allows connections only to loopback (the containers' mapped ports) and Unix sockets (the Docker API). A test that would call a paid API fails instead. A canary test checks that both a raw connection and an SDK call are stopped.
 - **Side effect:** boto3's default credential chain probes the EC2 metadata address, which used to fail quietly. Tests now set `AWS_EC2_METADATA_DISABLED`, since they never run on an instance.
+- **A hidden network dependency:** the block exposed one that local caches had masked. tiktoken downloads its encoding on first use, and on a clean CI runner that download was blocked. CI now fetches the encoding before the tests and caches it by tiktoken version and encoding name, the same way the image fetches it at build time.
