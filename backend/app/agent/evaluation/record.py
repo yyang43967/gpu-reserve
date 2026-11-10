@@ -62,10 +62,24 @@ def git(*args: str) -> str:
     ).stdout.strip()
 
 
+def changed_paths(porcelain: str) -> list[str]:
+    """Paths in `git status --porcelain` output that make the tree dirty. The query
+    embedding cache is not one of them: every run may add to it, so between the runs
+    of a series it is expected to change. Its hash is recorded in each run instead,
+    and it is committed once the series is done."""
+    ignored = str(QUERY_EMBEDDINGS_PATH.relative_to(REPO_ROOT))
+    paths = [line[3:].strip() for line in porcelain.splitlines() if line.strip()]
+    return [path for path in paths if path != ignored]
+
+
 def git_state() -> tuple[str, bool]:
     commit = git("rev-parse", "HEAD")
-    dirty = bool(git("status", "--porcelain", "--untracked-files=no"))
+    dirty = bool(changed_paths(git("status", "--porcelain", "--untracked-files=no")))
     return commit, dirty
+
+
+def file_sha256(path: Path) -> str | None:
+    return hashlib.sha256(path.read_bytes()).hexdigest() if path.exists() else None
 
 
 def prompt_hash() -> str:
@@ -137,6 +151,7 @@ def run_config(
     started: datetime,
     finished: datetime,
     reported_models: Sequence[str],
+    query_embeddings_sha256: str | None = None,
 ) -> dict[str, Any]:
     provider, _, model = settings.assistant_model.partition(":")
     config: dict[str, Any] = {
@@ -160,6 +175,8 @@ def run_config(
         if cases_path.is_relative_to(REPO_ROOT)
         else str(cases_path),
         "dataset_sha256": hashlib.sha256(cases_path.read_bytes()).hexdigest(),
+        # The query embedding cache as it was when the run started.
+        "query_embeddings_sha256": query_embeddings_sha256,
         "cases": list(case_ids),
         "prompt_sha256": prompt_hash(),
         "eval_now": EVAL_NOW.isoformat(),

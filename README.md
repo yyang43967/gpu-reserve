@@ -100,7 +100,7 @@ uv run python -m app.agent.evaluation label-sheet ../evals/agent/runs/<run>... #
 uv run python -m app.agent.evaluation compare ../evals/agent/runs/<run>...    # the comparison report
 ```
 
-`run` needs the model's API key (or `VLLM_BASE_URL` and `VLLM_API_KEY`), and `OPENAI_API_KEY` for policy-search queries that are not yet in `evals/agent/query_embeddings.json.gz`. It refuses a working tree with uncommitted changes unless given `--allow-dirty`, which the run records. Each run writes `evals/agent/runs/<run id>/run.json` (the full configuration) and `cases.jsonl.gz` (one row per case). `judge` needs both `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` and adds `judgments.jsonl.gz` to each run; `compare` reads the runs, verdicts, and hand labels and writes `evals/agent/results/<date>.md`.
+`run` needs the model's API key (or `VLLM_BASE_URL` and `VLLM_API_KEY`), and `OPENAI_API_KEY` for policy-search queries that are not yet in `evals/agent/query_embeddings.json.gz`. It refuses a working tree with uncommitted changes unless given `--allow-dirty`, which the run records. The query embedding cache is the one exception: runs add to it, each run records its hash, and it is committed after the last run of a series. Each run writes `evals/agent/runs/<run id>/run.json` (the full configuration) and `cases.jsonl.gz` (one row per case). `judge` needs both `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` and adds `judgments.jsonl.gz` to each run; `compare` reads the runs, verdicts, and hand labels and writes `evals/agent/results/<date>.md`.
 
 ## Repository layout
 

@@ -48,6 +48,7 @@ from app.agent.evaluation.record import (
     QUERY_EMBEDDINGS_PATH,
     RESULTS_DIR,
     RUBRIC_PATH,
+    file_sha256,
     git_state,
     read_cases,
     run_config,
@@ -224,6 +225,7 @@ async def run(args: argparse.Namespace) -> int:
         print(f"Warm-up call: {cold_start:.1f} s")
         runner = CaseRunner(databases, settings, model, query_embedder, options)
         for repeat in range(1, args.repeat + 1):
+            cache_hash = file_sha256(QUERY_EMBEDDINGS_PATH)
             started = datetime.now(UTC)
             results = await run_cases(runner, cases)
             finished = datetime.now(UTC)
@@ -245,6 +247,7 @@ async def run(args: argparse.Namespace) -> int:
                 started=started,
                 finished=finished,
                 reported_models=reported,
+                query_embeddings_sha256=cache_hash,
             )
             write_run(run_directory(name, args.tag), config, results)
             totals = summary(results)

@@ -348,3 +348,13 @@ def test_pilot_runs_are_not_compared_with_results() -> None:
     pilot.config["tag"] = "pilot"
     with pytest.raises(CompareError, match="mix tags"):
         report([pilot, run("claude-haiku-5-5", 1, ALL)], CASES, PRICES)
+
+
+def test_the_query_cache_alone_does_not_make_the_tree_dirty() -> None:
+    from app.agent.evaluation.record import changed_paths
+
+    assert changed_paths(" M evals/agent/query_embeddings.json.gz\n") == []
+    assert changed_paths(
+        " M evals/agent/query_embeddings.json.gz\n M evals/agent/cases.jsonl\n"
+    ) == ["evals/agent/cases.jsonl"]
+    assert changed_paths("") == []
