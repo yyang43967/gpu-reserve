@@ -17,3 +17,7 @@ for _name in (
     "LANGFUSE_HOST",
 ):
     os.environ[_name] = ""
+
+# Without explicit keys, boto3's credential chain asks the EC2 metadata service. Tests
+# never run on an instance, and the network block would turn that lookup into an error.
+os.environ["AWS_EC2_METADATA_DISABLED"] = "true"

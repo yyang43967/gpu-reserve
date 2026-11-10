@@ -102,6 +102,8 @@ def test_vllm_sends_the_served_model_name_to_its_own_server() -> None:
     assert isinstance(model, ChatOpenAI)
     assert not model.use_responses_api
     assert model.openai_api_base == "http://vllm.test/v1"
+    # The client actually used, not just the field: settings are applied at construction.
+    assert str(model.root_async_client.base_url).rstrip("/") == "http://vllm.test/v1"
     assert chat_model_name(model) == VLLM_MODEL
 
     payload = model._get_request_payload([HumanMessage("hi")])
