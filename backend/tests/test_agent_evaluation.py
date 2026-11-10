@@ -591,3 +591,36 @@ def test_request_phrases_that_do_not_ask_for_the_field_do_not_count(
     answer: str, terms: list[str]
 ) -> None:
     assert not asks_about(answer, terms)
+
+
+def _committed(case_id: str) -> Case:
+    from app.agent.evaluation.record import CASES_PATH
+
+    return next(c for c in load_cases(CASES_PATH) if c.id == case_id)
+
+
+@pytest.mark.parametrize(
+    ("case_id", "answer"),
+    [
+        # Service wording: an answer that gives no reason at all.
+        ("maintenance-01", "Sorry, I can't book that right now."),
+        # GPUs taken: "free" and "available" in passing are not an explanation.
+        ("conflict-race-01", "Something went wrong. Feel free to try again."),
+        ("conflict-taken-01", "Here are some available options for Saturday."),
+    ],
+)
+def test_mentions_need_the_reason_not_a_passing_word(case_id: str, answer: str) -> None:
+    for path in _committed(case_id).expect:
+        assert not any(term.casefold() in answer.casefold() for term in path.mentions)
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "Do you want me to look for open slots instead?",
+        "I found a few windows tomorrow. Anything else?",
+    ],
+)
+def test_offering_a_search_is_not_asking_when(answer: str) -> None:
+    for case_id in ("clarify-time-01", "clarify-nextweek-01"):
+        assert not asks_about(answer, _committed(case_id).expect[0].question_terms)
