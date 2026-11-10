@@ -558,3 +558,16 @@ def test_citation_anchors_come_from_the_ingested_chunks() -> None:
 )
 def test_requests_without_a_question_mark_count(answer: str, terms: list[str], asked: bool) -> None:
     assert asks_about(answer, terms) is asked
+
+
+SERVER_TERMS = ["server", "lab", "time zone", "timezone", "machine"]
+
+
+def test_a_list_after_a_colon_is_not_a_request_by_itself() -> None:
+    # Lists servers after a colon but never asks the user to choose.
+    answer = (
+        "Two GPUs from 19:00 to 21:00 are free on these servers:\n"
+        "- vision-4090-01 (Vision Lab)\n- nlp-l40s-01 (NLP Lab)\n\n"
+        "The lab's guide says one 4090 is enough for LoRA on 7B [1]."
+    )
+    assert not asks_about(answer, SERVER_TERMS)
