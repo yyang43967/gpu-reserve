@@ -7,6 +7,7 @@ an aborted run) is dropped from every comparison, so all pairwise tests are on t
 same cases; the number dropped is reported with them.
 """
 
+import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Final
@@ -68,3 +69,54 @@ def pair(a: Mapping[str, bool | None], b: Mapping[str, bool | None], cases: Sequ
         key = "both" if x and y else "only_a" if x else "only_b" if y else "neither"
         counts[key] += 1
     return Pair(**counts)
+
+
+# --- statistics ---
+
+
+def mcnemar_exact(only_a: int, only_b: int) -> float:
+    """Two-sided exact McNemar test: a binomial test on the discordant cases."""
+    n = only_a + only_b
+    if n == 0:
+        return 1.0
+    k = min(only_a, only_b)
+    tail = sum(math.comb(n, i) for i in range(k + 1)) / (1 << n)
+    return min(1.0, 2 * tail)
+
+
+def holm(p_values: Sequence[float]) -> list[float]:
+    """Holm-Bonferroni adjusted p-values, in the input order."""
+    m = len(p_values)
+    order = sorted(range(m), key=lambda i: p_values[i])
+    adjusted = [0.0] * m
+    running = 0.0
+    for rank, i in enumerate(order):
+        running = max(running, min(1.0, (m - rank) * p_values[i]))
+        adjusted[i] = running
+    return adjusted
+
+
+def smallest_significant_splits(
+    alpha: float, tests: int, max_discordant: int
+) -> list[tuple[int, int]]:
+    """For each number of discordant cases, the most even split that would still pass
+    the strictest Holm threshold (alpha / tests). Shows what the case count can detect."""
+    threshold = alpha / tests
+    splits: list[tuple[int, int]] = []
+    for n in range(1, max_discordant + 1):
+        for minority in range(n // 2, -1, -1):
+            if mcnemar_exact(n - minority, minority) < threshold:
+                splits.append((n - minority, minority))
+                break
+    return splits
+
+
+def percentile(values: Sequence[float], q: float) -> float | None:
+    """Linear interpolation between closest ranks; None for no values."""
+    if not values:
+        return None
+    ordered = sorted(values)
+    position = (len(ordered) - 1) * q
+    low = math.floor(position)
+    high = min(low + 1, len(ordered) - 1)
+    return ordered[low] + (ordered[high] - ordered[low]) * (position - low)

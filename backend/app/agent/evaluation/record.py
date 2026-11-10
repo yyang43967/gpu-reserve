@@ -35,6 +35,11 @@ CASES_PATH: Final = EVALS_DIR / "cases.jsonl"
 CASES_MD_PATH: Final = EVALS_DIR / "cases.md"
 RUNS_DIR: Final = EVALS_DIR / "runs"
 QUERY_EMBEDDINGS_PATH: Final = EVALS_DIR / "query_embeddings.json.gz"
+RUBRIC_PATH: Final = EVALS_DIR / "rubric.md"
+PRICES_PATH: Final = EVALS_DIR / "prices.json"
+JUDGE_CACHE_PATH: Final = EVALS_DIR / "judge_cache.jsonl"
+HAND_LABELS_PATH: Final = EVALS_DIR / "hand_labels.jsonl"
+RESULTS_DIR: Final = EVALS_DIR / "results"
 SERVING_FILE: Final = REPO_ROOT / "serving" / "modal_vllm.py"
 PACKAGES: Final = (
     "langchain-core",

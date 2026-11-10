@@ -3,6 +3,9 @@
     uv run python -m app.agent.evaluation validate        # replay every case's expectations
     uv run python -m app.agent.evaluation describe        # write evals/agent/cases.md
     uv run python -m app.agent.evaluation run --repeat 2  # run ASSISTANT_MODEL on every case
+    uv run python -m app.agent.evaluation judge RUN...    # two judges on the judged cases
+    uv run python -m app.agent.evaluation label-sheet RUN...  # answers to label by hand
+    uv run python -m app.agent.evaluation compare RUN...  # the comparison report
 
 `validate` and `run` need a Postgres role that may create databases (DATABASE_URL).
 `validate` calls no API: it replays each outcome's write calls with a scripted model.
@@ -14,6 +17,7 @@ uncommitted changes unless --allow-dirty, which the run records.
 
 import argparse
 import asyncio
+import json
 import logging
 import sys
 import uuid
@@ -24,15 +28,29 @@ from pathlib import Path
 from langchain_core.messages import AIMessage
 
 from app.agent.evaluation.cases import Case, CaseFileError, Reserve, load_cases
+from app.agent.evaluation.compare import CompareError, label_sheet, load_run, report
 from app.agent.evaluation.database import Databases, check_can_create_databases
 from app.agent.evaluation.describe import render
+from app.agent.evaluation.judge import (
+    JUDGES,
+    JudgeCache,
+    Rubric,
+    judge_rows,
+    write_judgments,
+)
 from app.agent.evaluation.oracle import ORACLE_ANSWER, replay_cases, static_problems
 from app.agent.evaluation.record import (
     CASES_MD_PATH,
     CASES_PATH,
+    HAND_LABELS_PATH,
+    JUDGE_CACHE_PATH,
+    PRICES_PATH,
     QUERY_EMBEDDINGS_PATH,
+    RESULTS_DIR,
+    RUBRIC_PATH,
     RUNS_DIR,
     git_state,
+    read_cases,
     run_config,
     run_id,
     summary,
@@ -246,6 +264,82 @@ async def run(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+# --- judge, label, compare ---
+
+
+def _cases_by_id(path: Path) -> dict[str, Case]:
+    return {case.id: case for case in load_cases(path)}
+
+
+async def judge(run_dirs: Sequence[Path], cases_path: Path) -> int:
+    cases = _cases_by_id(cases_path)
+    rubric = Rubric.load(RUBRIC_PATH)
+    settings = get_settings()
+    models = {
+        name: build_chat_model(
+            settings.model_copy(
+                update={
+                    "assistant_model": name,
+                    "assistant_request_timeout_seconds": Options.request_timeout_seconds,
+                    "langfuse_public_key": None,
+                    "langfuse_secret_key": None,
+                }
+            )
+        )
+        for name in JUDGES
+    }
+    cache = JudgeCache(JUDGE_CACHE_PATH)
+    status = EXIT_OK
+    try:
+        for directory in run_dirs:
+            judgments = await judge_rows(cases, read_cases(directory), models, rubric, cache)
+            write_judgments(directory, judgments)
+            failed = [j for j in judgments if j.error]
+            fresh = sum(not j.cached for j in judgments)
+            print(
+                f"{directory.name}: {len(judgments)} verdicts ({fresh} new, rubric "
+                f"v{rubric.version}), {len(failed)} failed"
+            )
+            for j in failed:
+                print(f"  {j.case_id} / {j.judge}: {j.error}", file=sys.stderr)
+            if failed:
+                status = EXIT_ERROR
+    finally:
+        cache.save()
+    return status
+
+
+def write_label_sheet(run_dirs: Sequence[Path], cases_path: Path, limit: int) -> int:
+    rows = label_sheet([load_run(d) for d in run_dirs], _cases_by_id(cases_path), limit)
+    kept = []
+    if HAND_LABELS_PATH.exists():
+        kept = [json.loads(line) for line in HAND_LABELS_PATH.read_text().splitlines() if line]
+    known = {(r["answer_id"], r["criterion"]) for r in kept}
+    new = [r for r in rows if (r["answer_id"], r["criterion"]) not in known]
+    with HAND_LABELS_PATH.open("a", encoding="utf-8") as handle:
+        for row in new:
+            handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+    print(f"Added {len(new)} rows to {HAND_LABELS_PATH}; fill in each 'verdict' (pass or fail).")
+    return EXIT_OK
+
+
+def write_comparison(run_dirs: Sequence[Path], cases_path: Path, out: Path | None) -> int:
+    labels = []
+    if HAND_LABELS_PATH.exists():
+        labels = [json.loads(line) for line in HAND_LABELS_PATH.read_text().splitlines() if line]
+    prices = json.loads(PRICES_PATH.read_text(encoding="utf-8"))
+    try:
+        text = report([load_run(d) for d in run_dirs], _cases_by_id(cases_path), prices, labels)
+    except CompareError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    target = out or RESULTS_DIR / f"{datetime.now(UTC):%Y-%m-%d}.md"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(text, encoding="utf-8")
+    print(f"Wrote {target}")
+    return EXIT_OK
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m app.agent.evaluation")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -268,7 +362,24 @@ def main(argv: Sequence[str] | None = None) -> int:
         "It biases against slow configurations, so compared runs do not use it.",
     )
     go.add_argument("--allow-dirty", action="store_true")
+    grade = commands.add_parser("judge", help="Two judges on every judged case of runs.")
+    grade.add_argument("runs", type=Path, nargs="+")
+    grade.add_argument("--cases", type=Path, default=CASES_PATH)
+    sheet = commands.add_parser("label-sheet", help="Add judged answers to label by hand.")
+    sheet.add_argument("runs", type=Path, nargs="+")
+    sheet.add_argument("--cases", type=Path, default=CASES_PATH)
+    sheet.add_argument("--limit", type=int, default=30, help="Answers to add.")
+    versus = commands.add_parser("compare", help="Write the comparison report.")
+    versus.add_argument("runs", type=Path, nargs="+")
+    versus.add_argument("--cases", type=Path, default=CASES_PATH)
+    versus.add_argument("--out", type=Path)
     args = parser.parse_args(argv)
+    if args.command == "judge":
+        return asyncio.run(judge(args.runs, args.cases))
+    if args.command == "label-sheet":
+        return write_label_sheet(args.runs, args.cases, args.limit)
+    if args.command == "compare":
+        return write_comparison(args.runs, args.cases, args.out)
     if args.command == "validate":
         return asyncio.run(validate(args.cases))
     if args.command == "describe":

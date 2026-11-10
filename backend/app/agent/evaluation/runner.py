@@ -102,6 +102,9 @@ class CaseResult:
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
     answers: list[str] = field(default_factory=list)
     citations: list[dict[str, Any]] = field(default_factory=list)
+    # Policy sections the model was shown, once each: what the judge checks the answer
+    # against.
+    retrieved: list[dict[str, Any]] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     segments: list[dict[str, Any]] = field(default_factory=list)
     model_calls: list[dict[str, Any]] = field(default_factory=list)
@@ -150,6 +153,7 @@ def _result(
         ],
         answers=transcript.answers,
         citations=transcript.citations,
+        retrieved=_retrieved(transcript),
         errors=transcript.errors,
         segments=[asdict(segment) for segment in transcript.segments],
         model_calls=[call.as_dict() for call in calls],
@@ -252,6 +256,20 @@ class CaseRunner:
         return _result(
             case, attempt, transcript, score, seen, recorder.calls, time.perf_counter() - started
         )
+
+
+def _retrieved(transcript: Transcript) -> list[dict[str, Any]]:
+    seen: dict[tuple[str, str], dict[str, Any]] = {}
+    for call in transcript.tool_calls:
+        if call.name != "search_policies" or not call.result or not call.result.get("ok"):
+            continue
+        for hit in call.result.get("results", []):
+            key = (str(hit.get("document")), str(hit.get("heading")))
+            seen.setdefault(
+                key,
+                {k: hit.get(k) for k in ("ref", "document", "title", "heading", "content")},
+            )
+    return list(seen.values())
 
 
 def _purposes(snapshot: dict[str, dict[str, Any]]) -> dict[str, uuid.UUID]:
