@@ -1,7 +1,10 @@
 """Model names and the provider registry."""
 
+import json
 from typing import Any
 
+# The openai client's HTTP library; patching its transport catches the real request.
+import httpx2
 import pytest
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -111,3 +114,66 @@ def test_vllm_sends_the_served_model_name_to_its_own_server() -> None:
     assert payload["model"] == VLLM_MODEL
     assert "messages" in payload and "reasoning_effort" not in payload
     assert {"agent", "tools"} <= set(build_graph(model, None).nodes)
+
+
+def _vllm_request_body(monkeypatch: pytest.MonkeyPatch, **values: Any) -> dict[str, Any]:
+    """The JSON body the vllm provider actually sends, caught at the HTTP transport."""
+    sent: list[dict[str, Any]] = []
+
+    def handle_request(self: httpx2.HTTPTransport, request: httpx2.Request) -> httpx2.Response:
+        sent.append(json.loads(request.content))
+        return httpx2.Response(
+            200,
+            json={
+                "id": "chatcmpl-test",
+                "object": "chat.completion",
+                "created": 0,
+                "model": VLLM_MODEL,
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "ok"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            },
+            request=request,
+        )
+
+    monkeypatch.setattr(httpx2.HTTPTransport, "handle_request", handle_request)
+    model = build_chat_model(
+        _settings(
+            f"vllm:{VLLM_MODEL}",
+            vllm_base_url="http://vllm.test/v1",
+            vllm_api_key="vllm-test",
+            **values,
+        )
+    )
+    model.invoke([HumanMessage("hi")])
+    assert len(sent) == 1
+    return sent[0]
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_vllm_thinking_setting_reaches_the_chat_template(
+    monkeypatch: pytest.MonkeyPatch, enabled: bool
+) -> None:
+    body = _vllm_request_body(monkeypatch, vllm_enable_thinking=enabled)
+
+    assert body["chat_template_kwargs"] == {"enable_thinking": enabled}
+    assert body["model"] == VLLM_MODEL
+
+
+def test_vllm_sends_no_template_arguments_when_thinking_is_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    body = _vllm_request_body(monkeypatch)
+
+    assert "chat_template_kwargs" not in body
+    assert "extra_body" not in body
+
+
+def test_a_blank_thinking_setting_means_unset() -> None:
+    # Compose passes `VLLM_ENABLE_THINKING=` when the variable is not set.
+    assert _settings(f"vllm:{VLLM_MODEL}", vllm_enable_thinking="").vllm_enable_thinking is None

@@ -128,6 +128,9 @@ class Settings(BaseSettings):
     # equal the model part of ASSISTANT_MODEL.
     vllm_base_url: str | None = None
     vllm_api_key: SecretStr | None = None
+    # Thinking on or off for models whose chat template has the switch (Qwen3). Unset
+    # sends nothing, so the template's default applies.
+    vllm_enable_thinking: bool | None = None
     # Per model request; a run makes several. The whole run is capped separately.
     assistant_request_timeout_seconds: float = Field(default=30.0, gt=0)
     assistant_request_retries: int = Field(default=1, ge=0)
@@ -155,6 +158,7 @@ class Settings(BaseSettings):
         "anthropic_api_key",
         "vllm_base_url",
         "vllm_api_key",
+        "vllm_enable_thinking",
         "langfuse_public_key",
         "langfuse_secret_key",
         "langfuse_host",
