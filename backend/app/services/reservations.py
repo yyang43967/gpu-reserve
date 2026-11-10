@@ -51,7 +51,7 @@ from app.models import (
     UserRole,
 )
 from app.models.reservation import HOLDING_STATUSES, QUOTA_STATUSES
-from app.services import audit, booking_rules, locks, notifications
+from app.services import audit, availability_cache, booking_rules, locks, notifications
 from app.services.booking_rules import Booking, Interval
 from app.services.servers import get_server, visibility_conditions
 
@@ -301,6 +301,7 @@ async def create_reservation(
 
     status = ReservationStatus.PENDING if server.requires_approval else ReservationStatus.APPROVED
     reservation_id = await _allocate(session, actor, server, request, interval, status=status)
+    availability_cache.mark_changed(session, server.id)
     audit.record(
         session,
         actor_id=actor.id,
@@ -408,6 +409,7 @@ async def finish_reservation(
         .where(GpuAllocation.reservation_id == reservation.id)
         .values(active=False, ends_at=reservation.ends_at)
     )
+    availability_cache.mark_changed(session, reservation.server_id)
     payload: dict[str, str] = {"from_status": previous.value, "to_status": reservation.status.value}
     if reservation.ends_at != original_end:
         payload |= {
@@ -582,7 +584,8 @@ async def cancel_reservation(
 async def approve_reservation(
     session: AsyncSession, admin: User, reservation_id: uuid.UUID, *, now: datetime
 ) -> Reservation:
-    """Approve a pending reservation that has not started. Its GPUs are already held."""
+    """Approve a pending reservation that has not started. Its GPUs are already held,
+    so availability does not change and nothing is invalidated."""
     reservation = await _lock_reservation(session, admin, reservation_id)
     if reservation.status is not ReservationStatus.PENDING:
         raise InvalidReservationState(
@@ -625,6 +628,7 @@ async def reject_reservation(
         .where(GpuAllocation.reservation_id == reservation.id)
         .values(active=False)
     )
+    availability_cache.mark_changed(session, reservation.server_id)
     _record_decision(session, admin, reservation, "reservation.rejected", reason=reason)
     notifications.notify_owner(
         session, reservation, NotificationKind.REJECTED, actor_id=admin.id, now=now
@@ -729,20 +733,10 @@ async def server_availability(
         booking_rules.floor_to_grid(start.astimezone(UTC)),
         booking_rules.ceil_to_grid(end.astimezone(UTC)),
     )
+    # The server and the viewer's right to see it always come from Postgres; only the
+    # allocations may come from the cache.
     server = await get_server(session, viewer, server_id)
-
-    busy_rows = await session.execute(
-        select(GpuAllocation.gpu_id, GpuAllocation.starts_at, GpuAllocation.ends_at)
-        .join(Gpu, Gpu.id == GpuAllocation.gpu_id)
-        .where(
-            Gpu.server_id == server.id,
-            Gpu.removed_at.is_(None),
-            GpuAllocation.active.is_(True),
-            GpuAllocation.starts_at < window.end,
-            GpuAllocation.ends_at > window.start,
-        )
-    )
-    busy = [Interval(row.starts_at, row.ends_at) for row in busy_rows]
+    busy = (await availability_cache.busy_intervals(session, [server.id], window))[server.id]
 
     runs: list[FreeRun] = []
     for index, free in enumerate(booking_rules.free_per_slot(window, server.gpu_count, busy)):

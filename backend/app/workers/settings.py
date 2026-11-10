@@ -2,10 +2,12 @@ from typing import Any, ClassVar, Final
 
 from arq import cron
 from arq.connections import RedisSettings
+from redis.asyncio import Redis
 
 from app.core.config import get_settings
 from app.db.session import create_engine, create_session_factory
 from app.rag.embeddings import build_embedder
+from app.services.availability_cache import build_availability_cache
 from app.services.email import build_sender
 from app.workers import tasks
 
@@ -20,13 +22,20 @@ async def startup(ctx: dict[str, Any]) -> None:
     engine = create_engine(settings)
     ctx["settings"] = settings
     ctx["engine"] = engine
-    ctx["session_factory"] = create_session_factory(engine)
+    # The jobs that expire and complete reservations release GPUs, so their commits
+    # invalidate cached availability like any other write.
+    cache_redis = Redis.from_url(str(settings.redis_url))
+    ctx["cache_redis"] = cache_redis
+    ctx["session_factory"] = create_session_factory(
+        engine, availability_cache=build_availability_cache(settings, cache_redis)
+    )
     ctx["email_sender"] = build_sender(settings)
     # None without an API key; only reindex_kb needs it, and it says so.
     ctx["embedder"] = build_embedder(settings)
 
 
 async def shutdown(ctx: dict[str, Any]) -> None:
+    await ctx["cache_redis"].aclose()
     await ctx["engine"].dispose()
 
 

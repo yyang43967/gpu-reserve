@@ -199,6 +199,28 @@ async def test_confirm_books_through_the_service(
     assert thread is not None and thread.pending_action is None and thread.run_lease_until is None
 
 
+async def test_a_confirmed_booking_invalidates_cached_availability(
+    harness: Harness, student: User, server: Server
+) -> None:
+    begin = start()
+    path = f"/api/v1/servers/{server.id}/availability"
+    params = {"from": begin.isoformat(), "to": (begin + timedelta(hours=1)).isoformat()}
+
+    async def free() -> list[int]:
+        response = await harness.client.get(path, params=params, headers=harness.headers(student))
+        assert response.status_code == 200, response.text
+        return [run["free"] for run in response.json()["runs"]]
+
+    # Warm the cache, then book through the assistant's write path.
+    assert await free() == [2]
+    thread_id, _ = await propose(harness, student, server)
+    assert await free() == [2]
+    harness.script.add(say("Booked."))
+    assert types(events(await harness.resume(student, thread_id, "confirm")))[-1] == "done"
+
+    assert await free() == [1]
+
+
 def reservation_thread(thread_id: str) -> Any:
     import uuid
 

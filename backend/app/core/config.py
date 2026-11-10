@@ -37,6 +37,12 @@ class Settings(BaseSettings):
         "postgresql+asyncpg://gpureserve:gpureserve@localhost:5432/gpureserve"
     )
     redis_url: RedisDsn = RedisDsn("redis://localhost:6379/0")
+    # Availability and slot search read GPU allocations through Redis. Off sends every
+    # read to Postgres (used to measure the difference).
+    availability_cache_enabled: bool = True
+    # A backstop only: commits invalidate entries. It bounds how long an entry can be
+    # stale if an invalidation is lost.
+    availability_cache_ttl_seconds: int = Field(default=300, gt=0)
 
     # Comma-separated in the environment, e.g. "http://localhost:5173,https://app.example.com".
     cors_origins: Annotated[list[str], NoDecode] = Field(

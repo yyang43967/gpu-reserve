@@ -18,6 +18,7 @@ from app.core.exceptions import (
 from app.core.unset import UNSET, Unset
 from app.models import Gpu, GpuAllocation, GpuModel, Lab, Reservation, Server, ServerStatus, User
 from app.models.server import DEFAULT_MAX_BOOKING_HOURS, GPU_MEMORY_GB
+from app.services import availability_cache
 from app.services.labs import can_see_inactive
 from app.services.storage import ObjectStorage
 from app.services.uploads import UploadPurpose, verify_upload
@@ -225,6 +226,9 @@ async def _sync_gpus(
     The caller holds the server's row lock.
     """
     new_count = server.gpu_count
+    if new_count != old_count:
+        # Removed GPUs stop counting, and reactivated ones bring their allocations back.
+        availability_cache.mark_changed(session, server.id)
     if new_count < old_count:
         await _ensure_gpus_removable(session, server.id, min_index=new_count, now=now)
         await session.execute(
@@ -395,6 +399,9 @@ async def delete_server(session: AsyncSession, server_id: uuid.UUID) -> str | No
     await _ensure_server_deletable(session, server.id)
     image_key = server.image_key
     await session.delete(server)
+    # Its GPU rows go with it. It never had allocations, so this only keeps the rule
+    # simple: every change to a server's GPU rows or allocations is marked.
+    availability_cache.mark_changed(session, server.id)
     try:
         await session.flush()
     except IntegrityError as exc:
