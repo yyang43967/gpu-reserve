@@ -358,6 +358,9 @@ def test_the_query_cache_alone_does_not_make_the_tree_dirty() -> None:
         " M evals/agent/query_embeddings.json.gz\n M evals/agent/cases.jsonl\n"
     ) == ["evals/agent/cases.jsonl"]
     assert changed_paths("") == []
+    # As git() returns it: stripped, so the first line has lost its leading space.
+    assert changed_paths("M evals/agent/query_embeddings.json.gz") == []
+    assert changed_paths("M evals/agent/query_embeddings.json.gz\n M README.md") == ["README.md"]
 
 
 def test_injection_and_other_user_failures_are_split() -> None:

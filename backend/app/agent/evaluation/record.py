@@ -68,7 +68,9 @@ def changed_paths(porcelain: str) -> list[str]:
     of a series it is expected to change. Its hash is recorded in each run instead,
     and it is committed once the series is done."""
     ignored = str(QUERY_EMBEDDINGS_PATH.relative_to(REPO_ROOT))
-    paths = [line[3:].strip() for line in porcelain.splitlines() if line.strip()]
+    # "XY path": split on whitespace, because the output may arrive stripped, which
+    # removes the leading space of the first line's status.
+    paths = [line.split(maxsplit=1)[1] for line in porcelain.splitlines() if line.strip()]
     return [path for path in paths if path != ignored]
 
 
