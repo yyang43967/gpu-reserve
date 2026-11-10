@@ -66,9 +66,12 @@ def load_run(directory: Path) -> Run:
     return Run(directory, config, read_cases(directory), read_judgments(directory))
 
 
-def scored_rows(run: Run, cases: dict[str, Case]) -> list[dict[str, Any]]:
-    """The run's rows with `passed` including the primary judge's verdict."""
-    primary = {j.case_id: j for j in run.judgments if j.judge == PRIMARY_JUDGE}
+def scored_rows(
+    run: Run, cases: dict[str, Case], judge: str = PRIMARY_JUDGE
+) -> list[dict[str, Any]]:
+    """The run's rows with `passed` including the judge's verdict (the primary judge
+    unless another is asked for, as in the sensitivity check)."""
+    primary = {j.case_id: j for j in run.judgments if j.judge == judge}
     rows = []
     for row in run.rows:
         case = cases.get(row["id"])
@@ -78,7 +81,7 @@ def scored_rows(run: Run, cases: dict[str, Case]) -> list[dict[str, Any]]:
             if judgment is None or judgment.passed is None:
                 raise CompareError(
                     f"{run.directory.name}: {row['id']} has no usable verdict from "
-                    f"{PRIMARY_JUDGE}; run `judge` on this run first"
+                    f"{judge}; run `judge` on this run first"
                 )
             passed = passed and judgment.passed
         rows.append({**row, "passed": passed})
@@ -165,6 +168,25 @@ def tokens(run: Run) -> dict[str, int]:
 
 
 # --- the report ---
+
+
+def conclusion(only_a: int, only_b: int, holm_p: float) -> str:
+    if holm_p >= ALPHA:
+        return "no significant difference"
+    return "A better" if only_a > only_b else "B better"
+
+
+def paired_tests(
+    outcomes: dict[str, dict[str, bool | None]], pairs: list[tuple[str, str]], cases: list[str]
+) -> list[tuple[Any, float, float, str]]:
+    """(counts, p, Holm p, conclusion) per pair of configurations."""
+    tests = [pair(outcomes[a], outcomes[b], cases) for a, b in pairs]
+    raw = [mcnemar_exact(t.only_a, t.only_b) for t in tests]
+    adjusted = holm(raw)
+    return [
+        (t, p, q, conclusion(t.only_a, t.only_b, q))
+        for t, p, q in zip(tests, raw, adjusted, strict=True)
+    ]
 
 
 def _rate(passed: int, total: int) -> str:
@@ -300,6 +322,40 @@ def report(
             f"disagreements must split at least {shown}. A difference of a few cases cannot be "
             "told apart from noise, and a pair that is not significant is not shown to be equal.",
         ]
+
+    lines += ["", "## Judge sensitivity", ""]
+    second = {
+        label: [scored_rows(r, cases, SECOND_JUDGE) for r in group]
+        for label, group in by_config.items()
+    }
+    outcomes_second = {label: strict_outcomes(rows) for label, rows in second.items()}
+    lines += [
+        f"The same strict outcomes with {SECOND_JUDGE} deciding the judged cases instead of "
+        f"{PRIMARY_JUDGE}, on the same {len(common.cases)} cases.",
+        "",
+        "| Configuration | Strict, primary judge | Strict, second judge |",
+        "|---|---|---|",
+    ]
+    for label in labels:
+        first = sum(bool(outcomes[label][c]) for c in common.cases)
+        other = sum(bool(outcomes_second[label][c]) for c in common.cases)
+        lines.append(
+            f"| {label} | {_rate(first, len(common.cases))} | {_rate(other, len(common.cases))} |"
+        )
+    if pairs:
+        under_first = paired_tests(outcomes, pairs, common.cases)
+        under_second = paired_tests(outcomes_second, pairs, common.cases)
+        lines += [
+            "",
+            "| A | B | Primary judge | Second judge (only A / only B, Holm p) | Same? |",
+            "|---|---|---|---|---|",
+        ]
+        for (a, b), x, y in zip(pairs, under_first, under_second, strict=True):
+            same = "yes" if x[3] == y[3] else "**differs**"
+            lines.append(
+                f"| {a} | {b} | {x[3]} | {y[3]} ({y[0].only_a} / {y[0].only_b}, {_p(y[2])}) "
+                f"| {same} |"
+            )
 
     lines += ["", "## Injection and other users' data", ""]
     lines += [

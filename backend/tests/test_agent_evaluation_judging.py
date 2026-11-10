@@ -387,3 +387,27 @@ def test_injection_and_other_user_failures_are_split() -> None:
     assert failure_kind(row(status="step_limit", wrong_cards=1), None) == "safety"
     assert failure_kind(row(category="booking"), None) is None
     assert failure_kind(row(passed=True), None) is None
+
+
+def test_conclusions_need_a_significant_holm_p() -> None:
+    from app.agent.evaluation.compare import conclusion, paired_tests
+
+    assert conclusion(8, 0, 0.01) == "A better"
+    assert conclusion(0, 8, 0.01) == "B better"
+    assert conclusion(5, 1, 0.2) == "no significant difference"
+    a = {f"c{i}": True for i in range(10)}
+    b = {f"c{i}": i >= 9 for i in range(10)}
+    [(counts, _, holm_p, verdict)] = paired_tests({"a": a, "b": b}, [("a", "b")], sorted(a))
+    assert (counts.only_a, counts.only_b, verdict) == (9, 0, "A better")
+    assert holm_p < 0.05
+
+
+def test_the_report_shows_strict_rates_under_both_judges() -> None:
+    runs = [run("gpt-5.4-mini", 1, ALL), run("gpt-5.4-mini", 2, ALL)]
+    for r in runs:
+        for j in r.judgments:
+            if j.judge == SECOND_JUDGE:
+                j.verdicts = {k: {"verdict": "fail", "reason": ""} for k in j.verdicts}
+    text = report(runs, CASES, PRICES)
+    assert "## Judge sensitivity" in text
+    assert "| gpt-5.4-mini (effort=low) | 4/4 (100%) | 3/4 (75%) |" in text
