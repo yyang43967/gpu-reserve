@@ -804,4 +804,57 @@ Agent tests use a scripted chat model that returns planned messages and tool cal
 - **Structured logging** is still missing (see Phase 5). Assistant warnings reach stderr unformatted.
 - **Checkpoints of deleted conversations** stay in the checkpoint tables, which have no foreign key to threads. A periodic cleanup of checkpoints whose thread no longer exists would remove them.
 - **Two write-gated tools only.** Admin actions (approve, reject) are not exposed to the assistant on purpose.
-- **Encrypted reasoning is tied to the model that produced it.** It is stored with the messages in the checkpoint and sent back to the same model on later calls. If a thread continues on a different model (a changed `ASSISTANT_MODEL`, or evaluations switching models), those items have to be stripped or ignored before sending. Phase 8 handles it, with a test that a thread started on one model continues on another.
+- **Encrypted reasoning is tied to the model that produced it.** It is stored with the messages in the checkpoint and sent back to the same model on later calls. If a thread continues on a different model (a changed `ASSISTANT_MODEL`, or evaluations switching models), those items have to be stripped or ignored before sending. Handled in Phase 8 (see "Reasoning stays with the model that wrote it").
+
+## Phase 8 — Evaluation and models
+
+### Models to compare
+- **Three models:**
+  - `gpt-5.4-mini-2026-03-17`, the current one.
+  - `claude-haiku-5-5`.
+  - `Qwen/Qwen3.6-35B-A3B-FP8`, served by vLLM.
+- **Why Haiku:** it is in the same small, fast tier as gpt-5.4-mini, so the comparison is like for like. It is also cheap enough ($0.10 / $0.50 per million input / output tokens) that repeated runs fit a small prepaid budget; a run of 50 cases is estimated at about $0.15. A larger Claude model is deferred until the small-model results are in.
+- **Why Qwen3.6-35B-A3B:**
+  - It is a mixture of experts with 3B active parameters.
+  - It is Apache-2.0 licensed.
+  - vLLM documents its tool-call parser (`qwen3_coder`) and reasoning parser (`qwen3`).
+  - Its published agentic results are the strongest of the open-weight candidates that fit on one GPU (TAU3-Bench 67.2).
+  - Only 10 of its 40 layers use full attention, with 2 KV heads, so a 32k-token sequence needs about 0.6 GB of KV cache. The official FP8 weights (about 36 GB) fit a 48 GB GPU with room to spare.
+- **Candidates not chosen:**
+  - Gemma 4 26B-A4B (Apache-2.0, `gemma4` parser) needs an 80 GB GPU in BF16; it is the fallback.
+  - gpt-oss-20b is the cheapest to host, but its tool-call parsing has a history of bugs, and it degrades when earlier reasoning is not sent back, which chat completions through LangChain does not do.
+- **Known risk:** users report Qwen3.6 looping or failing tool calls in long agentic sessions. A turn here makes at most about six model calls, which keeps exposure low; the evaluation will show whether it matters.
+
+### GPU
+- **An L40S (48 GB, $1.95 an hour on Modal)** is tried first, with an H100 ($3.95) as the fallback if the FP8 MoE or linear-attention kernels fail on Ada or the KV cache is too tight.
+- The estimate is about 6 GPU hours for bring-up and evaluation, roughly $13, within the monthly free credit.
+- One container at most, a short idle timeout, and a usage cap keep a forgotten server from running up a bill.
+
+### Providers
+- **The registry knows three providers by the API they speak:**
+  - `openai` on the Responses API.
+  - `anthropic` on Anthropic's Messages API, through `langchain-anthropic`.
+  - `vllm` on chat completions at `VLLM_BASE_URL`.
+- **Each provider checks its own credentials,** so an OpenAI key no longer makes a Claude model look configured.
+- **Anthropic is used natively, not through its OpenAI-compatible endpoint.** The compatible endpoint would avoid a dependency, but it loses prompt-cache control, thinking blocks, and the refusal stop reason, and all three matter here.
+- **Same reasoning level for both hosted models.** The request sets adaptive thinking with effort `low`, to match OpenAI's `low`. It also sets a request-level `cache_control`, which caches the longest repeated prefix: tools, system prompt, and the history so far. Each step of a tool loop then reads the previous step from the cache.
+- **The vLLM provider sends the served model name.** The server is started with `--served-model-name` equal to the model part of `ASSISTANT_MODEL`, so responses carry the name the agent expects (see below).
+- **A refusal is an answer, not a crash.** When Anthropic stops with `refusal`, the agent replaces the response with a fixed sentence and drops any partial text or tool calls. The stop reason stays in the message metadata, so the evaluation can count refusals.
+
+### Reasoning stays with the model that wrote it
+- **The problem:** OpenAI's encrypted reasoning and Anthropic's signed thinking blocks are stored with the messages in the checkpoint and sent back on later calls; the same model needs them to continue a tool loop. Another model cannot use them. Before this change, langchain-openai would have sent another model's encrypted reasoning items to OpenAI as they were.
+- **Decision:** before each model call, assistant messages written by a different model are sent without their reasoning blocks (`reasoning`, `thinking`, `redacted_thinking`) and without reasoning kept in `additional_kwargs`. Text, tool calls, and metadata stay. The checkpoint is not changed, so switching back sends the reasoning again.
+- **Which model wrote a message** comes from `response_metadata["model_name"]`, which all three providers fill (checked against each library's own streaming parser in the tests).
+- **Names are compared after removing a known provider prefix and a trailing date, then for exact equality.** Anthropic answers with a dated snapshot (`claude-haiku-5-5-20261001`) for `claude-haiku-5-5`, and OpenAI with the name that was configured. A prefix match was rejected: it would treat `gpt-5.4` as `gpt-5.4-mini`, or `claude-haiku-5` as `claude-haiku-5-5`, and send reasoning to the wrong model.
+- **Unknown means unchanged.** A message with no model name is left as it is. Wrongly calling a message foreign would silently drop the current model's own reasoning on every turn, which is worse than the rare case it would protect against.
+
+### Switching models only between turns
+- **Anthropic needs its own reasoning inside a tool loop.** With thinking on, the assistant message whose tool calls are being answered must carry that model's thinking. No other model's message can, so a switch in the middle of a loop cannot be repaired by stripping.
+- **The rule:** if an assistant message from another model appears after the last user message in the history being sent, the run stops with `ModelSwitchMidTurn`. The stream sends an `error` event asking for a new message. A new message closes any open tool call (as before) and starts a new turn, which any model can continue.
+- **An explicit exception, not an assertion:** assertions disappear under `python -O`, and the case can happen in production, for example a confirmation card left open across a deploy that changes `ASSISTANT_MODEL`. It must end the run cleanly, not crash it.
+- **History trimming keeps the boundary visible.** `trim_history` keeps the whole current turn from its user message, even when that turn alone is over budget. So the check always sees the full loop. A test with a long final tool loop covers it.
+
+### Tests cannot reach the network
+- **Blank keys were not enough.** Tests already blanked every API key. A mock that silently did not take effect still sent a real request with a fake key: it was rejected, but nothing stopped it from leaving the machine.
+- **Decision:** pytest-socket now allows connections only to loopback (the containers' mapped ports) and Unix sockets (the Docker API). A test that would call a paid API fails instead. A canary test checks that both a raw connection and an SDK call are stopped.
+- **Side effect:** boto3's default credential chain probes the EC2 metadata address, which used to fail quietly. Tests now set `AWS_EC2_METADATA_DISABLED`, since they never run on an instance.
