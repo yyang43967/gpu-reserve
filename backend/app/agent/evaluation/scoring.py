@@ -10,7 +10,7 @@ import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Final
+from typing import Any
 
 from app.agent.evaluation.cases import (
     Case,
@@ -228,21 +228,13 @@ def check_db(
 
 _SENTENCE = re.compile(r"[^.!?\n]*[.!?]?")
 # Ways of asking for a detail without a question mark: "Please send the start time",
-# "Tell me the day", "I still need: - start time".
-_REQUEST_MARKERS: Final = (
-    "please send",
-    "please tell",
-    "please choose",
-    "please pick",
-    "please provide",
-    "please share",
-    "please confirm",
-    "please let me know",
-    "tell me",
-    "let me know",
-    "send me",
-    "i need",
-    "i still need",
+# "Tell me the day", "I still need: - start time". Offers ("tell me if you'd like...")
+# and the assistant's own plans ("I need to check availability") do not count.
+_REQUEST = re.compile(
+    r"\bplease (?:send|tell me|choose|pick|provide|share|confirm|let me know)\b"
+    r"|\b(?:tell me|let me know) (?:which|what|when|how|the|your)\b"
+    r"|\bi (?:still )?need (?:to know|the|your|from you|one thing from you)\b"
+    r"|\bi (?:still )?need\s*:"
 )
 _BULLET = re.compile(r"^\s*(?:[-*•]|\d+[.)])\s+")
 
@@ -256,9 +248,7 @@ def requests(text: str) -> list[str]:
     for i, line in enumerate(lines):
         for sentence in _SENTENCE.findall(line):
             lowered = sentence.casefold().strip()
-            if lowered and (
-                lowered.endswith("?") or any(marker in lowered for marker in _REQUEST_MARKERS)
-            ):
+            if lowered and (lowered.endswith("?") or _REQUEST.search(lowered) is not None):
                 found.append(lowered)
         if line.rstrip().endswith(":") and found and found[-1] in line.casefold():
             items = []

@@ -571,3 +571,23 @@ def test_a_list_after_a_colon_is_not_a_request_by_itself() -> None:
         "The lab's guide says one 4090 is enough for LoRA on 7B [1]."
     )
     assert not asks_about(answer, SERVER_TERMS)
+
+
+TIME_TERMS = ["date", "day", "time", "start", "hours", "how long", "window", "slot"]
+
+
+@pytest.mark.parametrize(
+    ("answer", "terms"),
+    [
+        # "I need" that is not a request to the user.
+        ("I need to check availability on each server first.", SERVER_TERMS),
+        ("I need to look up the lab's time zone before booking.", SERVER_TERMS),
+        # "Tell me" / "let me know" offering something else, not asking for the field.
+        ("Tell me if you'd like me to find open slots for a given duration instead.", TIME_TERMS),
+        ("Let me know if you want the server's notes as well.", SERVER_TERMS),
+    ],
+)
+def test_request_phrases_that_do_not_ask_for_the_field_do_not_count(
+    answer: str, terms: list[str]
+) -> None:
+    assert not asks_about(answer, terms)
