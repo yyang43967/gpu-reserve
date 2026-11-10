@@ -10,6 +10,7 @@ dependencies = [
     "asyncpg>=0.32.0",
     "boto3>=1.43.125",
     "fastapi[standard]>=0.162.0",
+    "langchain-anthropic>=1.7.10",
     "langchain-openai>=1.7.4",
     "langfuse>=5.2.0",
     "langgraph>=1.2.20",
@@ -37,6 +38,7 @@ dev = [
     "pytest>=9.2.0",
     "pytest-asyncio>=1.4.1.post1",
     "pytest-cov>=7.1.0",
+    "pytest-socket>=0.8.1",
     "ruff>=0.17.3",
     "testcontainers[postgres,redis]>=4.13.3",
 ]
@@ -85,4 +87,6 @@ asyncio_default_test_loop_scope = "session"
 markers = [
     "integration: tests that start real Postgres/Redis containers (requires Docker)",
 ]
-addopts = "-ra --strict-markers"
+# No test reaches beyond this machine: only loopback (containers' mapped ports) and Unix
+# sockets (the Docker API) can connect. A paid API call fails instead of being made.
+addopts = "-ra --strict-markers --allow-unix-socket --allow-hosts=127.0.0.1,::1,localhost"

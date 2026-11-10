@@ -19,6 +19,11 @@ jobs:
     name: Backend
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      # tiktoken downloads its encoding on first use. Tests cannot reach the network, so
+      # the encoding is fetched before pytest, as the image does at build time.
+      TIKTOKEN_CACHE_DIR: /home/runner/.cache/tiktoken
+      TIKTOKEN_ENCODING: cl100k_base
     defaults:
       run:
         working-directory: backend
@@ -32,6 +37,22 @@ jobs:
 
       - name: Install dependencies
         run: uv sync --frozen
+
+      - name: Read the locked tiktoken version
+        id: tiktoken
+        run: |
+          version=$(grep -A1 '^name = "tiktoken"$' uv.lock | sed -n 's/^version = "\(.*\)"$/\1/p')
+          test -n "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Cache the tiktoken encoding
+        uses: actions/cache@v6
+        with:
+          path: ${{ env.TIKTOKEN_CACHE_DIR }}
+          key: tiktoken-${{ steps.tiktoken.outputs.version }}-${{ env.TIKTOKEN_ENCODING }}
+
+      - name: Fetch the tiktoken encoding
+        run: uv run python -c "import os, tiktoken; tiktoken.get_encoding(os.environ['TIKTOKEN_ENCODING'])"
 
       - name: Lint
         run: uv run ruff check .

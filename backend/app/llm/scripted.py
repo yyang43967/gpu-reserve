@@ -26,6 +26,8 @@ class ScriptedChatModel(BaseChatModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     responder: Responder
+    # Reported in each response's metadata, as real providers do.
+    model_name: str = "scripted"
     # Every prompt the model received, for assertions.
     calls: list[list[BaseMessage]] = Field(default_factory=list)
 
@@ -48,7 +50,11 @@ class ScriptedChatModel(BaseChatModel):
         **kwargs: Any,
     ) -> ChatResult:
         self.calls.append(list(messages))
-        return ChatResult(generations=[ChatGeneration(message=self.responder(messages))])
+        message = self.responder(messages)
+        if "model_name" not in message.response_metadata:
+            metadata = {**message.response_metadata, "model_name": self.model_name}
+            message = message.model_copy(update={"response_metadata": metadata})
+        return ChatResult(generations=[ChatGeneration(message=message)])
 
 
 def _call_id() -> str:

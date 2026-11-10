@@ -17,14 +17,20 @@ from langgraph.prebuilt import ToolNode, tools_condition
 
 from app.agent.context import AgentContext
 from app.agent.prompts import SYSTEM_PROMPT
+from app.agent.reasoning import prepare_for_model
 from app.agent.state import AgentState
 from app.agent.tools import WRITE_GATED_TOOLS, build_tools, format_tool_error
+from app.llm.names import chat_model_name
 
 # Graph steps per run. Each model call and each tool round is one step, so this allows
 # about six model calls.
 RECURSION_LIMIT: Final = 12
 # Approximate tokens of system prompt plus history sent to the model.
 HISTORY_TOKEN_BUDGET: Final = 6000
+
+# What the user sees when the provider declines to answer (Anthropic's `refusal` stop
+# reason). The metadata keeps the stop reason, so evaluations can count refusals.
+REFUSAL_TEXT: Final = "I can't help with that request."
 
 AGENT_NODE: Final = "agent"
 TOOLS_NODE: Final = "tools"
@@ -63,16 +69,30 @@ def keep_one_write(message: AIMessage) -> AIMessage:
     )
 
 
+def handle_refusal(message: AIMessage) -> AIMessage:
+    """A refused response may hold partial text or calls; neither is used."""
+    if message.response_metadata.get("stop_reason") != "refusal":
+        return message
+    return AIMessage(
+        REFUSAL_TEXT,
+        id=message.id,
+        response_metadata=message.response_metadata,
+        usage_metadata=message.usage_metadata,
+    )
+
+
 def build_graph(
     model: BaseChatModel, checkpointer: BaseCheckpointSaver[Any] | None
 ) -> CompiledStateGraph[AgentState, AgentContext, AgentState, AgentState]:
     tools = build_tools()
     bound = model.bind_tools(tools, parallel_tool_calls=False)
+    model_name = chat_model_name(model)
 
     async def agent(state: AgentState) -> dict[str, Any]:
-        response = await bound.ainvoke(trim_history(state["messages"]))
+        history = prepare_for_model(trim_history(state["messages"]), model_name)
+        response = await bound.ainvoke(history)
         assert isinstance(response, AIMessage)  # noqa: S101 - chat models return AIMessage
-        return {"messages": [keep_one_write(response)]}
+        return {"messages": [keep_one_write(handle_refusal(response))]}
 
     graph = StateGraph(AgentState, context_schema=AgentContext)
     graph.add_node(AGENT_NODE, agent)

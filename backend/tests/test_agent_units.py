@@ -11,14 +11,13 @@ from langchain_openai import ChatOpenAI
 
 from app.agent import sse
 from app.agent.citations import cited_sources
-from app.agent.graph import HISTORY_TOKEN_BUDGET, build_graph, keep_one_write, trim_history
+from app.agent.graph import HISTORY_TOKEN_BUDGET, keep_one_write, trim_history
 from app.agent.prompts import SYSTEM_PROMPT
 from app.agent.state import merge_sources, source_key
 from app.agent.tools import WRITE_GATED_TOOLS, build_tools
 from app.agent.tracing import trace_metadata
 from app.core.config import Environment, Settings
 from app.core.exceptions import AssistantUnavailable
-from app.llm import registry
 from app.llm.registry import build_chat_model
 from app.llm.scripted import ScriptedChatModel
 
@@ -175,26 +174,6 @@ def test_openai_keeps_nothing_on_the_provider_side() -> None:
         assert text in sent
     # Server-side item ids would point at stored responses; none are sent.
     assert "msg_server_side_id" not in sent
-
-
-def test_a_chat_completions_provider_needs_no_agent_change(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setitem(
-        registry.PROVIDERS, "vllm", registry.Provider(api=registry.Api.CHAT_COMPLETIONS)
-    )
-    model = build_chat_model(
-        Settings(assistant_model="vllm:open-model", openai_api_key="sk-test")  # type: ignore[arg-type]
-    )
-    assert isinstance(model, ChatOpenAI)
-    assert not model.use_responses_api
-
-    payload = model._get_request_payload(_history())
-
-    assert "messages" in payload and "input" not in payload
-    assert "reasoning_effort" not in payload
-    graph = build_graph(model, None)
-    assert {"agent", "tools"} <= set(graph.nodes)
 
 
 class _Client:

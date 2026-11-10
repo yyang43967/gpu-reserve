@@ -42,7 +42,7 @@ from app.agent.tools import (
 )
 from app.agent.tracing import Tracing, trace_metadata
 from app.core.config import Settings
-from app.core.exceptions import AssistantBusy, NothingToConfirm
+from app.core.exceptions import AssistantBusy, ModelSwitchMidTurn, NothingToConfirm
 from app.models import ActionOutcome, ChatRole
 from app.rag.embeddings import Embedder
 from app.services import assistant_threads as threads
@@ -225,6 +225,15 @@ class Assistant:
             logger.warning("Assistant run on thread %s hit the recursion limit", thread_id)
             await stream.emit(
                 sse.event("error", message="That took too many steps. Try a narrower request.")
+            )
+        except ModelSwitchMidTurn as exc:
+            logger.warning("Assistant run on thread %s stopped: %s", thread_id, exc.detail)
+            await stream.emit(
+                sse.event(
+                    "error",
+                    message="The assistant model changed in the middle of this step. "
+                    "Send a new message to continue.",
+                )
             )
         except TimeoutError:
             logger.warning("Assistant run on thread %s timed out", thread_id)
