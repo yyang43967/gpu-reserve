@@ -31,6 +31,9 @@ x-backend-env: &backend-env
   OPENAI_API_KEY: ${OPENAI_API_KEY:-}
   # Assistant model and tracing. Tracing is skipped while the Langfuse keys are empty.
   ASSISTANT_MODEL: ${ASSISTANT_MODEL:-openai:gpt-5.4-mini-2026-03-17}
+  ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+  VLLM_BASE_URL: ${VLLM_BASE_URL:-}
+  VLLM_API_KEY: ${VLLM_API_KEY:-}
   LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
   LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
   LANGFUSE_HOST: ${LANGFUSE_HOST:-}
