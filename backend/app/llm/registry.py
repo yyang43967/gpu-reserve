@@ -11,7 +11,7 @@ ENVIRONMENT=test.
 
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Final
+from typing import Any, Final
 
 from langchain_anthropic import ChatAnthropic
 from langchain_core.language_models import BaseChatModel
@@ -61,6 +61,7 @@ def openai_compatible(
     api_key: SecretStr,
     settings: Settings,
     base_url: str | None = None,
+    extra_body: dict[str, Any] | None = None,
 ) -> ChatOpenAI:
     """A model behind an OpenAI-compatible API.
 
@@ -76,6 +77,7 @@ def openai_compatible(
         "request_timeout": settings.assistant_request_timeout_seconds,
         "max_retries": settings.assistant_request_retries,
         "stream_usage": True,
+        "extra_body": extra_body,
     }
     reasoning = {"effort": provider.reasoning_effort} if provider.reasoning_effort else None
     if provider.api is Api.RESPONSES:
@@ -92,6 +94,18 @@ def openai_compatible(
         use_responses_api=False,
         reasoning_effort=provider.reasoning_effort,
     )
+
+
+def vllm_extra_body(settings: Settings) -> dict[str, Any] | None:
+    """Fields vLLM reads beyond the OpenAI schema.
+
+    `chat_template_kwargs` reaches the model's chat template, which is where Qwen3 turns
+    thinking on or off. Nothing is sent when the setting is unset, so a model whose
+    template has no such switch gets an unchanged request.
+    """
+    if settings.vllm_enable_thinking is None:
+        return None
+    return {"chat_template_kwargs": {"enable_thinking": settings.vllm_enable_thinking}}
 
 
 def anthropic_native(
@@ -149,6 +163,7 @@ def build_chat_model(settings: Settings) -> BaseChatModel:
             api_key=settings.vllm_api_key,
             settings=settings,
             base_url=settings.vllm_base_url,
+            extra_body=vllm_extra_body(settings),
         )
     if settings.openai_api_key is None:
         raise AssistantUnavailable("OPENAI_API_KEY is not set.")
