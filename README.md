@@ -97,6 +97,8 @@ uv run python -m app.agent.evaluation describe        # regenerate evals/agent/c
 uv run python -m app.agent.evaluation run --repeat 2  # two runs of ASSISTANT_MODEL
 uv run python -m app.agent.evaluation judge ../evals/agent/runs/<run>...      # two judges on the judged answers
 uv run python -m app.agent.evaluation label-sheet ../evals/agent/runs/<run>... # answers to label by hand, blind
+uv run python -m app.agent.evaluation label-md     # the label sheet as evals/agent/hand_labels.md
+uv run python -m app.agent.evaluation label-read   # verdicts from the .md back into hand_labels.jsonl
 uv run python -m app.agent.evaluation compare ../evals/agent/runs/<run>...    # the comparison report
 ```
 

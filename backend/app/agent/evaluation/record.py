@@ -39,6 +39,7 @@ RUBRIC_PATH: Final = EVALS_DIR / "rubric.md"
 PRICES_PATH: Final = EVALS_DIR / "prices.json"
 JUDGE_CACHE_PATH: Final = EVALS_DIR / "judge_cache.jsonl"
 HAND_LABELS_PATH: Final = EVALS_DIR / "hand_labels.jsonl"
+HAND_LABELS_MD_PATH: Final = EVALS_DIR / "hand_labels.md"
 RESULTS_DIR: Final = EVALS_DIR / "results"
 SERVING_FILE: Final = REPO_ROOT / "serving" / "modal_vllm.py"
 PACKAGES: Final = (

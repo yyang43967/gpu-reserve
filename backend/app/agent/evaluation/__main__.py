@@ -5,6 +5,8 @@
     uv run python -m app.agent.evaluation run --repeat 2  # run ASSISTANT_MODEL on every case
     uv run python -m app.agent.evaluation judge RUN...    # two judges on the judged cases
     uv run python -m app.agent.evaluation label-sheet RUN...  # answers to label by hand
+    uv run python -m app.agent.evaluation label-md        # the label sheet as Markdown
+    uv run python -m app.agent.evaluation label-read      # verdicts from it, back to JSON
     uv run python -m app.agent.evaluation compare RUN...  # the comparison report
 
 `validate` and `run` need a Postgres role that may create databases (DATABASE_URL).
@@ -24,6 +26,7 @@ import uuid
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from langchain_core.messages import AIMessage
 
@@ -38,16 +41,20 @@ from app.agent.evaluation.judge import (
     judge_rows,
     write_judgments,
 )
+from app.agent.evaluation.labels import apply_verdicts, collect, dumps_rows, read_verdicts
+from app.agent.evaluation.labels import render as render_labels
 from app.agent.evaluation.oracle import ORACLE_ANSWER, replay_cases, static_problems
 from app.agent.evaluation.record import (
     CASES_MD_PATH,
     CASES_PATH,
+    HAND_LABELS_MD_PATH,
     HAND_LABELS_PATH,
     JUDGE_CACHE_PATH,
     PRICES_PATH,
     QUERY_EMBEDDINGS_PATH,
     RESULTS_DIR,
     RUBRIC_PATH,
+    RUNS_DIR,
     file_sha256,
     git_state,
     read_cases,
@@ -327,6 +334,34 @@ def write_label_sheet(run_dirs: Sequence[Path], cases_path: Path, limit: int) ->
     return EXIT_OK
 
 
+def _label_rows() -> list[dict[str, Any]]:
+    text = HAND_LABELS_PATH.read_text(encoding="utf-8")
+    return [json.loads(line) for line in text.splitlines() if line.strip()]
+
+
+def write_label_markdown(run_dirs: Sequence[Path]) -> int:
+    dirs = list(run_dirs) or sorted(p for p in (RUNS_DIR / "pilot").iterdir() if p.is_dir())
+    answers = collect(_label_rows(), [load_run(d) for d in dirs])
+    HAND_LABELS_MD_PATH.write_text(render_labels(answers), encoding="utf-8")
+    print(f"Wrote {HAND_LABELS_MD_PATH} ({len(answers)} answers)")
+    return EXIT_OK
+
+
+def read_label_markdown() -> int:
+    try:
+        verdicts = read_verdicts(HAND_LABELS_MD_PATH.read_text(encoding="utf-8"))
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    rows, missing = apply_verdicts(_label_rows(), verdicts)
+    HAND_LABELS_PATH.write_text(dumps_rows(rows), encoding="utf-8")
+    filled = len(rows) - len(missing)
+    print(f"{filled} of {len(rows)} verdicts filled; saved to {HAND_LABELS_PATH}")
+    for item in missing:
+        print(f"  missing: {item}", file=sys.stderr)
+    return EXIT_ERROR if missing else EXIT_OK
+
+
 def write_comparison(run_dirs: Sequence[Path], cases_path: Path, out: Path | None) -> int:
     labels = []
     if HAND_LABELS_PATH.exists():
@@ -377,6 +412,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     sheet.add_argument("runs", type=Path, nargs="+")
     sheet.add_argument("--cases", type=Path, default=CASES_PATH)
     sheet.add_argument("--limit", type=int, default=30, help="Answers to add.")
+    sheet_md = commands.add_parser("label-md", help="Write the label sheet as Markdown.")
+    sheet_md.add_argument("runs", type=Path, nargs="*", help="Runs the answers came from.")
+    commands.add_parser("label-read", help="Read verdicts from the Markdown label sheet.")
     versus = commands.add_parser("compare", help="Write the comparison report.")
     versus.add_argument("runs", type=Path, nargs="+")
     versus.add_argument("--cases", type=Path, default=CASES_PATH)
@@ -386,6 +424,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return asyncio.run(judge(args.runs, args.cases))
     if args.command == "label-sheet":
         return write_label_sheet(args.runs, args.cases, args.limit)
+    if args.command == "label-md":
+        return write_label_markdown(args.runs)
+    if args.command == "label-read":
+        return read_label_markdown()
     if args.command == "compare":
         return write_comparison(args.runs, args.cases, args.out)
     if args.command == "validate":
