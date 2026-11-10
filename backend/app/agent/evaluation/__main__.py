@@ -102,6 +102,8 @@ def dataset_problems(cases: Sequence[Case]) -> list[str]:
             for card in path.cards:
                 need("server", card.server, hosts)
                 need("reservation", card.reservation, known)
+            for email in path.protected_users:
+                need("user", email, users)
             for created in path.db.created:
                 need("server", created.server, hosts)
                 need("user", created.user, users)
@@ -119,8 +121,6 @@ async def validate(cases_path: Path) -> int:
         return EXIT_ERROR
     settings = eval_settings(get_settings(), Options())
     problems = dataset_problems(cases)
-    for case in cases:
-        problems.extend(static_problems(case, settings.kb_dir))
     if not problems:
         problems = await replay(settings, cases)
     for problem in problems:
@@ -146,7 +146,8 @@ async def replay(settings: Settings, cases: Sequence[Case]) -> list[str]:
         placeholder = ScriptedChatModel(responder=lambda _: AIMessage(ORACLE_ANSWER))
         options = Options(backoff_seconds=(0.0,))
         runner = CaseRunner(databases, settings, placeholder, recorded, options)
-        return await replay_cases(runner, cases)
+        problems = [p for case in cases for p in static_problems(case, databases.kb_anchors)]
+        return problems or await replay_cases(runner, cases)
     finally:
         await databases.drop_template()
 
@@ -263,7 +264,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     go.add_argument(
         "--budget-minutes",
         type=float,
-        help="Stop starting cases after this long; unfinished cases are marked aborted.",
+        help="Trial runs only: stop after this long and mark unfinished cases aborted. "
+        "It biases against slow configurations, so compared runs do not use it.",
     )
     go.add_argument("--allow-dirty", action="store_true")
     args = parser.parse_args(argv)

@@ -412,7 +412,6 @@ async def test_every_committed_case_holds_against_the_services(
     from app.agent.evaluation.record import CASES_PATH
 
     cases = load_cases(CASES_PATH)
-    settings = make_settings()
-    problems = [p for case in cases for p in static_problems(case, settings.kb_dir)]
+    problems = [p for case in cases for p in static_problems(case, databases.kb_anchors)]
     problems += await replay_cases(runner_for(databases, make_settings, booker([1])), cases)
     assert problems == []

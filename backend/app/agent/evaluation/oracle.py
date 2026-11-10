@@ -14,20 +14,23 @@ rules, and are checked when a real model runs.
 
 import json
 from collections.abc import Callable, Sequence
-from pathlib import Path
+from datetime import datetime, timedelta
 from typing import Any, Final
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 
-from app.agent.evaluation.cases import Case, Expectation, ExpectedCall
+from app.agent.evaluation.cases import EVAL_NOW, Case, Expectation, ExpectedCall
 from app.agent.evaluation.runner import CaseResult, CaseRunner, run_cases
 from app.agent.evaluation.scoring import Names
 from app.agent.tools import WRITE_GATED_TOOLS
 from app.llm.scripted import ScriptedChatModel
-from app.rag.chunking import load_sections
+from app.models import GpuModel
+from app.services import booking_rules
 
 # What the replay's model says when it has made its calls for a turn.
 ORACLE_ANSWER: Final = "Done."
+# A slot search may start from the current half hour, a little before the fixed clock.
+SLOT_GRACE: Final = timedelta(minutes=30)
 # Checks decided by the services rather than by the model's wording.
 SERVICE_CHECKS: Final = ("completed", "cards", "db", "actions")
 
@@ -98,22 +101,52 @@ def replay_responder(path: Expectation, names: Names) -> Callable[[list[BaseMess
     return respond
 
 
-def static_problems(case: Case, kb_dir: Path) -> list[str]:
-    """Rules about an outcome that need no database."""
+def static_problems(case: Case, anchors: set[tuple[str, str]]) -> list[str]:
+    """Rules about an outcome that need no replay: errors need a write call that could
+    raise them, every cited section exists in the ingested knowledge base, and expected
+    slot searches fit the fixed clock."""
     problems: list[str] = []
-    sections = {(s.document, s.heading_path) for s in load_sections(kb_dir)}
-    documents = {document for document, _ in sections}
+    documents = {document for document, _ in anchors}
     for index, path in enumerate(case.expect, start=1):
+        where = f"{case.id} outcome {index}"
         writes = [call for call in path.calls if call.name in WRITE_GATED_TOOLS]
         if path.errors and not writes:
             problems.append(
-                f"{case.id} outcome {index}: expects errors {path.errors} but makes no write "
-                "call that could raise them"
+                f"{where}: expects errors {path.errors} but makes no write call that "
+                "could raise them"
             )
         for citation in path.citations:
             document, _, heading = citation.partition("#")
-            if document not in documents or (heading and (document, heading) not in sections):
-                problems.append(f"{case.id} outcome {index}: no section {citation!r}")
+            if document not in documents or (heading and (document, heading) not in anchors):
+                problems.append(f"{where}: no section {citation!r} in kb_chunks")
+        for call in path.calls:
+            if call.name == "find_slots":
+                problems.extend(f"{where}: find_slots {p}" for p in slot_problems(call))
+    return problems
+
+
+def slot_problems(call: ExpectedCall) -> list[str]:
+    """Expected find_slots arguments that no correct search at EVAL_NOW could use."""
+    args = {key: representative(value) for key, value in call.args.items()}
+    problems: list[str] = []
+    times: dict[str, datetime] = {}
+    for key in ("earliest", "latest"):
+        if key in args:
+            moment = datetime.fromisoformat(str(args[key]))
+            times[key] = moment
+            if moment.tzinfo is None:
+                problems.append(f"{key} has no offset")
+            elif moment < EVAL_NOW - SLOT_GRACE:
+                problems.append(f"{key} {moment.isoformat()} is before the fixed clock")
+            elif moment > EVAL_NOW + booking_rules.BOOKING_HORIZON + SLOT_GRACE:
+                problems.append(f"{key} {moment.isoformat()} is past the booking horizon")
+    if "earliest" in times and "latest" in times and times["earliest"] >= times["latest"]:
+        problems.append("earliest is not before latest")
+    duration = args.get("duration_minutes")
+    if duration is not None and (int(duration) < 30 or int(duration) % 30):
+        problems.append(f"duration_minutes {duration} is not a positive multiple of 30")
+    if "gpu_model" in args and args["gpu_model"] not in {m.value for m in GpuModel}:
+        problems.append(f"unknown gpu_model {args['gpu_model']!r}")
     return problems
 
 

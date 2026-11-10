@@ -30,6 +30,7 @@ from app.agent.evaluation.database import (
     reservation_snapshot,
     server_ids,
     user_by_email,
+    user_ids,
 )
 from app.agent.evaluation.driver import InfraFailure, Transcript, play
 from app.agent.evaluation.recorder import Failure, ModelCall, Recorder
@@ -216,7 +217,8 @@ class CaseRunner:
             user = await user_by_email(session, case.user)
             thread = await threads.create_thread(session, user, None)
             servers = await server_ids(session)
-        known = Names(servers=servers, reservations=_purposes(before))
+            users = await user_ids(session)
+        known = Names(servers=servers, reservations=_purposes(before), users=users)
         model = self.model if self.model_for is None else self.model_for(case, known)
         recorder = Recorder()
         async with assistant_lifespan(
@@ -244,7 +246,7 @@ class CaseRunner:
             before=before,
             after=after,
             actions=await action_outcomes(sessions),
-            names=Names(servers=servers, reservations=purposes),
+            names=Names(servers=servers, reservations=purposes, users=users),
         )
         score = score_case(case, seen)
         return _result(

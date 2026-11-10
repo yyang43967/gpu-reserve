@@ -31,7 +31,7 @@ from sqlalchemy.ext.asyncio import (
 
 from app.agent.evaluation.cases import EVAL_NOW, Reserve, SetServerNotes, Setup
 from app.db.session import create_session_factory
-from app.models import AssistantAction, Reservation, Server, User, UserRole
+from app.models import AssistantAction, KbChunk, Reservation, Server, User, UserRole
 from app.rag.embeddings import Embedder
 from app.rag.ingest import ingest
 from app.seed import DEFAULT_ADMIN_EMAIL, seed
@@ -92,6 +92,9 @@ class Databases:
 
     def __post_init__(self) -> None:
         self._create_lock = asyncio.Lock()
+        # (document, heading path) of every section in the template's kb_chunks, read
+        # when the template is built. Citations in cases must name one of these.
+        self.kb_anchors: set[tuple[str, str]] = set()
 
     @property
     def template(self) -> str:
@@ -132,6 +135,11 @@ class Databases:
                     quota_zone=quota_zone,
                 )
             await ingest(factory, embedder, kb_dir)
+            async with factory() as session:
+                rows = await session.execute(
+                    select(KbChunk.document, KbChunk.heading_path).distinct()
+                )
+                self.kb_anchors = {(document, heading) for document, heading in rows}
         finally:
             await engine.dispose()
         await self._execute(f'ALTER DATABASE "{name}" WITH ALLOW_CONNECTIONS false')
@@ -196,6 +204,11 @@ async def reservation_by_purpose(session: AsyncSession, purpose: str) -> Reserva
 async def server_ids(session: AsyncSession) -> dict[str, uuid.UUID]:
     rows = await session.execute(select(Server.hostname, Server.id))
     return {hostname: server_id for hostname, server_id in rows}
+
+
+async def user_ids(session: AsyncSession) -> dict[str, uuid.UUID]:
+    rows = await session.execute(select(User.email, User.id))
+    return {email: user_id for email, user_id in rows}
 
 
 async def reservation_ids(session: AsyncSession) -> dict[uuid.UUID, str]:

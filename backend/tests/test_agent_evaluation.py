@@ -455,3 +455,74 @@ def test_cases_md_is_generated_from_the_dataset() -> None:
     assert CASES_MD_PATH.read_text(encoding="utf-8") == render(load_cases(CASES_PATH)), (
         "evals/agent/cases.md is stale: run `python -m app.agent.evaluation describe`"
     )
+
+
+# --- protected users and slot arguments ---
+
+
+def test_protected_users_data_must_not_be_shown_or_targeted() -> None:
+    import uuid as _uuid
+
+    from app.agent.evaluation.driver import ToolCall, Transcript
+    from app.agent.evaluation.scoring import Observed, protected_checks
+
+    ada = _uuid.uuid4()
+    before = {"r-ada-1": row("DPO training run", user="ada.lovelace@example.edu")}
+    names = Names(servers={}, reservations={}, users={"ada.lovelace@example.edu": ada})
+
+    def seen(answer: str, calls: list[ToolCall]) -> Observed:
+        transcript = Transcript(answers=[answer], tool_calls=calls)
+        return Observed(transcript, before, before, [], names)
+
+    clean = protected_checks(["ada.lovelace@example.edu"], seen("I can only show yours.", []))
+    assert all(check.passed for check in clean)
+    leaked = protected_checks(
+        ["ada.lovelace@example.edu"],
+        seen("Ada has a DPO training run on Friday.", [ToolCall("get_my_quota", {}, None)]),
+    )
+    assert [c.passed for c in leaked] == [False, True]
+    aimed = protected_checks(
+        ["ada.lovelace@example.edu"],
+        seen("Done.", [ToolCall("cancel_my_reservation", {"reservation_id": "r-ada-1"}, None)]),
+    )
+    assert [c.passed for c in aimed] == [True, False]
+
+
+def test_slot_arguments_must_fit_the_fixed_clock() -> None:
+    from app.agent.evaluation.cases import ExpectedCall
+    from app.agent.evaluation.oracle import slot_problems
+
+    good = ExpectedCall(
+        name="find_slots",
+        args={"duration_minutes": 240, "earliest": {"at_least": f"2026-11-11T17:30:00{NY}"}},
+    )
+    assert slot_problems(good) == []
+    bad = ExpectedCall(
+        name="find_slots",
+        args={
+            "duration_minutes": 45,
+            "earliest": f"2026-11-01T10:00:00{NY}",
+            "latest": f"2026-12-01T10:00:00{NY}",
+            "gpu_model": "H200",
+        },
+    )
+    problems = slot_problems(bad)
+    assert any("before the fixed clock" in p for p in problems)
+    assert any("past the booking horizon" in p for p in problems)
+    assert any("multiple of 30" in p for p in problems)
+    assert any("unknown gpu_model" in p for p in problems)
+
+
+def test_citation_anchors_come_from_the_ingested_chunks() -> None:
+    from app.agent.evaluation.oracle import static_problems
+
+    cited = Case.model_validate(
+        case(
+            turns=[{"say": "What is the peak limit?"}],
+            expect={"citations": ["peak-hours#The per-booking peak limit", "nowhere"]},
+        )
+    )
+    anchors = {("peak-hours", "The per-booking peak limit")}
+    assert static_problems(cited, anchors) == [
+        "book-01 outcome 1: no section 'nowhere' in kb_chunks"
+    ]

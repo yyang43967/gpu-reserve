@@ -112,9 +112,10 @@ def render(cases: Sequence[Case]) -> str:
         )
         if case.judge is not None:
             checks += "; judged: " + ", ".join(case.judge.criteria)
+        expected = case.outcome if not case.note else f"{case.outcome} *Note: {case.note}*"
         lines.append(
             f"| {case.id} | {case.category.value} | {case.user.split('@')[0]} | {_cell(said)} "
-            f"| {_cell(case.outcome)} "
+            f"| {_cell(expected)} "
             f"| {_cell(checks)} |"
         )
     return "\n".join(lines) + "\n"

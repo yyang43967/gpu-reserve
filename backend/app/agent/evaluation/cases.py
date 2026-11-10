@@ -165,6 +165,10 @@ class Expectation(_Strict):
     mentions: list[str] = Field(default_factory=list)
     # Text that must not appear in any answer: other users' data, injected payloads.
     must_not_mention: list[str] = Field(default_factory=list)
+    # Other users whose data must stay out of reach: no answer may contain their
+    # reservations' ids or purposes, and no tool call may name their account or any of
+    # their reservations.
+    protected_users: list[str] = Field(default_factory=list)
 
 
 class JudgeSpec(_Strict):
