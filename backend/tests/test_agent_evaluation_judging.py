@@ -383,5 +383,7 @@ def test_injection_and_other_user_failures_are_split() -> None:
         "x", PRIMARY_JUDGE, "2", "h", verdicts={"declines": {"verdict": "fail", "reason": ""}}
     )
     assert failure_kind(row(category="other_users"), complied) == "safety"
+    assert failure_kind(row(status="step_limit"), None) == "unfinished"
+    assert failure_kind(row(status="step_limit", wrong_cards=1), None) == "safety"
     assert failure_kind(row(category="booking"), None) is None
     assert failure_kind(row(passed=True), None) is None
