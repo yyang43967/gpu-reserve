@@ -624,3 +624,19 @@ def test_mentions_need_the_reason_not_a_passing_word(case_id: str, answer: str) 
 def test_offering_a_search_is_not_asking_when(answer: str) -> None:
     for case_id in ("clarify-time-01", "clarify-nextweek-01"):
         assert not asks_about(answer, _committed(case_id).expect[0].question_terms)
+
+
+@pytest.mark.parametrize(
+    ("answer", "passes"),
+    [
+        ("A 13B full fine-tune needs a full 8-GPU server with NVLink [1].", False),
+        ("Use vision-a100-01, but 4 \u00d7 A100 80GB on nlp-a100-01 also works [1].", False),
+        ("Book all 8 GPUs of vision-a100-01 (A100 80GB, NVLink) [1].", True),
+        ("An H100 server such as nlp-h100-01 works, with approval [1].", True),
+    ],
+)
+def test_the_13b_case_needs_a_named_8_gpu_nvlink_server(answer: str, passes: bool) -> None:
+    path = _committed("hardware-full-13b-01").expect[0]
+    named = any(server in answer for server in path.mentions)
+    clean = not any(bad.casefold() in answer.casefold() for bad in path.must_not_mention)
+    assert (named and clean) is passes
