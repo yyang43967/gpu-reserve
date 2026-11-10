@@ -86,6 +86,18 @@ docker compose run --rm api python -m app.cli create-admin --email admin@example
 
 Admins manage accounts, labs, and servers under `/admin` in the web app.
 
+### Assistant evaluation
+
+The agent evaluation runs every case in `evals/agent/cases.jsonl` against the model in `ASSISTANT_MODEL`. Each case gets its own copy of a template database (migrated, seeded, and holding the knowledge base), with the clock fixed so relative dates mean the same day in every run. The database role in `DATABASE_URL` must be allowed to create databases; the Compose Postgres user is.
+
+```bash
+cd backend
+uv run python -m app.agent.evaluation validate        # check the dataset against the seed data
+uv run python -m app.agent.evaluation run --repeat 2  # two runs of ASSISTANT_MODEL
+```
+
+`run` needs the model's API key (or `VLLM_BASE_URL` and `VLLM_API_KEY`), and `OPENAI_API_KEY` for policy-search queries that are not yet in `evals/agent/query_embeddings.json.gz`. It refuses a working tree with uncommitted changes unless given `--allow-dirty`, which the run records. Each run writes `evals/agent/runs/<run id>/run.json` (the full configuration) and `cases.jsonl.gz` (one row per case).
+
 ## Repository layout
 
 | Path | Contents |
@@ -93,7 +105,7 @@ Admins manage accounts, labs, and servers under `/admin` in the web app.
 | `backend/` | FastAPI application, workers, tests |
 | `frontend/` | React + TypeScript single-page app |
 | `kb/` | Knowledge base documents for the assistant |
-| `evals/` | Assistant evaluation dataset, runner, results |
+| `evals/` | Retrieval and agent evaluation data and results |
 | `loadtest/` | k6 scripts and results |
 | `serving/` | Self-hosted model deployment |
 | `infra/` | Terraform and production deployment files |

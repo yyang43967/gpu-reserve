@@ -15,10 +15,11 @@ import asyncio
 import contextlib
 import logging
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any, Final, Literal, cast
 
+from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.errors import GraphRecursionError
@@ -106,6 +107,7 @@ class Assistant:
         embedder: Embedder | None,
         tracing: Tracing | None,
         clock: Callable[[], Any] = utc_now,
+        callbacks: Sequence[BaseCallbackHandler] = (),
     ) -> None:
         self.graph = graph
         self._sessions = sessions
@@ -113,6 +115,9 @@ class Assistant:
         self._embedder = embedder
         self._tracing = tracing
         self._clock = clock
+        # Extra observers for every run, next to tracing. The evaluation runner records
+        # each model call's latency, tokens, and errors through one.
+        self._callbacks = list(callbacks)
         self._tasks: set[asyncio.Task[None]] = set()
 
     # --- entry points ---
@@ -190,8 +195,11 @@ class Assistant:
             "run_name": "assistant",
             "metadata": trace_metadata(thread_id=ctx.thread_id, user_id=ctx.user_id, kind=kind),
         }
+        callbacks = [*self._callbacks]
         if self._tracing is not None:
-            config["callbacks"] = [self._tracing.handler()]
+            callbacks.append(self._tracing.handler())
+        if callbacks:
+            config["callbacks"] = callbacks
         return config
 
     async def _claim(self, thread_id: uuid.UUID) -> None:
