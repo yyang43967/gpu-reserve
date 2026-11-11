@@ -77,6 +77,7 @@ services:
       context: ./backend
       additional_contexts:
         kb: ./kb
+        deploy: ./infra/deploy
     image: gpu-reserve-api:local
     profiles: [core, full]
     environment: *backend-env

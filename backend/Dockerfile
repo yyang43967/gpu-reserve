@@ -18,6 +18,10 @@ COPY alembic ./alembic
 # The knowledge base lives at the repository root; Compose passes it as a named build
 # context (additional_contexts: kb).
 COPY --from=kb . ./kb
+# The production Compose file, Caddyfile, and deploy script (infra/deploy, also a named
+# context). The deploy extracts them from the image it is deploying, so configuration
+# and code always ship, and roll back, together.
+COPY --from=deploy . ./deploy
 
 FROM python:3.12-slim AS runtime
 ENV PATH="/app/.venv/bin:$PATH" \

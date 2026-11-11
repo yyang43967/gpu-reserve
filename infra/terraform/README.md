@@ -72,7 +72,7 @@ terraform plan   # re-adopts the bucket's settings; review before applying
 
 ## Main configuration
 
-What it creates (`terraform plan` lists 29 resources with the CI deploy role off):
+What it creates (`terraform plan` lists 36 resources with the CI deploy role off):
 
 - The instance: `t4g.small`, Amazon Linux 2023 arm64, 30 GB encrypted gp3, IMDSv2 only, standard CPU credits, an Elastic IP, and a first-boot script that adds a 1 GiB swap file, Docker with log rotation, and the Compose plugin.
 - A security group open on 80/tcp and 443/tcp+udp only. There is no SSH port: shell access is `aws ssm start-session --target <instance-id>`.
@@ -80,6 +80,7 @@ What it creates (`terraform plan` lists 29 resources with the CI deploy role off
 - ECR repository `gpu-reserve/api` (immutable tags, last 10 images kept).
 - S3 buckets for uploads (CORS for the frontend origin) and backups (14-day expiry).
 - The SES domain identity for `gpu.yiyangdev.com`, with DKIM.
+- The non-secret deploy settings as String parameters under `/gpu-reserve/prod/` (secrets are added by hand).
 - A $20 monthly cost budget, alerting at $10, at $20, and when the forecast passes $20.
 - With `github_deploy_role_enabled = true`: GitHub's OIDC provider and the deploy role.
 
@@ -98,7 +99,7 @@ terraform output dns_records
 Then, by hand:
 
 1. In Cloudflare, add the records from `dns_records`, **DNS only** (grey cloud): the `A` record for the API, the three DKIM `CNAME`s, and the `_dmarc` `TXT`. Caddy needs the `A` record to reach the instance directly for its certificate.
-2. Enter the application's secrets as SecureString parameters under `ssm_parameter_prefix` (the list is in `infra/deploy/README.md`).
+2. Enter the secrets as SecureString parameters under `ssm_parameter_prefix` (the list is in `infra/deploy/README.md`; Terraform already created the non-secret settings there).
 3. Deploy (see `infra/deploy/README.md`).
 
 SES verifies the domain on its own once the DKIM records resolve (minutes to an hour). Addresses in `ses_sandbox_recipients` get a verification email from AWS; mail reaches them only after the link is clicked.

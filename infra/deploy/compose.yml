@@ -1,0 +1,166 @@
+# Production stack on the single instance. deploy.sh runs it as Compose project
+# `gpu-reserve` from /opt/gpu-reserve/current, with the env file it writes from SSM
+# Parameter Store (/opt/gpu-reserve/.env, mode 0600).
+#
+# Memory on a t4g.small (2 GiB, about 1.85 GiB usable): limits add up to 1,376 MiB,
+# leaving about 470 MiB for the OS, Docker, and the SSM agent. Containers get no swap
+# (memswap_limit = mem_limit); the host's 1 GiB swap file absorbs deploy-time spikes.
+
+name: gpu-reserve
+
+x-restart: &restart
+  restart: unless-stopped
+
+x-backend-env: &backend-env
+  ENVIRONMENT: production
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  DATABASE_URL: postgresql+asyncpg://gpureserve:${POSTGRES_PASSWORD:?}@postgres:5432/gpureserve
+  REDIS_URL: redis://redis:6379/0
+  JWT_SECRET: ${JWT_SECRET:?}
+  CORS_ORIGINS: ${CORS_ORIGINS:?}
+  FRONTEND_URL: ${FRONTEND_URL:?}
+  # AWS clients take credentials from the instance role (IMDSv2).
+  AWS_REGION: ${AWS_REGION:?}
+  AWS_DEFAULT_REGION: ${AWS_REGION:?}
+  S3_REGION: ${AWS_REGION:?}
+  S3_BUCKET_UPLOADS: ${S3_BUCKET_UPLOADS:?}
+  EMAIL_BACKEND: ses
+  SES_REGION: ${AWS_REGION:?}
+  EMAIL_FROM: ${EMAIL_FROM:?}
+  OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+  ASSISTANT_MODEL: ${ASSISTANT_MODEL:-openai:gpt-5.4-mini-2026-03-17}
+  ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+  LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+  LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
+  LANGFUSE_HOST: ${LANGFUSE_HOST:-}
+
+services:
+  caddy:
+    <<: *restart
+    image: caddy:2.11-alpine
+    environment:
+      API_SITE_ADDRESS: ${API_SITE_ADDRESS:?}
+      API_UPSTREAM: api:8000
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Certificates and ACME account. Losing them means reissuing, and Let's Encrypt
+      # limits how often that can happen for one name.
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      api:
+        condition: service_healthy
+    mem_limit: 64m
+    memswap_limit: 64m
+
+  api:
+    <<: *restart
+    image: ${API_IMAGE:?}
+    command:
+      - uvicorn
+      - app.main:app
+      - --host=0.0.0.0
+      - --port=8000
+      - --proxy-headers
+      # Only Caddy can reach this port (it is not published), so the client address
+      # it forwards is trusted. Rate limits key on that address.
+      - --forwarded-allow-ips=*
+    environment: *backend-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    mem_limit: 448m
+    memswap_limit: 448m
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/ready', timeout=3)"
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+
+  worker:
+    <<: *restart
+    image: ${API_IMAGE:?}
+    command: ["arq", "app.workers.settings.WorkerSettings"]
+    environment: *backend-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    mem_limit: 256m
+    memswap_limit: 256m
+    healthcheck:
+      test: ["CMD", "arq", "--check", "app.workers.settings.WorkerSettings"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  # One-off: `docker compose run --rm migrate`, before the new api and worker start.
+  migrate:
+    image: ${API_IMAGE:?}
+    command: ["alembic", "upgrade", "head"]
+    environment: *backend-env
+    profiles: [migrate]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    mem_limit: 256m
+    memswap_limit: 256m
+
+  postgres:
+    <<: *restart
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: gpureserve
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?}
+      POSTGRES_DB: gpureserve
+    command:
+      - postgres
+      - -c
+      - shared_buffers=128MB
+      - -c
+      - max_connections=50
+      - -c
+      - effective_cache_size=384MB
+      - -c
+      - work_mem=4MB
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    mem_limit: 512m
+    memswap_limit: 512m
+    shm_size: 128m
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gpureserve -d gpureserve"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    <<: *restart
+    image: redis:7-alpine
+    # noeviction: ARQ's queue must never be evicted. Cache entries all have TTLs.
+    command: redis-server --maxmemory 64mb --maxmemory-policy noeviction --save "" --appendonly no
+    mem_limit: 96m
+    memswap_limit: 96m
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  postgres-data:
+  caddy-data:
+  caddy-config:

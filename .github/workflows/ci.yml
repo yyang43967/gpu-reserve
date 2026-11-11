@@ -133,6 +133,20 @@ jobs:
             echo "::endgroup::"
           done
 
+  deploy-scripts:
+    name: Deploy scripts
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+
+      # shellcheck and python3 are on the runner image.
+      - name: Shellcheck
+        run: shellcheck infra/deploy/*.sh infra/deploy/tests/*.sh
+
+      - name: Test deploy.sh
+        run: bash infra/deploy/tests/deploy-test.sh
+
   image-and-smoke:
     name: ARM64 image and stack smoke test
     if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'
