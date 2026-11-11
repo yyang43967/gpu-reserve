@@ -1,7 +1,7 @@
 // Availability lookups, as the server page makes them: mostly the default next seven
 // days, sometimes a window of one to seven days starting up to a week ahead.
 import { check } from "k6";
-import { API, check401and429, generatedAt, headers, http, random, stepTags, pick, servers, studentToken, loadOptions, writeSummary } from "./lib/common.js";
+import { API, record, generatedAt, headers, http, random, stepTags, pick, servers, studentToken, loadOptions, writeSummary } from "./lib/common.js";
 
 export const options = loadOptions();
 
@@ -16,11 +16,13 @@ function query() {
 }
 
 export default function () {
-  const response = check401and429(
+  const tags = stepTags("GET /servers/{id}/availability");
+  const response = record(
     http.get(`${API}/servers/${pick(servers).id}/availability${query()}`, {
       headers: headers(studentToken()),
-      tags: stepTags("GET /servers/{id}/availability"),
-    })
+      tags,
+    }),
+    tags
   );
   check(response, { "availability 200": (r) => r.status === 200 });
 }

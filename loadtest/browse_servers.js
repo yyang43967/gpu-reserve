@@ -1,7 +1,7 @@
 // Browsing servers: the list with a random filter, then one server's detail. Neither
 // endpoint uses the availability cache; this is the control.
 import { check } from "k6";
-import { API, check401and429, headers, http, random, stepTags, labs, pick, servers, studentToken, loadOptions, writeSummary } from "./lib/common.js";
+import { API, record, headers, http, random, stepTags, labs, pick, servers, studentToken, loadOptions, writeSummary } from "./lib/common.js";
 
 export const options = loadOptions();
 
@@ -22,9 +22,11 @@ function listQuery() {
 
 export default function () {
   const auth = { headers: headers(studentToken()) };
-  const list = check401and429(http.get(`${API}/servers?page_size=20${listQuery()}`, { ...auth, tags: stepTags("GET /servers") }));
+  const listTags = stepTags("GET /servers");
+  const list = record(http.get(`${API}/servers?page_size=20${listQuery()}`, { ...auth, tags: listTags }), listTags);
   check(list, { "list 200": (r) => r.status === 200 });
-  const one = check401and429(http.get(`${API}/servers/${pick(servers).id}`, { ...auth, tags: stepTags("GET /servers/{id}") }));
+  const oneTags = stepTags("GET /servers/{id}");
+  const one = record(http.get(`${API}/servers/${pick(servers).id}`, { ...auth, tags: oneTags }), oneTags);
   check(one, { "detail 200": (r) => r.status === 200 });
 }
 

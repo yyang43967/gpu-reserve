@@ -40,7 +40,18 @@ export function studentToken() {
   return students[(__VU - 1) % students.length];
 }
 
-export function check401and429(response) {
+// Every response is counted by status code, tagged like the request (its capacity step;
+// the scenario adds the latency phase), so the summary shows what the failures were.
+// Codes outside STATUSES are counted as "other"; 0 is a request that got no response.
+export const STATUSES = ["0", "200", "201", "400", "401", "403", "404", "409", "422", "429", "500", "502", "503", "504", "other"];
+const responses = new Counter("responses");
+
+export function record(response, tags = {}) {
+  const code = String(response.status);
+  const status = STATUSES.includes(code) ? code : "other";
+  const tagged = { status };
+  if (tags.step) tagged.step = tags.step;
+  responses.add(1, tagged);
   if (response.status === 401) unauthorized.add(1);
   if (response.status === 429) rateLimited.add(1);
   return response;
@@ -83,11 +94,15 @@ const RATE_UNIT = "10s";
 const perTenSeconds = (perSecond) => Math.round(perSecond * 10);
 
 const abortOn = [{ threshold: "count==0", abortOnFail: true }];
-const reported = (tag) => ({
-  [`http_req_duration{${tag}}`]: ["p(95)>=0"],
-  [`http_reqs{${tag}}`]: ["count>=0"],
-  [`http_req_failed{${tag}}`]: ["rate>=0"],
-});
+export function reported(tag) {
+  const thresholds = {
+    [`http_req_duration{${tag}}`]: ["p(95)>=0"],
+    [`http_reqs{${tag}}`]: ["count>=0"],
+    [`http_req_failed{${tag}}`]: ["rate>=0"],
+  };
+  for (const status of STATUSES) thresholds[`responses{${tag},status:${status}}`] = ["count>=0"];
+  return thresholds;
+}
 
 // Open-model load: k6 starts iterations at a set rate whether or not earlier ones have
 // finished, so a slower server faces a growing backlog instead of slowing the clients
@@ -173,10 +188,13 @@ function summaryLine(data) {
     const reqs = data.metrics[`http_reqs{${label}}`];
     const failed = data.metrics[`http_req_failed{${label}}`];
     if (!duration || !reqs || !reqs.values.count) continue;
+    const statuses = STATUSES.map((status) => [status, data.metrics[`responses{${label},status:${status}}`]])
+      .filter(([, counted]) => counted && counted.values.count)
+      .map(([status, counted]) => `${status} x${counted.values.count}`);
     lines.push(
       `${label}: ${reqs.values.count} requests, ` +
         `p50 ${duration.values.med.toFixed(1)} ms, p95 ${duration.values["p(95)"].toFixed(1)} ms, ` +
-        `failed ${(100 * (failed ? failed.values.rate : 0)).toFixed(2)}%`
+        `failed ${(100 * (failed ? failed.values.rate : 0)).toFixed(2)}% (${statuses.join(", ")})`
     );
   }
   const dropped = data.metrics.dropped_iterations;

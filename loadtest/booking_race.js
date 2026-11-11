@@ -4,7 +4,7 @@
 // database by `python -m app.loadtest verify` (the runner does this).
 import { check } from "k6";
 import { Counter } from "k6/metrics";
-import { API, check401and429, headers, http, race, racers, writeSummary } from "./lib/common.js";
+import { API, headers, http, race, racers, record, reported, writeSummary } from "./lib/common.js";
 
 const won = new Counter("race_won");
 const lost = new Counter("race_lost");
@@ -22,9 +22,7 @@ export const options = {
   thresholds: {
     unauthorized: [{ threshold: "count==0", abortOnFail: true }],
     rate_limited: [{ threshold: "count==0", abortOnFail: true }],
-    "http_req_duration{phase:measure}": ["p(95)>=0"],
-    "http_reqs{phase:measure}": ["count>=0"],
-    "http_req_failed{phase:measure}": ["rate>=0"],
+    ...reported("phase:measure"),
     race_won: ["count>=0"],
     race_lost: ["count>=0"],
   },
@@ -34,7 +32,7 @@ export const options = {
 http.setResponseCallback(http.expectedStatuses(201, 409));
 
 export default function () {
-  const response = check401and429(
+  const response = record(
     http.post(
       `${API}/reservations`,
       JSON.stringify({

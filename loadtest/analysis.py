@@ -17,8 +17,13 @@ RAMP_MAX = {"browse_servers": 250, "availability": 450, "slot_search": 45}
 SLO_P95_MS = 500.0
 SUSTAINED_SHARE = 0.95
 SUSTAINED_MAX_ERRORS = 0.01
-# The fixed rate for the latency comparison, as a share of the uncached capacity.
+# The fixed rate for the latency comparison: this share of the median uncached rate
+# sustained cleanly (as above, but with no failed request at all). Not the peak, which
+# counts failures, so a stack shedding load with fast 503s would set it too high.
 LATENCY_LOAD_SHARE = 0.65
+# Status codes counted per tag by the k6 scripts (lib/common.js).
+STATUSES = ("0", "200", "201", "400", "401", "403", "404", "409", "422", "429", "500", "502")
+STATUSES += ("503", "504", "other")
 
 
 def seconds(duration: str) -> int:
@@ -56,23 +61,40 @@ def steps(
     return rows
 
 
-def capacity(rows: list[dict[str, float]]) -> dict[str, float]:
-    """The peak throughput reached, and the highest offered rate that was sustained."""
-    peak = max(r["achieved_rps"] for r in rows)
+def statuses(summary: dict[str, Any], tag: str) -> dict[str, int]:
+    """Responses by status code for one tag, such as `phase:measure` or `step:3`."""
+    counts = {}
+    for status in STATUSES:
+        count = int(metric(summary, f"responses{{{tag},status:{status}}}", "count"))
+        if count:
+            counts[status] = count
+    return counts
+
+
+def sustained_rps(rows: list[dict[str, float]], *, max_errors: float) -> float:
+    """The highest offered rate before the first step that misses the target."""
     sustained = 0.0
     for row in rows:
         if (
             row["p95"] <= SLO_P95_MS
             and row["achieved_rps"] >= SUSTAINED_SHARE * row["offered_rps"]
-            and row["failed"] <= SUSTAINED_MAX_ERRORS
+            and row["failed"] <= max_errors
         ):
             sustained = row["offered_rps"]
         else:
             break
+    return sustained
+
+
+def capacity(rows: list[dict[str, float]]) -> dict[str, float]:
+    """The peak throughput reached, and the highest offered rate that was sustained."""
+    peak = max(r["achieved_rps"] for r in rows)
+    sustained = sustained_rps(rows, max_errors=SUSTAINED_MAX_ERRORS)
     top = rows[-1]
     return {
         "peak_rps": peak,
         "sustained_rps": sustained,
+        "clean_sustained_rps": sustained_rps(rows, max_errors=0.0),
         # The ramp never saturated the stack: the limit is above RAMP_MAX. Fast
         # failures keep achieved close to offered, so errors count as saturation.
         "limit_not_reached": top["achieved_rps"] >= SUSTAINED_SHARE * top["offered_rps"]

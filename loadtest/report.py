@@ -21,6 +21,7 @@ from analysis import (
     median,
     metric,
     seconds,
+    statuses,
     steps,
 )
 
@@ -133,6 +134,21 @@ def latency_section(runs: Runs, args: dict[str, Any], scripts: list[str]) -> lis
             f"{change(med(off, 'p95'), med(on, 'p95'))} | "
             f"{change(med(off, 'p99'), med(on, 'p99'))} | | | | | |"
         )
+    return lines
+
+
+def status_section(runs: Runs, scripts: list[str]) -> list[str]:
+    """Responses by status code in each latency run's measured phase. Runs recorded
+    before the scripts counted status codes show none."""
+    lines = ["| Script | Cache | Run | Responses by status |", "|---|---|---|---|"]
+    for script in scripts:
+        for config in CONFIGS:
+            for run in sorted(runs["latency", script, config], key=lambda r: r["repeat"]):
+                counts = statuses(run["summary"], "phase:measure")
+                shown = ", ".join(f"{code}: {n}" for code, n in counts.items()) or "not recorded"
+                lines.append(
+                    f"| {script} | {config.removeprefix('cache-')} | {run['repeat']} | {shown} |"
+                )
     return lines
 
 
@@ -256,11 +272,22 @@ def report(out: Path) -> str:
     lines = [
         f"Run `{out.name}`, commit `{m['commit'][:7]}`{' (dirty tree)' if m['dirty'] else ''}; "
         f"k6 {m['k6'].split()[1] if m['k6'] else '?'}; latency rates (iterations/s): "
-        f"{meta.get('latency_rates')}.",
+        f"{meta.get('latency_rates')}"
+        + (
+            f", from the clean sustained rates in `{Path(meta['capacity_from']).name}`: "
+            f"{meta.get('clean_sustained')}"
+            if meta.get("capacity_from")
+            else ""
+        )
+        + ".",
         "",
         "### Fixed rate, cache off vs on",
         "",
         *latency_section(runs, args, scripts),
+        "",
+        "Responses by status, measured phase:",
+        "",
+        *status_section(runs, scripts),
         "",
         "### Capacity",
         "",

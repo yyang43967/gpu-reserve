@@ -4,6 +4,8 @@
     python3 loadtest/run.py                          # everything, 3 repeats
     python3 loadtest/run.py --scripts availability --repeats 1 \
         --steps 3 --hold 4 --warmup 5s --measure 10s
+    python3 loadtest/run.py --scripts slot_search --skip-hit-rate \
+        --capacity-from loadtest/out/<earlier run>    # latency runs only
 
 Two kinds of timed run, both open-model (k6 starts requests at a set rate whatever the
 server does):
@@ -11,7 +13,9 @@ server does):
    configuration. It gives the peak throughput and the highest rate sustained within
    the latency target (see analysis.py).
 2. Latency: a constant rate, the same for cache off and on, at 65% of the median
-   uncached peak from step 1, so the comparison is of service time, not queueing.
+   uncached rate sustained with no failures in step 1, so the comparison is of service
+   time, not queueing. `--capacity-from` takes that rate from an earlier run's capacity
+   results instead of running step 1 again.
 Then the booking race, and the hit-rate runs.
 
 Within each repeat, the cache-off and cache-on configurations alternate, so slow drift
@@ -318,9 +322,9 @@ def one_run(
     if script == "booking_race":
         meta["verify"] = loadtest_command("verify")
         if not meta["verify"]["ok"]:
-            (run_dir / "run.json").write_text(json.dumps(meta, indent=2))
+            (run_dir / "run.json").write_text(json.dumps(meta, indent=2, default=str))
             raise RunFailed(f"race correctness check failed: {meta['verify']}")
-    (run_dir / "run.json").write_text(json.dumps(meta, indent=2))
+    (run_dir / "run.json").write_text(json.dumps(meta, indent=2, default=str))
     log = (run_dir / "k6.log").read_text().strip().replace("\n", "\n    ")
     print(f"  {config} {kind} {script} #{repeat}:\n    {log}", flush=True)
     return json.loads((run_dir / "summary.json").read_text())
@@ -391,10 +395,35 @@ def machine() -> dict[str, Any]:
     }
 
 
-def latency_rates(peaks: dict[str, list[float]], overrides: dict[str, float]) -> dict[str, float]:
-    """Iterations per second for the latency runs: a share of the median uncached peak."""
+def clean_sustained(summary: dict[str, Any], script: str, args: argparse.Namespace) -> float:
+    rows = steps(
+        summary, script=script, ramp_max=RAMP_MAX[script], step_count=args.steps, hold=args.hold
+    )
+    return capacity(rows)["clean_sustained_rps"]
+
+
+def earlier_capacity(
+    run: Path, scripts: list[str], args: argparse.Namespace
+) -> dict[str, list[float]]:
+    """Clean sustained rates from an earlier run's uncached capacity results."""
+    found: dict[str, list[float]] = {}
+    for script in scripts:
+        summaries = sorted((run / "cache-off" / "capacity").glob(f"{script}-*/summary.json"))
+        if not summaries:
+            raise RunFailed(f"no uncached capacity results for {script} in {run}")
+        found[script] = [
+            clean_sustained(json.loads(path.read_text()), script, args) for path in summaries
+        ]
+    return found
+
+
+def latency_rates(
+    sustained: dict[str, list[float]], overrides: dict[str, float]
+) -> dict[str, float]:
+    """Iterations per second for the latency runs: a share of the median uncached rate
+    sustained with no failures."""
     rates = {}
-    for script, values in peaks.items():
+    for script, values in sustained.items():
         per_second = median(values) / REQUESTS_PER_ITERATION[script]
         rates[script] = round(LATENCY_LOAD_SHARE * per_second, 1)
     return rates | overrides
@@ -425,6 +454,12 @@ def main() -> int:
         help="fixed latency rates (iterations/s), e.g. availability=110; skips capacity "
         "runs for the scripts named",
     )
+    parser.add_argument(
+        "--capacity-from",
+        type=Path,
+        help="an earlier run directory whose uncached capacity results set the latency "
+        "rates; skips the capacity runs",
+    )
     parser.add_argument("--skip-hit-rate", action="store_true")
     args = parser.parse_args()
     for duration in (args.warmup, args.measure):
@@ -434,7 +469,7 @@ def main() -> int:
     if unknown:
         parser.error(f"unknown scripts: {', '.join(sorted(unknown))}")
     timed = [s for s in scripts if s in TIMED_SCRIPTS]
-    to_ramp = [s for s in timed if s not in args.rates]
+    to_ramp = [] if args.capacity_from else [s for s in timed if s not in args.rates]
 
     out = HERE / "out" / datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     out.mkdir(parents=True)
@@ -444,12 +479,17 @@ def main() -> int:
         "started": datetime.now(UTC).isoformat(),
         "args": vars(args),
         "ramp_max": {s: RAMP_MAX[s] for s in to_ramp},
+        "capacity_from": str(args.capacity_from) if args.capacity_from else None,
         "machine": machine(),
         "limits": "postgres 1.0 CPU / 768 MiB, api 0.75 CPU / 512 MiB, redis 0.25 CPU / 128 MiB",
     }
-    (out / "meta.json").write_text(json.dumps(meta, indent=2))
+    (out / "meta.json").write_text(json.dumps(meta, indent=2, default=str))
     try:
-        peaks: dict[str, list[float]] = {s: [] for s in to_ramp}
+        sustained: dict[str, list[float]] = {s: [] for s in to_ramp}
+        if args.capacity_from:
+            fixed = [s for s in timed if s not in args.rates]
+            sustained = earlier_capacity(args.capacity_from, fixed, args)
+            meta["clean_sustained"] = sustained
         for repeat in range(1, args.repeats + 1):
             for config in CONFIGS:
                 if not to_ramp:
@@ -459,18 +499,11 @@ def main() -> int:
                     mode = {"MODE": "capacity", "RAMP_MAX": str(RAMP_MAX[script])}
                     summary = one_run(script, config, repeat, out, args, mode)
                     if config == "cache-off":
-                        rows = steps(
-                            summary,
-                            script=script,
-                            ramp_max=RAMP_MAX[script],
-                            step_count=args.steps,
-                            hold=args.hold,
-                        )
-                        peaks[script].append(capacity(rows)["peak_rps"])
+                        sustained[script].append(clean_sustained(summary, script, args))
 
-        rates = latency_rates(peaks, args.rates)
+        rates = latency_rates(sustained, args.rates)
         meta["latency_rates"] = rates
-        (out / "meta.json").write_text(json.dumps(meta, indent=2))
+        (out / "meta.json").write_text(json.dumps(meta, indent=2, default=str))
         print(f"latency rates (iterations/s): {rates}", flush=True)
 
         for repeat in range(1, args.repeats + 1):
