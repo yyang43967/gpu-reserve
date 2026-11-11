@@ -247,7 +247,7 @@ Each entry records the context, the decision, and why. Newest phases at the bott
 - **Concurrency:** Updating or deleting a server first takes `SELECT … FOR UPDATE` on the server row. Two concurrent `gpu_count` changes are applied one after the other, each seeing the other's result. A test sends twelve concurrent changes and checks the invariant; with the lock removed, it fails.
 - **Allocations (Phase 4):** Reducing `gpu_count` must be refused when the GPUs being removed have future active allocations, and deleting a server when it has future active reservations. Allocations do not exist yet, so for now every reduction and deletion is allowed. Both checks have a single home, `_ensure_gpus_removable` and `_ensure_server_deletable`, which are called on every path and currently do nothing.
   - **Outcome:** filled in during Phase 4. See "Reducing, retiring, and deleting servers with reservations".
-- **Phase 4 locking note:** With hard deletes, the foreign key from allocations to GPUs would have serialized an allocation against a concurrent removal, since an FK check takes a `KEY SHARE` lock that conflicts with `DELETE`. Soft removal is an `UPDATE` of a non-key column, which does not conflict with `KEY SHARE`. So allocation has to lock the server row `FOR SHARE` (which conflicts with the `FOR UPDATE` taken here) and select only GPUs with `removed_at IS NULL`.
+- **Phase 4 locking note:** With hard deletes, the foreign key from allocations to GPUs would have serialized an allocation against a concurrent removal, since an FK check takes a `KEY SHARE` lock that conflicts with `DELETE`. Soft removal is an `UPDATE` of a non-key column, which does not conflict with `KEY SHARE`. So allocation has to lock the server row `FOR SHARE` (which conflicts with the `FOR UPDATE` taken here) and select only GPUs with `removed_at IS NULL`. (Since Phase 9 the booking's lock is `FOR NO KEY UPDATE`, which conflicts with `FOR UPDATE` the same way.)
 
 ### Who sees which labs and servers
 - **Decision:** Admins see everything. Students see active labs, and servers that are not `retired` in active labs. The rule lives in the service, so it applies to the list, to every filter, and to the detail endpoints. A hidden lab or server returns 404 to a student, not 403.
@@ -308,7 +308,7 @@ Each entry records the context, the decision, and why. Newest phases at the bott
   1. SERIALIZABLE isolation. Correct, but any serialization failure needs a retry of the whole request. Unrelated bookings on the same pages can also abort each other, and the guarantee lives in the isolation level rather than in a visible rule.
   2. `SELECT … FOR UPDATE` on the free GPU rows, optionally with `SKIP LOCKED`. This serializes bookings per GPU without retries. But a lock on a GPU row says nothing about time: two bookings for different, non-overlapping times on the same GPU would wait for each other, and correctness would depend on every writer remembering to lock.
   3. A per-server advisory lock around allocation. Simple and retry-free, but every booking on a server waits for every other, even for different GPUs or times.
-  4. The exclusion constraint, with optimistic retry (chosen).
+  4. The exclusion constraint, with optimistic retry (chosen in Phase 4; combined with a per-server row lock since Phase 9, see "Revised in Phase 9" below).
 - **Decision:**
   - In one transaction, select the server's active GPUs with no overlapping active allocation, ordered by number.
   - Take the lowest `k` and insert the reservation and `k` allocations.
@@ -321,14 +321,34 @@ Each entry records the context, the decision, and why. Newest phases at the bott
   - Each attempt builds new `Reservation` and `GpuAllocation` objects. Nothing from a rolled-back savepoint is reused.
   - The retryable error is recognized by SQLSTATE, not by message text: `23P01` (exclusion violation) and `40P01` (deadlock detected). Any other database error, such as a foreign key violation, propagates on the first attempt. A test checks that.
   - Allocations are inserted in ascending GPU number. An insert that conflicts waits for the other transaction. If every transaction inserts in the same order, a transaction only ever waits for one that has already passed that GPU number, so waits cannot form a cycle. `40P01` is retried only as a defensive measure; this ordering should prevent it.
+    - **This argument was wrong** for two inserts of the same GPU at the same moment; the load test found it. See "Revised in Phase 9".
 - **Weakness — lowest-k herding:** concurrent requests all aim at the same lowest free GPUs. Under heavy contention, one request wins per round and the rest retry. A request can therefore run out of attempts while GPUs are still free. A test with 50 concurrent requests for the last 2 GPUs is fine, because the free GPUs run out before the attempts do. The upgrade paths are:
   - choose randomly among the free GPUs on retries, which spreads contenders;
   - take a short per-server advisory lock only after the first conflict;
   - raise the attempt limit, with backoff.
+  - **Resolved in Phase 9** by serializing bookings per server: each sees the previous winners' commits, so losers get `gpu-unavailable` on the first attempt.
+- **Revised in Phase 9: bookings on one server are serialized.**
+  - *What the load test showed.* In a race of 100 bookings for 2 GPUs each on one 8-GPU server, 2 of 5 trial runs ended with 82–88% of requests failing with 500 after about 30 s and only 2 of the 4 possible winners. Nothing was double-booked. Postgres's log, with `log_lock_waits` on, showed repeated deadlocks between two allocation inserts:
+    ```
+    ERROR:  deadlock detected
+    DETAIL:  Process 9164 waits for ShareLock on transaction 1921; blocked by process 9170.
+             Process 9170 waits for ShareLock on transaction 1907; blocked by process 9164.
+             Process 9164: INSERT INTO gpu_allocations (id, reservation_id, gpu_id, ...) VALUES (...), (...)
+             Process 9170: INSERT INTO gpu_allocations (id, reservation_id, gpu_id, ...) VALUES (...), (...)
+    CONTEXT:  while checking exclusion constraint on tuple (346,31) in relation "gpu_allocations"
+    ```
+  - *Why the GPU-order argument failed.* An exclusion constraint is checked after the new row is in the table and its index. Two transactions that insert the same GPU at the same moment can each find the other's uncommitted row during their check and wait for it. Ordering decides which GPU they collide on, not whether they both wait. Postgres breaks the cycle only after `deadlock_timeout` (1 s), the loser retries, and under a race the retries collide again. Each booking kept its pool connection through all of it, so the other 90 requests waited the pool's 30 s for a connection and failed with 500.
+  - *Decision.* A booking locks the server row `FOR NO KEY UPDATE` instead of `FOR SHARE`, after the user lock as before. Bookings on one server run one at a time, so each reads free GPUs after the previous one committed. `FOR NO KEY UPDATE` rather than `FOR UPDATE`: it serializes bookings the same way but does not block foreign-key checks (`FOR KEY SHARE`) from rows that reference the server. Server changes still take `FOR UPDATE` and conflict with it as before. Approval's `FOR SHARE` now waits for a booking in progress on that server, which is brief.
+  - *This is option 3 from the list above, as a row lock.* The cost named there is real: two bookings on one server wait for each other even for different GPUs or times. Each holds the lock only for its own transaction (a handful of statements), and bookings per server are rare outside a race. A row lock fits better than an advisory lock because bookings already lock that row and server changes already conflict with it.
+  - *Backstops kept.* The exclusion constraint stays the authority against double booking, and conflicts and deadlocks are still retried from a savepoint. With bookings serialized, neither should happen between two bookings.
+  - *Lock order, audited.* Bookings: user lock, then server row, then inserts. Deactivation: user lock, then the user's reservation rows. Approve: reservation row, then server row (`FOR SHARE`). Cancel and reject: the reservation row. Sweep jobs: their job lock, then reservation rows. Server changes: the server row. Only bookings take both the user lock and the server row, always in that order. Every wait on another transaction's allocations (an exclusion check or an update of the same rows) comes after a path's last lock, and the paths a booking can wait on there (cancel, reject, deactivation, the jobs) never wait for a user lock or a server row. So no cycle is possible.
+  - *Tests.* A new test races 12 bookings of 2 GPUs for the same slot on an 8-GPU server, 10 times, and requires exactly 4 winners, every loser refused as unavailable, and no deadlock in Postgres's own counter (`pg_stat_database.deadlocks`, read after the racing connections have closed). On the old code it failed every time; with the assertions relaxed to see why, one run counted 9 deadlocks in 10 rounds and losers ran out of retries in 9 of 10. On the new code it passes repeatedly. The 50-booker test now also requires every loser to be refused as unavailable. Each protection has its own test: with the server lock removed, the constraint alone still prevents double booking; with the constraint dropped, the lock alone does; with both removed, bookings double-book.
+  - *Result.* Twenty consecutive load-test races (10 with the cache off, 10 on) each ended with 4 × 201 and 96 × 409, no other errors, the database check passing, and no deadlock or lock wait over 1 s in Postgres's log.
+- **Pool exhaustion answers 503, not 500 after 30 s.** If every pooled connection stays busy, a request now waits at most `DATABASE_POOL_TIMEOUT_SECONDS` (3 s) and gets 503 `database-busy` with `Retry-After: 2` (`DATABASE_BUSY_RETRY_AFTER_SECONDS`). Before, it waited SQLAlchemy's default 30 s and failed as an unhandled 500. Overload is a state a client can retry, not a server bug, and a long wait only makes the queue longer. A test holds all ten connections and checks the response and that it arrives within the timeout.
 
 ### Rule order and the server lock
 - Before any lock, only the shape of the request is checked: aware datetimes normalized to UTC, `ends_at > starts_at`, and `gpu_count >= 1`.
-- Then the user's advisory lock is taken, then the server row `FOR SHARE`.
+- Then the user's advisory lock is taken, then the server row: `FOR SHARE` until Phase 9, `FOR NO KEY UPDATE` since (see "Revised in Phase 9" above).
 - Every rule that reads server or lab data runs after the server lock: grid, horizon, `max_booking_hours`, GPU count, peak hours, server status, and lab status. Every server change (gpu_count, status, limits, approval flag, delete) takes `FOR UPDATE` on the same row, so a booking sees exactly one version of the server.
 - A test holds a booking open and shows that a concurrent `max_booking_hours` edit waits for it.
 
@@ -347,11 +367,11 @@ Each entry records the context, the decision, and why. Newest phases at the bott
 
 ### GPU removal versus booking: two layers
 - **The problem:** removing GPUs is a soft removal, an UPDATE of `gpus.removed_at`. An UPDATE of a non-key column takes a lock that does not conflict with the `KEY SHARE` lock a foreign key check takes. So inserting an allocation on a GPU does not, by itself, stop that GPU from being removed at the same moment.
-- **Layer 1, `FOR SHARE` on the server row:** covers the window from reading which GPUs are free to inserting the reservation. Bookings share this lock, so they do not block each other. A reduction's `FOR UPDATE` excludes it.
+- **Layer 1, the booking's lock on the server row** (`FOR SHARE` in Phase 4, `FOR NO KEY UPDATE` since Phase 9): covers the window from reading which GPUs are free to inserting the reservation. A reduction's `FOR UPDATE` excludes it. In Phase 4 bookings shared this lock and did not block each other; since Phase 9 they take turns.
   - If the reduction comes first, the booking waits before it reads availability, then sees the removal.
   - Without this lock, the booking would read GPUs 2 and 3 as active while the removal is uncommitted. It would block later, when inserting the reservation, with its choice already made, and then put an allocation on a removed GPU. A negative control shows exactly that.
 - **Layer 2, the foreign key from `reservations.server_id`:** inserting the reservation takes `KEY SHARE` on the server row, which conflicts with `FOR UPDATE`. From that insert until the booking commits, a reduction waits. Once the booking commits, the reduction's check sees the allocation.
-- **Why the booking-first control cannot fail:** if the booking goes first and `FOR SHARE` is removed, the reduction still waits on layer 2 and then gets `gpus-in-use`. Removing `FOR SHARE` alone cannot produce a race in that order. A test pins this down, so a later change that weakens layer 2 is noticed.
+- **Why the booking-first control cannot fail:** if the booking goes first and its server lock is removed, the reduction still waits on layer 2 and then gets `gpus-in-use`. Removing the server lock alone cannot produce a race in that order. A test pins this down, so a later change that weakens layer 2 is noticed.
 
 ### Quota enforcement under concurrency
 - **Options considered:**
@@ -392,6 +412,7 @@ Each entry records the context, the decision, and why. Newest phases at the bott
 - **Why:** a pending reservation past its start belongs to the expiry job, which turns it into `expired`. If approval stayed open, an admin and the job could act on the same row at the same moment. The row lock would make the outcome consistent, but it would depend on who came first. The student would also get an approval for time that has already partly passed. A clear cut-off at the start gives one owner per transition: admins before the start, the job after it.
 
 ### Lock order
+- (Updated in Phase 9, when bookings moved to `FOR NO KEY UPDATE` on the server row; the full audit is under "Revised in Phase 9".)
 - Bookings take the user lock, then the server row.
 - Deactivation takes the user lock, then the user's reservation rows.
 - Approve, reject, and cancel take the reservation row. Approve then takes the server row `FOR SHARE` (see "Approval checks the server").
@@ -567,7 +588,7 @@ Each entry records the context, the decision, and why. Newest phases at the bott
 
 ### Approval checks the server
 - **Rule:** approving returns 409 `server-unavailable` when the server is not `available` or its lab is inactive. Rejection is still allowed and releases the GPUs.
-- **Locking:** after the reservation row, approval takes the server row `FOR SHARE`, like a booking. A concurrent switch to maintenance (which takes `FOR UPDATE`) either commits first and is seen, or waits for the approval. Server changes never lock reservation rows, so this order cannot deadlock.
+- **Locking:** after the reservation row, approval takes the server row `FOR SHARE` (as a booking did until Phase 9; bookings now take `FOR NO KEY UPDATE`, which approval waits for). A concurrent switch to maintenance (which takes `FOR UPDATE`) either commits first and is seen, or waits for the approval. Server changes never lock reservation rows, so this order cannot deadlock.
 
 ### Upload URL rate limit
 - **Rule:** at most 30 presigned upload forms per user per 10 minutes, as a fixed-window counter in Redis (`presign:user:{id}`), the same mechanism as the login limits. Over the limit: 429 `too-many-requests` with `Retry-After`. It fails open on a Redis outage, like the other limits.

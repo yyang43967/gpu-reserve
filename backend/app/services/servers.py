@@ -324,8 +324,8 @@ async def update_server(
 ) -> Server:
     """Change any of the given fields. Pass None for interconnect or notes to clear them.
 
-    Every change runs under the server's row lock, so a booking (which holds FOR SHARE)
-    sees either the old or the new version of the server, never a mix.
+    Every change runs under the server's row lock, so a booking (which holds FOR NO KEY
+    UPDATE) sees either the old or the new version of the server, never a mix.
     """
     server = await _lock_server(session, server_id)
     old_count = server.gpu_count

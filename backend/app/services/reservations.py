@@ -4,14 +4,28 @@ Concurrency model for creating a reservation, in lock order:
 1. A transaction-scoped advisory lock on the user serializes that user's bookings, so
    the active-reservation count and the weekly quota are checked against a stable
    picture of their own reservations. Admin quota changes take the same lock.
-2. FOR SHARE on the server row. Changes to a server (gpu_count, status, limits) and
-   deletes take FOR UPDATE on the same row, so a booking always sees one consistent
-   version of the server and its active GPUs. Bookings on the same server share the
-   lock and do not block each other.
-3. The exclusion constraint on gpu_allocations decides between bookings that picked the
-   same GPU at the same time. The loser rolls back to a savepoint and tries again with
-   fresh availability.
-No path takes these locks in the opposite order.
+2. FOR NO KEY UPDATE on the server row. Bookings on the same server run one at a
+   time, so each reads free GPUs after the previous one committed. Changes to a server
+   (gpu_count, status, limits) and deletes take FOR UPDATE on the same row, so a
+   booking always sees one consistent version of the server and its active GPUs.
+   NO KEY UPDATE rather than FOR UPDATE: it does not block the foreign-key checks
+   (FOR KEY SHARE) of other rows that reference the server.
+3. The exclusion constraint on gpu_allocations stays the final authority against
+   double booking, and a conflict or deadlock is still retried from a savepoint. With
+   bookings serialized per server, neither should happen between two bookings.
+
+Bookings used to take FOR SHARE and run in parallel. An exclusion constraint is
+checked after the row is inserted, so two bookings inserting the same GPU at the same
+moment could each find the other's uncommitted row and wait for it. Postgres breaks
+that only after deadlock_timeout (1 s); under a booking race the waits and retries held
+the API's connections until requests timed out waiting for one.
+
+Lock order across paths: bookings take the user lock, then the server row. Deactivation
+takes the user lock, then the user's reservation rows. Approve takes the reservation
+row, then the server row (FOR SHARE, so it waits for bookings in progress). Cancel,
+reject, and the sweep jobs take reservation rows only. No path takes these locks in the
+opposite order, and every wait on another transaction's allocations comes after a
+path's last lock.
 """
 
 import uuid
@@ -121,8 +135,11 @@ async def _current_account(session: AsyncSession, user_id: uuid.UUID) -> _Accoun
     return _Account(is_active=row.is_active, quota_hours=row.weekly_gpu_hour_quota)
 
 
-async def _lock_server_shared(session: AsyncSession, viewer: User, server_id: uuid.UUID) -> Server:
-    """The server and its lab, with the server row locked FOR SHARE.
+async def _lock_server_for_booking(
+    session: AsyncSession, viewer: User, server_id: uuid.UUID
+) -> Server:
+    """The server and its lab, with the server row locked FOR NO KEY UPDATE, which
+    serializes bookings on the server (see the module docstring).
 
     Servers the viewer cannot see look missing, as on the browse endpoints.
     """
@@ -131,7 +148,7 @@ async def _lock_server_shared(session: AsyncSession, viewer: User, server_id: uu
         .join(Server.lab)
         .where(Server.id == server_id, *visibility_conditions(viewer))
         .options(contains_eager(Server.lab))
-        .with_for_update(read=True, of=Server)
+        .with_for_update(key_share=True, of=Server)
         .execution_options(populate_existing=True)
     )
     if server is None:
@@ -273,7 +290,7 @@ async def create_reservation(
     if not account.is_active:
         # The same answer the auth layer gives a deactivated account.
         raise InvalidToken("The account is not active.")
-    server = await _lock_server_shared(session, actor, request.server_id)
+    server = await _lock_server_for_booking(session, actor, request.server_id)
     zone = ZoneInfo(server.lab.timezone)
 
     booking_rules.check_times(interval, now=now, max_booking_hours=server.max_booking_hours)
@@ -640,10 +657,11 @@ async def reject_reservation(
 async def _ensure_server_open(session: AsyncSession, server_id: uuid.UUID) -> None:
     """Refuse an approval when the server is no longer open for booking.
 
-    The server row is locked FOR SHARE, as a booking does, so a concurrent change to
-    maintenance either commits first and is seen here, or waits for the approval. The
-    caller already holds the reservation's row lock; no path locks a server row and
-    then a reservation row, so this order cannot deadlock.
+    The server row is locked FOR SHARE, so a concurrent change to maintenance either
+    commits first and is seen here, or waits for the approval. It also waits for a
+    booking in progress on the server (FOR NO KEY UPDATE), which never waits for a
+    reservation row lock. The caller already holds the reservation's row lock; no path
+    locks a server row and then a reservation row, so this order cannot deadlock.
     """
     row = (
         await session.execute(

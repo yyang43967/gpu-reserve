@@ -202,7 +202,7 @@ def race_section(runs: Runs) -> list[str]:
         "|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for config in CONFIGS:
-        for run in runs["race", "booking_race", config]:
+        for run in sorted(runs["race", "booking_race", config], key=lambda r: r["repeat"]):
             s, v = run["summary"], run["verify"]
             won = metric(s, "race_won", "count")
             per_gpu = sorted(set(v["race_bookings_per_gpu"].values()))

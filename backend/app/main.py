@@ -70,7 +70,11 @@ def create_app(
     app.state.storage = storage or S3Storage(settings)
 
     # Registered before CORS so that CORS wraps the error middleware and 500s stay readable.
-    register_error_handlers(app, settings.problem_base_url)
+    register_error_handlers(
+        app,
+        settings.problem_base_url,
+        busy_retry_after=settings.database_busy_retry_after_seconds,
+    )
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins,

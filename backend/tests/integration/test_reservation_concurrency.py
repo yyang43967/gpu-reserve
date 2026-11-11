@@ -8,6 +8,7 @@ window with a barrier, so they fail deterministically rather than by chance.
 import asyncio
 import uuid
 from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any, Final
 
@@ -136,17 +137,123 @@ async def test_concurrent_bookings_for_the_last_free_gpus(
     assert len(successes) == 2
     assert sorted(r.allocations[0].gpu.index for r in successes) == [2, 3]
     assert len(failures) == BOOKERS - 2
-    assert all(isinstance(f, GpuUnavailable | AllocationContention) for f in failures), failures
+    # Serialized per server, every loser sees the winners' commits: no retries run out.
+    assert all(isinstance(f, GpuUnavailable) for f in failures), failures
     assert await _overlapping_active_pairs(race_engine) == 0
 
 
-async def test_control_without_the_exclusion_constraint_double_books(
+DEADLOCK_ROUNDS: Final = 10
+DEADLOCK_BOOKERS: Final = 12
+DEADLOCK_SERVER_GPUS: Final = 8
+DEADLOCK_GPUS_PER_BOOKING: Final = 2
+STATS_FLUSH_WAIT: Final = 2.0
+
+
+async def _deadlocks(engine: AsyncEngine) -> int:
+    """Deadlocks Postgres has detected in this database since it started. A backend
+    reports its counts when it goes idle or exits, so callers close the racing
+    connections first and give their backends a moment to exit."""
+    async with engine.connect() as conn:
+        await conn.execute(text("SELECT pg_stat_clear_snapshot()"))
+        count = await conn.scalar(
+            text("SELECT deadlocks FROM pg_stat_database WHERE datname = current_database()")
+        )
+    return int(count or 0)
+
+
+async def test_concurrent_bookings_on_one_server_never_deadlock(
+    factory: async_sessionmaker[AsyncSession],
+    race_engine: AsyncEngine,
+    engine: AsyncEngine,
+) -> None:
+    """Twelve bookings of 2 GPUs each for the same slot on an 8-GPU server, released
+    together, ten times. Exactly four win each round and the rest are refused as
+    unavailable, without Postgres ever detecting a deadlock.
+
+    An exclusion constraint is checked after the row is inserted, so two transactions
+    that insert conflicting allocations at the same moment can each find the other's
+    uncommitted row and wait for it. Postgres breaks that only after deadlock_timeout
+    (1 s), and the loser retries. Under a booking race these waits held connections
+    long enough to exhaust the API's pool. Bookings on one server therefore take the
+    server row exclusively, so they never insert at the same time.
+    """
+    async with factory() as db:
+        server = await add_server(db, await add_lab(db), gpu_count=DEADLOCK_SERVER_GPUS)
+        rounds = [
+            [
+                await add_user(db, f"round{r:02}-booker{i:02}@example.edu")
+                for i in range(DEADLOCK_BOOKERS)
+            ]
+            for r in range(DEADLOCK_ROUNDS)
+        ]
+    before = await _deadlocks(engine)
+
+    for r, bookers in enumerate(rounds):
+        start = SATURDAY_MORNING + timedelta(hours=r)
+
+        async def book(
+            session: AsyncSession,
+            i: int,
+            bookers: list[User] = bookers,
+            start: datetime = start,
+        ) -> Reservation:
+            return await create_reservation(
+                session,
+                bookers[i],
+                NewReservation(
+                    server_id=server.id,
+                    gpu_count=DEADLOCK_GPUS_PER_BOOKING,
+                    starts_at=start,
+                    ends_at=start + timedelta(hours=1),
+                    purpose="Race",
+                ),
+                now=NOW,
+                quota_zone=QUOTA_ZONE,
+            )
+
+        successes, failures = _outcomes(await run_together(factory, DEADLOCK_BOOKERS, book))
+        assert len(successes) == DEADLOCK_SERVER_GPUS // DEADLOCK_GPUS_PER_BOOKING, r
+        assert all(isinstance(f, GpuUnavailable) for f in failures), (r, failures)
+
+    assert await _overlapping_active_pairs(race_engine) == 0
+    # Close the racing connections so their backends exit and report their counts.
+    await race_engine.dispose()
+    await asyncio.sleep(STATS_FLUSH_WAIT)
+    assert await _deadlocks(engine) - before == 0
+
+
+@asynccontextmanager
+async def _without_the_exclusion_constraint(engine: AsyncEngine) -> AsyncIterator[None]:
+    """Drop the overlap constraint for the block; on the way out, empty the tables (the
+    block may have double-booked) and restore it."""
+    async with engine.begin() as conn:
+        definition = await conn.scalar(
+            text("SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = :name"),
+            {"name": ALLOCATION_OVERLAP_CONSTRAINT},
+        )
+        await conn.execute(
+            text(f"ALTER TABLE gpu_allocations DROP CONSTRAINT {ALLOCATION_OVERLAP_CONSTRAINT}")
+        )
+    try:
+        yield
+    finally:
+        await truncate_all(engine)
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    f"ALTER TABLE gpu_allocations ADD CONSTRAINT "
+                    f"{ALLOCATION_OVERLAP_CONSTRAINT} {definition}"
+                )
+            )
+
+
+async def test_control_without_the_server_lock_or_the_constraint_double_books(
     factory: async_sessionmaker[AsyncSession],
     race_engine: AsyncEngine,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Negative control: with the constraint dropped and every request holding after it
-    reads availability, all of them take the same GPU."""
+    """Negative control: with both protections removed and every request holding after
+    it reads availability, all of them take the same GPU."""
     server, students = await _last_two_gpus(factory)
     real = reservations._select_free_gpus
     gate = Gate(BOOKERS)
@@ -158,6 +265,7 @@ async def test_control_without_the_exclusion_constraint_double_books(
         await gate.wait()
         return free
 
+    monkeypatch.setattr(reservations, "_lock_server_for_booking", _lock_server_without_lock)
     monkeypatch.setattr(reservations, "_select_free_gpus", read_then_wait)
 
     async def book(session: AsyncSession, i: int) -> Reservation:
@@ -165,29 +273,56 @@ async def test_control_without_the_exclusion_constraint_double_books(
             session, students[i], _one_gpu(server), now=NOW, quota_zone=QUOTA_ZONE
         )
 
-    async with race_engine.begin() as conn:
-        definition = await conn.scalar(
-            text("SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = :name"),
-            {"name": ALLOCATION_OVERLAP_CONSTRAINT},
-        )
-        await conn.execute(
-            text(f"ALTER TABLE gpu_allocations DROP CONSTRAINT {ALLOCATION_OVERLAP_CONSTRAINT}")
-        )
-    try:
+    async with _without_the_exclusion_constraint(race_engine):
         successes, _ = _outcomes(await run_together(factory, BOOKERS, book))
         overlaps = await _overlapping_active_pairs(race_engine)
-    finally:
-        await truncate_all(race_engine)
-        async with race_engine.begin() as conn:
-            await conn.execute(
-                text(
-                    f"ALTER TABLE gpu_allocations ADD CONSTRAINT "
-                    f"{ALLOCATION_OVERLAP_CONSTRAINT} {definition}"
-                )
-            )
 
     assert len(successes) > 2
     assert overlaps > 0
+
+
+async def test_the_constraint_alone_still_prevents_double_booking(
+    factory: async_sessionmaker[AsyncSession],
+    race_engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The backstop: without the server lock, bookings run in parallel again and may
+    deadlock or run out of retries, but the exclusion constraint still lets only two
+    of them have the last two GPUs."""
+    server, students = await _last_two_gpus(factory)
+    monkeypatch.setattr(reservations, "_lock_server_for_booking", _lock_server_without_lock)
+
+    async def book(session: AsyncSession, i: int) -> Reservation:
+        return await create_reservation(
+            session, students[i], _one_gpu(server), now=NOW, quota_zone=QUOTA_ZONE
+        )
+
+    successes, failures = _outcomes(await run_together(factory, BOOKERS, book))
+
+    assert len(successes) <= 2
+    assert all(isinstance(f, GpuUnavailable | AllocationContention) for f in failures), failures
+    assert await _overlapping_active_pairs(race_engine) == 0
+
+
+async def test_the_server_lock_alone_prevents_double_booking(
+    factory: async_sessionmaker[AsyncSession], race_engine: AsyncEngine
+) -> None:
+    """The primary protection: with the constraint dropped, serialized bookings still
+    each see the previous ones' allocations."""
+    server, students = await _last_two_gpus(factory)
+
+    async def book(session: AsyncSession, i: int) -> Reservation:
+        return await create_reservation(
+            session, students[i], _one_gpu(server), now=NOW, quota_zone=QUOTA_ZONE
+        )
+
+    async with _without_the_exclusion_constraint(race_engine):
+        successes, failures = _outcomes(await run_together(factory, BOOKERS, book))
+        overlaps = await _overlapping_active_pairs(race_engine)
+
+    assert len(successes) == 2
+    assert all(isinstance(f, GpuUnavailable) for f in failures), failures
+    assert overlaps == 0
 
 
 # --- 2. the weekly quota ---
@@ -366,10 +501,11 @@ async def _active_allocations_on_removed_gpus(engine: AsyncEngine) -> int:
     return count or 0
 
 
-async def _lock_server_without_share(
+async def _lock_server_without_lock(
     session: AsyncSession, viewer: User, server_id: uuid.UUID
 ) -> Server:
-    """_lock_server_shared without FOR SHARE: the protection the controls remove."""
+    """_lock_server_for_booking without the row lock: the protection the controls
+    remove."""
     server = await session.scalar(
         select(Server)
         .join(Server.lab)
@@ -419,8 +555,8 @@ async def _booking_first(
 async def test_booking_waits_for_a_reduction_in_progress(
     factory: async_sessionmaker[AsyncSession], race_engine: AsyncEngine
 ) -> None:
-    """FOR SHARE makes the booking wait before it reads which GPUs are free, so it sees
-    the committed reduction."""
+    """The server lock makes the booking wait before it reads which GPUs are free, so it
+    sees the committed reduction."""
     outcome = await _reduction_first(factory, race_engine)
 
     assert outcome.blocked
@@ -428,17 +564,17 @@ async def test_booking_waits_for_a_reduction_in_progress(
     assert await _active_allocations_on_removed_gpus(race_engine) == 0
 
 
-async def test_control_reduction_first_without_for_share(
+async def test_control_reduction_first_without_the_server_lock(
     factory: async_sessionmaker[AsyncSession],
     race_engine: AsyncEngine,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Negative control. Without FOR SHARE the booking reads the GPUs while the removal
+    """Negative control. Without the server lock the booking reads the GPUs while the removal
     is uncommitted and still sees GPU 2 as active. It does block later, when inserting
     the reservation (the foreign key to servers takes KEY SHARE, which conflicts with
     the admin's FOR UPDATE), but by then its choice is made: once the admin commits it
     inserts an allocation on the removed GPU."""
-    monkeypatch.setattr(reservations, "_lock_server_shared", _lock_server_without_share)
+    monkeypatch.setattr(reservations, "_lock_server_for_booking", _lock_server_without_lock)
 
     outcome = await _reduction_first(factory, race_engine)
 
@@ -461,11 +597,11 @@ async def test_booking_first_is_also_covered_by_the_reservation_foreign_key(
     race_engine: AsyncEngine,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """In this order FOR SHARE is not the only protection, so no negative control can
+    """In this order the server lock is not the only protection, so no negative control can
     show a race by removing it. The booking's insert into reservations already holds
     KEY SHARE on the server row (foreign key check), and the reduction's FOR UPDATE
     waits for it either way. This test pins that behavior down."""
-    monkeypatch.setattr(reservations, "_lock_server_shared", _lock_server_without_share)
+    monkeypatch.setattr(reservations, "_lock_server_for_booking", _lock_server_without_lock)
 
     outcome = await _booking_first(factory, race_engine)
 

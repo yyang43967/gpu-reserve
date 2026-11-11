@@ -52,6 +52,11 @@ class Settings(BaseSettings):
         default_factory=lambda: ["http://localhost:5173"]
     )
 
+    # How long a request waits for a database connection when all are in use. Past it,
+    # the request gets 503 with Retry-After instead of waiting on.
+    database_pool_timeout_seconds: float = Field(default=3.0, gt=0)
+    database_busy_retry_after_seconds: int = Field(default=2, gt=0)
+
     # Seconds to wait on each dependency in the readiness probe.
     ready_check_timeout_seconds: float = 2.0
 
