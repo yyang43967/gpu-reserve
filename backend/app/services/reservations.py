@@ -65,7 +65,7 @@ from app.models import (
     UserRole,
 )
 from app.models.reservation import HOLDING_STATUSES, QUOTA_STATUSES
-from app.services import audit, availability_cache, booking_rules, locks, notifications
+from app.services import audit, availability_cache, booking_rules, demo, locks, notifications
 from app.services.booking_rules import Booking, Interval
 from app.services.servers import get_server, visibility_conditions
 
@@ -593,6 +593,7 @@ async def cancel_reservation(
 ) -> Reservation:
     """Cancel, or end early if running. Owners and admins; see finish_reservation."""
     reservation = await _lock_reservation(session, actor, reservation_id)
+    demo.ensure_may_cancel(actor, reservation)
     await finish_reservation(session, reservation, now=now, actor_id=actor.id)
     await session.flush()
     return await load_reservation(session, reservation_id)

@@ -77,10 +77,10 @@ async def require_admin(user: CurrentUser) -> User:
 AdminUser = Annotated[User, Depends(require_admin)]
 
 
-async def require_not_demo(user: CurrentUser, settings: SettingsDep) -> User:
+async def require_not_demo(user: CurrentUser) -> User:
     """Refuse changes to the shared demo account's own profile and password, which
     every visitor signs in to."""
-    if settings.is_demo_account(user.email):
+    if user.is_demo:
         raise DemoAccountReadOnly("The demo account's profile and password cannot be changed.")
     return user
 

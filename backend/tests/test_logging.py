@@ -156,3 +156,20 @@ def test_sdk_loggers_stay_quiet_at_debug(log_stream: io.StringIO) -> None:
 
 def test_log_level_is_case_insensitive() -> None:
     assert Settings(log_level="warning").log_level is LogLevel.WARNING  # type: ignore[arg-type]
+
+
+def test_the_default_handler_follows_stdout_when_it_is_replaced(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = logging.getLogger()
+    handlers, level = list(root.handlers), root.level
+    try:
+        configure_logging(Settings(log_level=LogLevel.INFO))
+        replaced = io.StringIO()
+        monkeypatch.setattr("sys.stdout", replaced)
+        logging.getLogger("app.example").info("after the swap")
+    finally:
+        root.handlers[:] = handlers
+        root.setLevel(level)
+
+    assert json.loads(replaced.getvalue())["message"] == "after the swap"

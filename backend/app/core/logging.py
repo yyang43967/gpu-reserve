@@ -56,6 +56,24 @@ _RECORD_ATTRIBUTES: Final = frozenset(
 _HANDLER_MARK: Final = "_gpu_reserve_handler"
 
 
+class _StdoutHandler(logging.StreamHandler):  # type: ignore[type-arg]
+    """Writes to whatever sys.stdout is when a record is emitted, not when the handler
+    was made. Test runners swap stdout and close the replacement at exit; a background
+    thread logging after that would otherwise hit a closed file."""
+
+    def __init__(self) -> None:
+        super().__init__(sys.stdout)
+
+    @property
+    def stream(self) -> IO[str]:
+        return sys.stdout
+
+    @stream.setter
+    def stream(self, value: IO[str]) -> None:
+        # StreamHandler assigns the stream in __init__ and setStream; always use stdout.
+        pass
+
+
 class JsonFormatter(logging.Formatter):
     """One JSON object per record: time, level, logger, message, context, extras."""
 
@@ -87,11 +105,13 @@ class JsonFormatter(logging.Formatter):
 def configure_logging(settings: Settings, stream: IO[str] | None = None) -> None:
     """Install the JSON handler on the root logger. Safe to call more than once."""
     root = logging.getLogger()
-    for handler in list(root.handlers):
-        if getattr(handler, _HANDLER_MARK, False):
-            root.removeHandler(handler)
+    for existing in list(root.handlers):
+        if getattr(existing, _HANDLER_MARK, False):
+            root.removeHandler(existing)
 
-    handler = logging.StreamHandler(stream or sys.stdout)
+    handler: logging.Handler = (
+        logging.StreamHandler(stream) if stream is not None else _StdoutHandler()
+    )
     handler.setFormatter(JsonFormatter())
     setattr(handler, _HANDLER_MARK, True)
     root.addHandler(handler)

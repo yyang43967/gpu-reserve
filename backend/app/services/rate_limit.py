@@ -163,6 +163,13 @@ class RateLimiter:
                 "It is available again after 00:00 UTC.",
             )
 
+    async def clear_user_limits(self, user_id: uuid.UUID) -> None:
+        """Forget one account's per-user counters: assistant, upload, and password
+        change. Used when the shared demo account is reset."""
+        keys = [f"assistant:{window.seconds}:user:{user_id}" for window in self._assistant]
+        keys += [f"presign:user:{user_id}", self._password_change_key(user_id)]
+        await self._safely(self._redis.delete(*keys))
+
     @staticmethod
     def _email_key(email: str) -> str:
         return f"login:email:{_email_digest(email)}"

@@ -243,6 +243,8 @@ async def test_production_needs_allow_production_and_gives_only_the_demo_a_passw
     # The other students got random passwords: none shared, none known.
     assert len(set(hashes.values())) == 7
     assert f"plain:{DEMO_PASSWORD}" not in hashes.values()
+    flagged = set(await db_session.scalars(select(User.email).where(User.is_demo)))
+    assert flagged == {DEMO_EMAIL}
 
 
 @pytest.mark.parametrize(

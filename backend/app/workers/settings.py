@@ -1,5 +1,6 @@
 import functools
 from collections.abc import Callable, Coroutine
+from datetime import UTC
 from typing import Any, ClassVar, Final
 
 from arq import cron
@@ -93,6 +94,14 @@ CRON_JOBS: Final = [
         unique=True,
         timeout=JOB_TIMEOUT_SECONDS,
     ),
+    # Midnight UTC, when the assistant's global daily count also starts over.
+    cron(
+        with_job_name(tasks.reset_demo),
+        hour={0},
+        minute={0},
+        unique=True,
+        timeout=JOB_TIMEOUT_SECONDS,
+    ),
     cron(
         with_job_name(tasks.dispatch_notifications),
         minute=EVERY_MINUTE,
@@ -105,6 +114,8 @@ CRON_JOBS: Final = [
 class WorkerSettings:
     functions: ClassVar[list[Any]] = [ping, with_job_name(tasks.reindex_kb)]
     cron_jobs: ClassVar[list[Any]] = CRON_JOBS
+    # Cron times are UTC whatever the host's zone.
+    timezone = UTC
     on_startup = startup
     on_job_start = job_start
     on_shutdown = shutdown

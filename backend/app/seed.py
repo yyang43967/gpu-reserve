@@ -452,6 +452,10 @@ async def seed(
         for name, email in STUDENTS
     ]
 
+    for student in students:
+        # The flag that protects the shared account and lets the daily job reset it.
+        student.is_demo = student.email == demo_email
+
     lab_ids: dict[str, tuple[uuid.UUID, ZoneInfo]] = {}
     for spec in LABS:
         lab = await labs.create_lab(

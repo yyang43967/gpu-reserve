@@ -7,8 +7,11 @@ from typing import Final
 
 import pytest
 from httpx import AsyncClient, Response
+from sqlalchemy import update
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.core.config import Settings
+from app.models import User
 
 pytestmark = pytest.mark.integration
 
@@ -25,6 +28,7 @@ LOGIN_EMAIL_FAILURE_LIMIT: Final = 5
 async def demo_client(
     make_settings: Callable[..., Settings],
     client_for: Callable[[Settings], AbstractAsyncContextManager[AsyncClient]],
+    engine: AsyncEngine,
     clean_database: None,
     redis_url: str,
 ) -> AsyncIterator[AsyncClient]:
@@ -38,6 +42,11 @@ async def demo_client(
                 json={"email": email, "password": password, "full_name": "Visitor"},
             )
             assert response.status_code == 201, response.text
+        # What the demo seed does for the configured account.
+        async with engine.begin() as connection:
+            await connection.execute(
+                update(User).where(User.email == DEMO_EMAIL).values(is_demo=True)
+            )
         yield client
     redis = Redis.from_url(redis_url)
     await redis.flushdb()
