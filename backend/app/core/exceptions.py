@@ -87,6 +87,25 @@ class TooManyPasswordAttempts(RateLimited):
     title = "Too many password attempts"
 
 
+class AssistantDailyLimit(RateLimited):
+    """The assistant's daily budget for all users together is used up."""
+
+    type_slug = "assistant-daily-limit"
+    title = "The assistant's daily limit is reached"
+
+
+class DemoAccountReadOnly(DomainError):
+    kind = ErrorKind.FORBIDDEN
+    type_slug = "demo-account-read-only"
+    title = "The demo account cannot be changed"
+
+
+class DemoLoginDisabled(DomainError):
+    kind = ErrorKind.NOT_FOUND
+    type_slug = "demo-login-disabled"
+    title = "No demo account"
+
+
 class IncorrectPassword(DomainError):
     kind = ErrorKind.INVALID
     type_slug = "incorrect-password"

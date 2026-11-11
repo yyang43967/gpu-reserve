@@ -6,7 +6,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
-from app.core.exceptions import NotAuthenticated, PermissionDenied
+from app.core.exceptions import DemoAccountReadOnly, NotAuthenticated, PermissionDenied
 from app.models import User, UserRole
 from app.services import auth
 from app.services.rate_limit import RateLimiter
@@ -75,3 +75,14 @@ async def require_admin(user: CurrentUser) -> User:
 
 
 AdminUser = Annotated[User, Depends(require_admin)]
+
+
+async def require_not_demo(user: CurrentUser, settings: SettingsDep) -> User:
+    """Refuse changes to the shared demo account's own profile and password, which
+    every visitor signs in to."""
+    if settings.is_demo_account(user.email):
+        raise DemoAccountReadOnly("The demo account's profile and password cannot be changed.")
+    return user
+
+
+ChangeableUser = Annotated[User, Depends(require_not_demo)]

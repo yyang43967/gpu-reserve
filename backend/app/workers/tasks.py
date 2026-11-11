@@ -50,6 +50,7 @@ async def dispatch_notifications(ctx: dict[str, Any]) -> jobs.DispatchReport:
         sender,
         now=datetime.now(UTC),
         frontend_url=settings.frontend_url,
+        suppressed_domains=frozenset(settings.email_suppressed_domains),
     )
     if report != jobs.DispatchReport():
         logger.info("dispatch_notifications: %s", report)

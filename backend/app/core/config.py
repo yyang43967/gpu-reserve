@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Annotated, Final
 from zoneinfo import ZoneInfo
 
-from pydantic import Field, PostgresDsn, RedisDsn, SecretStr, field_validator
+from pydantic import Field, PostgresDsn, RedisDsn, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 from app.core.timezones import valid_timezone
@@ -166,6 +166,21 @@ class Settings(BaseSettings):
     # Messages and resumes per user, in fixed windows.
     assistant_minute_limit: int = Field(default=20, gt=0)
     assistant_day_limit: int = Field(default=200, gt=0)
+    # Assistant messages from all users together per UTC day. Per-user limits do not stop
+    # many new accounts from adding up; this bounds the model bill. Confirmations of an
+    # action the assistant already proposed are not counted, so they always go through.
+    assistant_global_day_limit: int = Field(default=300, gt=0)
+
+    # A public demo account, shown on the sign-in page. Both set, or neither. The
+    # account cannot change its name, avatar, or password, and failed sign-ins do not
+    # lock it, so visitors cannot take it away from each other.
+    demo_login_email: str | None = None
+    demo_login_password: SecretStr | None = None
+
+    # Notifications to addresses in these domains are skipped instead of sent: the demo
+    # accounts use example.edu, which cannot receive mail (and SES's sandbox refuses it).
+    email_suppressed_domains: Annotated[list[str], NoDecode] = Field(default_factory=list)
+
     # Langfuse tracing; skipped unless both keys are set.
     langfuse_public_key: SecretStr | None = None
     langfuse_secret_key: SecretStr | None = None
@@ -190,6 +205,8 @@ class Settings(BaseSettings):
         "langfuse_public_key",
         "langfuse_secret_key",
         "langfuse_host",
+        "demo_login_email",
+        "demo_login_password",
         mode="before",
     )
     @classmethod
@@ -205,6 +222,27 @@ class Settings(BaseSettings):
     @classmethod
     def log_level_upper(cls, value: object) -> object:
         return value.strip().upper() if isinstance(value, str) else value
+
+    @field_validator("email_suppressed_domains", mode="before")
+    @classmethod
+    def split_domains(cls, value: object) -> object:
+        if isinstance(value, str):
+            return [domain.strip().lower() for domain in value.split(",") if domain.strip()]
+        return value
+
+    @field_validator("demo_login_email")
+    @classmethod
+    def demo_email_normalized(cls, value: str | None) -> str | None:
+        return value.strip().lower() if value is not None else None
+
+    @model_validator(mode="after")
+    def demo_login_complete(self) -> "Settings":
+        if (self.demo_login_email is None) != (self.demo_login_password is None):
+            raise ValueError("set both DEMO_LOGIN_EMAIL and DEMO_LOGIN_PASSWORD, or neither")
+        return self
+
+    def is_demo_account(self, email: str) -> bool:
+        return self.demo_login_email is not None and email == self.demo_login_email
 
     @field_validator("cors_origins", mode="before")
     @classmethod

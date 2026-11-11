@@ -1,5 +1,6 @@
 import uuid
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Request, status
@@ -114,6 +115,7 @@ async def send_message(
     await threads.get_thread(session, user, thread_id)
     available = _available(assistant)
     await limiter.check_assistant(user.id)
+    await limiter.check_assistant_global(now=datetime.now(UTC))
     run = await available.start_message(user.id, thread_id, body.content)
     return _streaming(run)
 

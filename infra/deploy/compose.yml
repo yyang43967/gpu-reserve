@@ -33,6 +33,13 @@ x-backend-env: &backend-env
   LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
   LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
   LANGFUSE_HOST: ${LANGFUSE_HOST:-}
+  # All users' assistant messages per UTC day.
+  ASSISTANT_GLOBAL_DAY_LIMIT: ${ASSISTANT_GLOBAL_DAY_LIMIT:-300}
+  # The public demo account (a seeded student) shown on the sign-in page.
+  DEMO_LOGIN_EMAIL: ${DEMO_LOGIN_EMAIL:-}
+  DEMO_LOGIN_PASSWORD: ${DEMO_LOGIN_PASSWORD:-}
+  # The seeded accounts use example.edu, which cannot receive mail.
+  EMAIL_SUPPRESSED_DOMAINS: ${EMAIL_SUPPRESSED_DOMAINS:-example.edu}
 
 services:
   caddy:

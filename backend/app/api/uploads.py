@@ -3,7 +3,7 @@ from datetime import UTC, datetime
 from fastapi import APIRouter, status
 
 from app.api import problem_responses
-from app.api.deps import CurrentUser, RateLimiterDep, SettingsDep, StorageDep
+from app.api.deps import ChangeableUser, RateLimiterDep, SettingsDep, StorageDep
 from app.schemas.upload import PresignRequest, PresignResponse
 from app.services import uploads
 
@@ -24,7 +24,7 @@ router = APIRouter(
 )
 async def presign_upload(
     body: PresignRequest,
-    user: CurrentUser,
+    user: ChangeableUser,
     storage: StorageDep,
     settings: SettingsDep,
     limiter: RateLimiterDep,
@@ -33,7 +33,8 @@ async def presign_upload(
 
     Avatars (up to 2 MiB) are open to every signed-in user; server images (up to 5 MiB)
     to admins only. Save the returned key on the profile or server afterwards. Each
-    user may request a limited number of upload forms per window (429 beyond it).
+    user may request a limited number of upload forms per window (429 beyond it). The
+    shared demo account cannot upload (403): its avatar would show to every visitor.
     """
     await limiter.check_presign(user.id)
     ticket = uploads.create_upload(

@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { PresignResponse } from "@/lib/api-types";
 import { getAccessToken } from "@/lib/auth-token";
 import {
+  demoLogin,
   fakeApi,
   type FakeRequest,
   makeUser,
@@ -38,6 +39,17 @@ describe("account page", () => {
       "href",
       "/account",
     );
+  });
+});
+
+describe("demo account", () => {
+  it("explains that its profile cannot be changed and offers no forms", async () => {
+    fakeApi(demoLogin("ada@example.edu"), ...signedInAs("student"));
+    renderRoute("/account");
+
+    expect(await screen.findByRole("heading", { name: "Demo account" })).toBeInTheDocument();
+    expect(screen.queryByLabelText("Full name")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /password/i })).not.toBeInTheDocument();
   });
 });
 

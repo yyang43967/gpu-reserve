@@ -205,3 +205,86 @@ async def test_refuses_production(make_settings) -> None:
             student_password=None,
             now=NOW,
         )
+
+
+DEMO_EMAIL: Final = "ada.lovelace@example.edu"
+DEMO_PASSWORD: Final = "demo-password-shown-on-the-page"
+
+
+def _demo_settings(make_settings, **overrides) -> Settings:
+    settings: Settings = make_settings(
+        demo_login_email=DEMO_EMAIL, demo_login_password=DEMO_PASSWORD, **overrides
+    )
+    return settings
+
+
+async def test_production_needs_allow_production_and_gives_only_the_demo_a_password(
+    db_session: AsyncSession, make_settings, cheap_hashing: None
+) -> None:
+    settings = _demo_settings(make_settings, environment=Environment.PRODUCTION)
+
+    summary = await run(
+        settings,
+        reset_first=False,
+        admin_email="admin@example.edu",
+        admin_password=PASSWORD,
+        student_password=None,
+        now=NOW,
+        allow_production=True,
+    )
+
+    assert summary.reservations == 31
+    rows = (await db_session.execute(select(User.email, User.password_hash))).all()
+    hashes = {email: password_hash for email, password_hash in rows}
+    # cheap_hashing stores "plain:<password>".
+    assert hashes.pop(DEMO_EMAIL) == f"plain:{DEMO_PASSWORD}"
+    assert hashes.pop("admin@example.edu") == f"plain:{PASSWORD}"
+    assert len(hashes) == 7
+    # The other students got random passwords: none shared, none known.
+    assert len(set(hashes.values())) == 7
+    assert f"plain:{DEMO_PASSWORD}" not in hashes.values()
+
+
+@pytest.mark.parametrize(
+    ("reset_first", "student_password", "message"),
+    [(True, None, "--reset"), (False, PASSWORD, "SEED_STUDENT_PASSWORD")],
+)
+async def test_production_refuses_reset_and_shared_student_passwords(
+    db_session: AsyncSession,
+    make_settings,
+    reset_first: bool,
+    student_password: str | None,
+    message: str,
+) -> None:
+    settings = _demo_settings(make_settings, environment=Environment.PRODUCTION)
+
+    with pytest.raises(CommandError, match=message):
+        await run(
+            settings,
+            reset_first=reset_first,
+            admin_email="admin@example.edu",
+            admin_password=PASSWORD,
+            student_password=student_password,
+            now=NOW,
+            allow_production=True,
+        )
+    assert await db_session.scalar(select(func.count()).select_from(User)) == 0
+
+
+async def test_the_demo_account_must_be_a_seeded_student(
+    db_session: AsyncSession, make_settings, cheap_hashing: None
+) -> None:
+    settings: Settings = make_settings(
+        demo_login_email="someone@example.edu", demo_login_password=DEMO_PASSWORD
+    )
+
+    with pytest.raises(CommandError, match="not one of the seeded students"):
+        await run(
+            settings,
+            reset_first=False,
+            admin_email="admin@example.edu",
+            admin_password=PASSWORD,
+            student_password=None,
+            now=NOW,
+        )
+    assert await db_session.scalar(select(func.count()).select_from(User)) == 0

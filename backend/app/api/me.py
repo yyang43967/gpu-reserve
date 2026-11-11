@@ -6,7 +6,14 @@ from pydantic import AwareDatetime
 
 from app.api import problem_responses
 from app.api.cleanup import delete_after_commit
-from app.api.deps import CurrentUser, RateLimiterDep, SessionDep, SettingsDep, StorageDep
+from app.api.deps import (
+    ChangeableUser,
+    CurrentUser,
+    RateLimiterDep,
+    SessionDep,
+    SettingsDep,
+    StorageDep,
+)
 from app.api.session_cookie import token_response
 from app.schemas.auth import TokenResponse
 from app.schemas.me import ChangePasswordRequest, UpdateProfileRequest
@@ -48,16 +55,20 @@ async def get_quota(
     return QuotaRead.build(quota)
 
 
-@router.patch("", responses=problem_responses(status.HTTP_422_UNPROCESSABLE_CONTENT))
+@router.patch(
+    "",
+    responses=problem_responses(status.HTTP_403_FORBIDDEN, status.HTTP_422_UNPROCESSABLE_CONTENT),
+)
 async def update_me(
     body: UpdateProfileRequest,
-    user: CurrentUser,
+    user: ChangeableUser,
     session: SessionDep,
     storage: StorageDep,
     background: BackgroundTasks,
 ) -> UserRead:
     """Change the name or avatar. Omitted fields stay as they are; `avatar_key: null`
-    removes the avatar. A replaced avatar is deleted after the change is saved."""
+    removes the avatar. A replaced avatar is deleted after the change is saved. 403 for
+    the shared demo account."""
     updated = await users.update_profile(session, user, full_name=body.full_name)
     if "avatar_key" in body.model_fields_set:
         replaced = await users.set_avatar(session, storage, updated, body.avatar_key)
@@ -68,19 +79,22 @@ async def update_me(
 @router.put(
     "/password",
     responses=problem_responses(
-        status.HTTP_422_UNPROCESSABLE_CONTENT, status.HTTP_429_TOO_MANY_REQUESTS
+        status.HTTP_403_FORBIDDEN,
+        status.HTTP_422_UNPROCESSABLE_CONTENT,
+        status.HTTP_429_TOO_MANY_REQUESTS,
     ),
 )
 async def change_password(
     body: ChangePasswordRequest,
     response: Response,
-    user: CurrentUser,
+    user: ChangeableUser,
     session: SessionDep,
     settings: SettingsDep,
     storage: StorageDep,
     limiter: RateLimiterDep,
 ) -> TokenResponse:
-    """Change the password. Signs out all other sessions and returns a fresh one."""
+    """Change the password. Signs out all other sessions and returns a fresh one. 403 for
+    the shared demo account."""
     result = await auth.change_password(
         session,
         settings,

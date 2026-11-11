@@ -69,3 +69,23 @@ def test_a_rejected_url_does_not_echo_its_password(monkeypatch: pytest.MonkeyPat
         assert "database_url" in text
         assert "input_value" not in text
         assert password not in text
+
+
+@pytest.mark.parametrize(
+    "values",
+    [{"demo_login_email": "demo@example.edu"}, {"demo_login_password": "demo-password-123"}],
+)
+def test_demo_login_needs_both_email_and_password(values: dict[str, str]) -> None:
+    with pytest.raises(ValidationError, match="DEMO_LOGIN_EMAIL and DEMO_LOGIN_PASSWORD"):
+        Settings(**values)  # type: ignore[arg-type]
+
+
+def test_suppressed_email_domains_are_split_and_lowercased(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("EMAIL_SUPPRESSED_DOMAINS", "Example.edu, example.org ,")
+
+    assert Settings(_env_file=None).email_suppressed_domains == [  # type: ignore[call-arg]
+        "example.edu",
+        "example.org",
+    ]

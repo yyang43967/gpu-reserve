@@ -15,13 +15,19 @@ import logging
 import uuid
 from collections.abc import Awaitable
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import Final, TypeVar
 
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
 
 from app.core.config import Settings
-from app.core.exceptions import RateLimited, TooManyLoginAttempts, TooManyPasswordAttempts
+from app.core.exceptions import (
+    AssistantDailyLimit,
+    RateLimited,
+    TooManyLoginAttempts,
+    TooManyPasswordAttempts,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -65,15 +71,22 @@ class RateLimiter:
             Window(settings.assistant_minute_limit, 60),
             Window(settings.assistant_day_limit, 24 * 60 * 60),
         )
+        self._assistant_global_day_limit = settings.assistant_global_day_limit
 
-    async def check_login(self, *, client_ip: str, email: str) -> None:
-        """Count this attempt against the IP; refuse if the IP or email is over its limit."""
+    async def check_login(self, *, client_ip: str, email: str, check_email: bool = True) -> None:
+        """Count this attempt against the IP; refuse if the IP or email is over its limit.
+
+        `check_email` is False for the shared demo account: its password is public, so
+        guessing protects nothing, and a lock would let one visitor shut out the rest.
+        """
         ip_count = await self._safely(self._hit(f"login:ip:{client_ip}", self._login_ip.seconds))
         if ip_count is not None and ip_count.value > self._login_ip.limit:
             raise TooManyLoginAttempts(
                 ip_count.ttl, "Too many sign-in attempts from this network. Try again later."
             )
 
+        if not check_email:
+            return
         retry_after = await self._failures_exceeded(self._email_key(email), self._login_email)
         if retry_after is not None:
             raise TooManyLoginAttempts(
@@ -128,6 +141,27 @@ class RateLimiter:
             count = await self._safely(self._hit(key, window.seconds))
             if count is not None and count.value > window.limit:
                 raise RateLimited(count.ttl, "Too many messages to the assistant. Try again later.")
+
+    async def check_assistant_global(self, *, now: datetime) -> None:
+        """Count one assistant message against the budget for all users, per UTC day.
+
+        A calendar day rather than a window from the first message, so the budget
+        resets at a fixed, predictable time. Called after the per-user check, so a
+        user over their own limit does not use up everyone's.
+        """
+        day = now.astimezone(UTC).date()
+        next_day = datetime.combine(day + timedelta(days=1), datetime.min.time(), UTC)
+        seconds_left = max(int((next_day - now).total_seconds()), 1)
+        # Kept a day past its date, so the count never disappears before the date ends.
+        count = await self._safely(
+            self._hit(f"assistant:global:{day.isoformat()}", seconds_left + 24 * 60 * 60)
+        )
+        if count is not None and count.value > self._assistant_global_day_limit:
+            raise AssistantDailyLimit(
+                seconds_left,
+                "The assistant has answered as many messages as it can today. "
+                "It is available again after 00:00 UTC.",
+            )
 
     @staticmethod
     def _email_key(email: str) -> str:

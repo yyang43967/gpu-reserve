@@ -11,8 +11,8 @@ from app.api.deps import (
 )
 from app.api.session_cookie import RefreshCookie, clear_refresh_cookie, token_response
 from app.core.errors import domain_error_response
-from app.core.exceptions import InvalidToken, RefreshTokenReused
-from app.schemas.auth import LoginRequest, RegisterRequest, TokenResponse
+from app.core.exceptions import DemoLoginDisabled, InvalidToken, RefreshTokenReused
+from app.schemas.auth import DemoLogin, LoginRequest, RegisterRequest, TokenResponse
 from app.services import auth
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -64,6 +64,17 @@ async def login(
         session, settings, limiter, client_ip=client_ip, email=body.email, password=body.password
     )
     return token_response(response, settings, storage, result)
+
+
+@router.get("/demo", responses=problem_responses(status.HTTP_404_NOT_FOUND))
+async def demo_login(settings: SettingsDep) -> DemoLogin:
+    """The public demo account's email and password, for the sign-in page. 404 when this
+    deployment has no demo account."""
+    if settings.demo_login_email is None or settings.demo_login_password is None:
+        raise DemoLoginDisabled("This deployment has no demo account.")
+    return DemoLogin(
+        email=settings.demo_login_email, password=settings.demo_login_password.get_secret_value()
+    )
 
 
 @router.post("/refresh", response_model=TokenResponse, responses=_UNAUTHORIZED)

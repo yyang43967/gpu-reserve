@@ -309,3 +309,29 @@ async def test_assistant_limits_per_minute_and_day(
     finally:
         await redis.flushdb()
         await redis.aclose()
+
+
+async def test_assistant_global_limit_counts_all_users_per_utc_day(
+    make_settings: Callable[..., Settings], redis_url: str
+) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    from app.core.exceptions import AssistantDailyLimit
+    from app.services.rate_limit import RateLimiter
+
+    redis = Redis.from_url(redis_url)
+    try:
+        limiter = RateLimiter(redis, make_settings(assistant_global_day_limit=3))
+        evening = datetime(2030, 1, 9, 23, 0, tzinfo=UTC)
+        for minute in range(3):
+            await limiter.check_assistant_global(now=evening + timedelta(minutes=minute))
+        with pytest.raises(AssistantDailyLimit) as over:
+            await limiter.check_assistant_global(now=evening + timedelta(minutes=5))
+        # Until 00:00 UTC, an hour minus five minutes away.
+        assert over.value.retry_after_seconds == 55 * 60
+
+        # A new UTC day starts a new count.
+        await limiter.check_assistant_global(now=datetime(2030, 1, 10, 0, 1, tzinfo=UTC))
+    finally:
+        await redis.flushdb()
+        await redis.aclose()

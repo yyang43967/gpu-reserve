@@ -693,6 +693,41 @@ async def test_messages_are_rate_limited(
     assert int(limited.headers["Retry-After"]) > 0
 
 
+async def test_the_global_daily_limit_stops_new_messages_but_not_confirmations(
+    make_settings: Callable[..., Settings],
+    clean_database: None,
+    redis_url: str,
+    student: User,
+    other: User,
+    server: Server,
+) -> None:
+    settings = make_settings(assistant_global_day_limit=1)
+    script = Script()
+    model = ScriptedChatModel(responder=script)
+    app = create_app(settings, chat_model=model, embedder=FakeEmbedder())
+    async with (
+        app.router.lifespan_context(app),
+        AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client,
+    ):
+        h = Harness(app, client, model, script, settings)
+        # The one message of the day proposes a booking.
+        thread_id, _ = await propose(h, student, server)
+        # Confirming it is not a new message: it goes through at the limit.
+        script.add(say("Booked."))
+        confirmed = events(await h.resume(student, thread_id, "confirm"))
+        # Anyone's next message is refused until the UTC day ends.
+        other_thread = await h.new_thread(other)
+        refused = await h.send(other, other_thread, "hello")
+    redis = Redis.from_url(redis_url)
+    await redis.flushdb()
+    await redis.aclose()
+
+    assert types(confirmed)[-1] == "done"
+    assert refused.status_code == 429
+    assert refused.json()["type"].endswith("/assistant-daily-limit")
+    assert 0 < int(refused.headers["Retry-After"]) <= 24 * 60 * 60
+
+
 async def test_the_recursion_limit_ends_a_run_without_writing(
     harness: Harness, db_session: AsyncSession, student: User, server: Server
 ) -> None:

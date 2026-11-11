@@ -129,6 +129,25 @@ async def test_sends_due_notifications_and_marks_them_sent(
     assert note.sent_at == NOW
 
 
+async def test_suppressed_domains_are_skipped_without_sending(
+    job_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    [note_id] = await _rows(job_factory, [NotificationKind.APPROVED])
+    sender = FakeSender()
+
+    report = await jobs.dispatch_notifications(
+        job_factory,
+        sender,
+        now=NOW,
+        frontend_url=FRONTEND,
+        suppressed_domains=frozenset({"example.edu"}),
+    )
+
+    assert report == jobs.DispatchReport(skipped=1)
+    assert sender.sent == []
+    assert (await _get(job_factory, note_id)).status is NotificationStatus.SKIPPED
+
+
 async def test_rejection_emails_carry_the_reason(
     job_factory: async_sessionmaker[AsyncSession],
 ) -> None:

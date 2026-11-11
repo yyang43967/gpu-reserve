@@ -32,3 +32,10 @@ class TokenResponse(BaseModel):
     # Seconds until the access token expires.
     expires_in: int
     user: UserRead
+
+
+class DemoLogin(BaseModel):
+    """The public demo account's credentials, shown on the sign-in page."""
+
+    email: str
+    password: str

@@ -6,6 +6,7 @@ import { z } from "zod";
 
 import { changePassword, updateProfile } from "@/auth/auth-api";
 import { meQueryKey, useAuth } from "@/auth/auth-context";
+import { useDemoLogin } from "@/auth/use-demo-login";
 import { FormAlert } from "@/components/form-alert";
 import { FormField } from "@/components/form-field";
 import { ImageUploadField } from "@/components/image-upload";
@@ -280,8 +281,10 @@ function PasswordCard() {
 
 export function AccountPage() {
   const { user } = useAuth();
+  const demo = useDemoLogin();
   // RequireAuth guarantees a user here; this only satisfies the type.
   if (!user) return null;
+  const isDemo = demo.data?.email === user.email;
 
   return (
     <>
@@ -290,9 +293,26 @@ export function AccountPage() {
         <p className="mt-1 text-sm text-muted-foreground">Your profile, photo, and password.</p>
       </div>
       <div className="grid max-w-xl gap-6">
-        <ProfileCard user={user} />
-        <AvatarCard user={user} />
-        <PasswordCard />
+        {isDemo ? (
+          <Card>
+            <CardHeader>
+              <CardTitle>
+                <h2>Demo account</h2>
+              </CardTitle>
+              <CardDescription>
+                You are signed in as {user.full_name} ({user.email}), the demo student shared with
+                every visitor. Its name, photo, and password cannot be changed. Register your own
+                account to try those.
+              </CardDescription>
+            </CardHeader>
+          </Card>
+        ) : (
+          <>
+            <ProfileCard user={user} />
+            <AvatarCard user={user} />
+            <PasswordCard />
+          </>
+        )}
       </div>
     </>
   );

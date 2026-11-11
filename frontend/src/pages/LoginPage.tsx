@@ -5,6 +5,7 @@ import { Link, useSearchParams } from "react-router";
 import { z } from "zod";
 
 import { useAuth } from "@/auth/auth-context";
+import { useDemoLogin } from "@/auth/use-demo-login";
 import { FormAlert } from "@/components/form-alert";
 import { FormField } from "@/components/form-field";
 import { Button } from "@/components/ui/button";
@@ -20,6 +21,7 @@ type LoginValues = z.infer<typeof loginSchema>;
 
 export function LoginPage() {
   const { login } = useAuth();
+  const demo = useDemoLogin();
   const [searchParams] = useSearchParams();
   const [formError, setFormError] = useState<string | null>(null);
   const {
@@ -42,6 +44,16 @@ export function LoginPage() {
     }
   });
 
+  const signInAsDemo = async () => {
+    if (!demo.data) return;
+    setFormError(null);
+    try {
+      await login(demo.data);
+    } catch (error) {
+      setFormError(applyServerErrors(error, setError, ["email", "password"]));
+    }
+  };
+
   const next = searchParams.get("next");
   const registerLink = next ? `/register?next=${encodeURIComponent(next)}` : "/register";
 
@@ -53,7 +65,35 @@ export function LoginPage() {
         </CardTitle>
         <CardDescription>Reserve GPUs on your lab&apos;s servers.</CardDescription>
       </CardHeader>
-      <CardContent>
+      <CardContent className="grid gap-6">
+        {demo.data && (
+          <section
+            aria-labelledby="demo-heading"
+            className="grid gap-2 rounded-md border bg-muted/50 p-4 text-sm"
+          >
+            <h2 id="demo-heading" className="font-medium">
+              Try the demo
+            </h2>
+            <p className="text-muted-foreground">
+              Sign in as a demo student, shared with every visitor. Bookings and assistant messages
+              work; the profile and password cannot be changed.
+            </p>
+            <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1">
+              <dt className="text-muted-foreground">Email</dt>
+              <dd className="font-mono">{demo.data.email}</dd>
+              <dt className="text-muted-foreground">Password</dt>
+              <dd className="font-mono">{demo.data.password}</dd>
+            </dl>
+            <Button
+              type="button"
+              variant="secondary"
+              disabled={isSubmitting}
+              onClick={() => void signInAsDemo()}
+            >
+              Sign in as the demo student
+            </Button>
+          </section>
+        )}
         <form noValidate onSubmit={(event) => void onSubmit(event)} className="grid gap-4">
           <FormAlert message={formError} />
           <FormField

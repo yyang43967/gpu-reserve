@@ -1,5 +1,5 @@
-import { apiFetch } from "@/lib/api";
-import type { TokenResponse, User } from "@/lib/api-types";
+import { ApiError, apiFetch } from "@/lib/api";
+import type { DemoLogin, TokenResponse, User } from "@/lib/api-types";
 import { setAccessToken } from "@/lib/auth-token";
 
 export interface LoginInput {
@@ -55,4 +55,14 @@ export async function changePassword(input: {
   const session = await apiFetch<TokenResponse>("/me/password", { method: "PUT", body: input });
   setAccessToken(session.access_token);
   return session.user;
+}
+
+/** The demo account's credentials, or null when this deployment has none (404). */
+export async function getDemoLogin(signal?: AbortSignal): Promise<DemoLogin | null> {
+  try {
+    return await apiFetch<DemoLogin>("/auth/demo", { signal });
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 404) return null;
+    throw error;
+  }
 }

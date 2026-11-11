@@ -1149,3 +1149,28 @@ Prices for `us-east-2`, on demand, checked November 2026:
 - **Frontend and API deploy independently.** Vercel builds `main` on every push; the API deploys after CI. A frontend change can therefore reach users before the API it calls. API changes stay backward compatible, as migrations do, and an API addition the frontend depends on ships first.
 - **One name for the site and the mail domain.** `gpu.yiyangdev.com` is the frontend's `CNAME` and also the SES identity. They do not collide: DKIM and DMARC records live at `*._domainkey.gpu…` and `_dmarc.gpu…`. Nothing else needs a record at `gpu.yiyangdev.com` itself today; if something did (an SPF `TXT` for a custom MAIL FROM, say), Vercel also accepts an `A` record, which can sit next to other record types where a `CNAME` cannot.
 
+
+### Public demo account
+- **What visitors get.** The sign-in page shows the email and password of one seeded student (`ada.lovelace@example.edu`, with her booking history) and a button that signs in with them. Visitors can browse, book, cancel, and use the assistant like any student.
+- **Where the credentials come from.** `GET /api/v1/auth/demo` returns `DEMO_LOGIN_EMAIL` and `DEMO_LOGIN_PASSWORD` from the API's settings, or 404 when the deployment has none.
+  - *Option rejected:* build-time `VITE_` variables on Vercel. The password would live in two places (Vercel and Parameter Store) and could drift, and changing it would need a frontend rebuild.
+  - The password is public by design, so serving it from an unauthenticated endpoint exposes nothing that the page does not show anyway.
+- **One account, many visitors.** Anything one visitor changes, the next one sees. So the demo account cannot change its name, photo, or password (403 `demo-account-read-only`, enforced in a dependency on those routes, and the account page explains it instead of showing the forms). Failed sign-ins do not count against it: the per-email lock protects a secret password, which this account does not have, and it would let one visitor lock everyone out. The per-address limit still applies.
+- **Seeding production.** `python -m app.seed --allow-production` seeds an empty production database for the demo. Even with the flag, `--reset` is refused, so the seed can never delete production data, and so is `SEED_STUDENT_PASSWORD`: only the demo account gets a password anyone knows, and the other students get random ones. The demo email must be one of the seeded students, checked before anything is written.
+- **Mail for addresses that cannot receive it.** The seeded accounts use `example.edu`, which receives no mail and which SES's sandbox refuses. Notifications to domains in `EMAIL_SUPPRESSED_DOMAINS` (production default `example.edu`) are marked skipped without sending, instead of failing three times each and logging an error every time a visitor books.
+- **The data ages.** The seed places bookings around the moment it runs, so after two weeks the demo account has history but nothing upcoming. That is acceptable: visitors make their own bookings. Re-seeding would mean recreating the database deliberately, which the seed refuses to do in production.
+
+### Global daily cap on the assistant
+- **Why.** Per-user limits (20 messages a minute, 200 a day) bound one account, but registration is open, so many accounts add up. The cap bounds the model bill for the whole deployment; a hard monthly limit on the model provider's side is the backstop.
+- **What counts.** Assistant messages from everyone, per UTC calendar day, in one Redis counter. A calendar day rather than a window from the first message, so it resets at a known time (00:00 UTC) and the 429 says when. It is checked after the per-user limits, so one user over their own limit does not use up everyone's budget.
+- **Confirmations are exempt.** Resuming a run to confirm or cancel an action the assistant already proposed is not counted. A booking the user was shown should never become impossible to confirm because the budget ran out in between; a confirmation only follows a message that was counted.
+- **Size.** 300 messages a day by default (`ASSISTANT_GLOBAL_DAY_LIMIT`). The agent evaluation measured about $0.004 per case for the default model, so the worst case is about $1.20 a day, roughly $36 a month, well inside the provider-side limit.
+- **Failure.** Like every limiter here, it fails open if Redis is unavailable: the assistant keeps working during a cache outage, and the provider-side limit still bounds the cost.
+- **Response.** 429 with its own problem type (`assistant-daily-limit`) and `Retry-After` set to the seconds until midnight UTC. The chat shows "The assistant's daily limit is reached. Try again in N hours."
+
+### Before the repository is made public
+The repository becomes public at the end of the documentation phase. Before that:
+1. Scan the full git history for secrets, not just the current tree (gitleaks over every commit and branch).
+2. Rotate anything found, even if it was removed later: history is published with the repository.
+3. Only then change the visibility.
+Being public also makes the hosted arm64 runners free.

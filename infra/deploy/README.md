@@ -25,6 +25,9 @@ These files are copied into the backend image at `/app/deploy`. A deploy extract
 | `ANTHROPIC_API_KEY` | no | Only for an `anthropic:` model |
 | `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY` | no | Tracing; also set `LANGFUSE_HOST` (String) |
 | `ASSISTANT_MODEL`, `LOG_LEVEL` | no | String; defaults `openai:gpt-5.4-mini-2026-03-17` and `INFO` |
+| `DEMO_LOGIN_EMAIL`, `DEMO_LOGIN_PASSWORD` | for the public demo | String; a seeded student (`ada.lovelace@example.edu`) and the password the sign-in page shows. Both or neither. |
+| `ASSISTANT_GLOBAL_DAY_LIMIT` | no | String; assistant messages from all users per UTC day, default 300 |
+| `EMAIL_SUPPRESSED_DOMAINS` | no | String; comma-separated domains never mailed, default `example.edu` (the seeded accounts) |
 
 Values may not contain a single quote or a newline; the deploy refuses them.
 
@@ -160,4 +163,26 @@ Vercel builds `main` on every push, independently of the backend deploy, so a fr
 The arm64 jobs (`image-and-smoke` in CI, and Deploy) run on GitHub's hosted `ubuntu-24.04-arm` runners, which build the Graviton image natively instead of under emulation. All other jobs run on `ubuntu-latest`.
 
 - **Public repository:** standard hosted runners, arm64 included, are free.
+- **Once the repository is public** (planned at the end of the documentation phase), the arm64 jobs cost nothing.
 - **Private repository (the case today):** every job's minutes count against the account's included Actions minutes (2,000 a month on GitHub Free), arm64 at the same rate as x64. Past that, minutes are billed per minute (arm64 is listed at about $0.005 a minute for 2 cores; check GitHub's current billing page) if a spending limit allows it; with a $0 limit, jobs stop running until the next month. The arm64 jobs run only on pushes to `main` and by hand, not on pull requests, to keep minutes down.
+
+## Go-live checklist
+
+In order. Every step that creates, changes, or deletes something in AWS or DNS is approved first.
+
+1. `aws login --profile gpu-reserve`; `aws sts get-caller-identity`.
+2. **State bucket:** the bootstrap in `infra/terraform/README.md` (plan, approve, apply, migrate the state).
+3. **Infrastructure:** fill `infra/terraform/terraform.tfvars` (`budget_alert_emails`, `alert_email`, `ses_sandbox_recipients`); plan, approve, apply. Keep `github_deploy_role_enabled = false`.
+4. **DNS in Cloudflare (DNS only):** the records from `terraform output dns_records`: the API `A` record, three DKIM `CNAME`s, `_dmarc`. Click the SES verification emails sent to the alert and demo addresses.
+5. **Secrets:** `POSTGRES_PASSWORD`, `JWT_SECRET`, `OPENAI_API_KEY`, `DEMO_LOGIN_EMAIL`, `DEMO_LOGIN_PASSWORD` (see "Secrets and settings").
+6. **First deploy:** `release.sh push`, then `release.sh deploy <sha>`. Check `https://api.gpu.yiyangdev.com/api/v1/ready` and the security headers (`curl -sI`).
+7. **Data**, in a Session Manager shell on the instance, from `/opt/gpu-reserve/current`:
+   - `read -rs ADMIN_PASSWORD && export ADMIN_PASSWORD ADMIN_EMAIL=<your address>`
+   - `docker compose -p gpu-reserve --env-file /opt/gpu-reserve/.env run --rm -e ADMIN_PASSWORD -e ADMIN_EMAIL api python -m app.seed --allow-production`
+   - `docker compose -p gpu-reserve --env-file /opt/gpu-reserve/.env run --rm api python -m app.rag.ingest`
+8. **Frontend:** create the Vercel project and domain ("Frontend on Vercel"); check `https://gpu.yiyangdev.com` loads and signs in as the demo student.
+9. **End to end:** as the demo student, book a slot and ask the assistant a policy question. Register your own account with a verified address, request an H100 server, approve it as the admin, and check the email arrives.
+10. **CSP:** signed in as your own account (the demo account cannot upload), upload an avatar and check that it displays. Open every page with the browser console open: if there are no `Content-Security-Policy-Report-Only` reports, rename the header in `frontend/vercel.json` to `Content-Security-Policy`, commit, and let Vercel redeploy. Check the console again on the enforced policy.
+11. **Backups:** `sudo systemctl start gpu-reserve-backup.service`; check the dump in the backups bucket. Restore it once with `restore.sh latest --confirm` and check the demo data is intact. Test the alert path with `sudo systemctl start gpu-reserve-alert@manual-test.service`; the email should arrive.
+12. **Load test** on the instance, and the keep-alive experiment (separate plan; the temporary t4g.micro is approved first).
+13. **CI deploys:** upgrade the account, activate advanced features, enable the OIDC deploy role, and switch deploys to CI ("Temporary: deploys from a developer machine" in `docs/decisions.md`).

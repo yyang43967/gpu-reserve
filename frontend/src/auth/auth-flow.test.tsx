@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import { safeNextPath } from "@/auth/next-path";
 import { getAccessToken } from "@/lib/auth-token";
 import {
+  demoLogin,
   emptyDashboard,
   fakeApi,
   makeUser,
@@ -96,7 +97,8 @@ describe("login", () => {
     expect(await screen.findByText("Enter a valid email address.")).toBeInTheDocument();
     expect(screen.getByText("Enter your password.")).toBeInTheDocument();
     expect(screen.getByLabelText("Email")).toHaveAttribute("aria-invalid", "true");
-    expect(requests.map((r) => r.path)).toEqual(["/auth/refresh"]);
+    // Only the page's own reads: the session check and the demo account.
+    expect(requests.map((r) => r.path).sort()).toEqual(["/auth/demo", "/auth/refresh"]);
   });
 
   it("shows wrong credentials as a form error", async () => {
@@ -264,5 +266,38 @@ describe("safeNextPath", () => {
     ["javascript:alert(1)", "/"],
   ])("%s -> %s", (input, expected) => {
     expect(safeNextPath(input)).toBe(expected);
+  });
+});
+
+describe("demo account", () => {
+  it("is offered on the login page and signs in with one click", async () => {
+    const requests = fakeApi(
+      demoLogin("ada@example.edu", "demo-password"),
+      signedOut,
+      on("POST", "/auth/login", () => Response.json(tokenResponse(makeUser()))),
+      emptyDashboard,
+    );
+    renderRoute("/login");
+
+    const demo = await screen.findByRole("region", { name: "Try the demo" });
+    expect(within(demo).getByText("ada@example.edu")).toBeInTheDocument();
+    expect(within(demo).getByText("demo-password")).toBeInTheDocument();
+    fireEvent.click(within(demo).getByRole("button", { name: "Sign in as the demo student" }));
+
+    expect(await screen.findByRole("heading", { name: "Dashboard" })).toBeInTheDocument();
+    expect(requests.find((r) => r.path === "/auth/login")?.body).toEqual({
+      email: "ada@example.edu",
+      password: "demo-password",
+    });
+  });
+
+  it("is not shown when the deployment has none", async () => {
+    fakeApi(signedOut);
+    renderRoute("/login");
+
+    await screen.findByRole("button", { name: "Sign in" });
+    await waitFor(() => {
+      expect(screen.queryByRole("region", { name: "Try the demo" })).not.toBeInTheDocument();
+    });
   });
 });
