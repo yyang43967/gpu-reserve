@@ -1,13 +1,18 @@
 // Shared setup for the load scripts. Environment:
 //   FIXTURE      path to the JSON written by `python -m app.loadtest seed` (required)
 //   BASE_URL     API origin (default http://127.0.0.1:18100)
-//   VUS          concurrent virtual users (default 20)
-//   WARMUP       warm-up duration, reported separately (default 30s)
-//   MEASURE      measured duration (default 90s)
+//   MODE         latency (default) or capacity; see loadOptions
+//   RATE         latency mode: iterations per second
+//   WARMUP       latency mode: warm-up duration, reported separately (default 30s)
+//   MEASURE      latency mode: measured duration (default 90s)
+//   RAMP_MAX     capacity mode: the last step's iterations per second
+//   STEPS, HOLD  capacity mode: number of steps (10) and seconds held at each (12)
+//   MAX_VUS      most concurrent iterations k6 may run (default 300)
 //   SUMMARY_OUT  where to write the end-of-test summary as JSON
 import http from "k6/http";
 import { SharedArray } from "k6/data";
 import { Counter } from "k6/metrics";
+import exec from "k6/execution";
 
 export const BASE_URL = __ENV.BASE_URL || "http://127.0.0.1:18100";
 export const API = `${BASE_URL}/api/v1`;
@@ -60,48 +65,96 @@ export function pick(list) {
   return list[Math.floor(random() * list.length)];
 }
 
-const VUS = parseInt(__ENV.VUS || "20", 10);
+const MODE = __ENV.MODE || "latency";
+const RATE = parseFloat(__ENV.RATE || "10");
+const RAMP_MAX = parseFloat(__ENV.RAMP_MAX || "100");
+export const STEPS = parseInt(__ENV.STEPS || "10", 10);
+const HOLD = parseInt(__ENV.HOLD || "12", 10);
 const WARMUP = __ENV.WARMUP || "30s";
 const MEASURE = __ENV.MEASURE || "90s";
+const PRE_ALLOCATED_VUS = 50;
+const MAX_VUS = parseInt(__ENV.MAX_VUS || "300", 10);
+// Each capacity step starts with this long a change of rate, which is not counted.
+const STEP_RAMP_SECONDS = 1;
+
+// k6 takes whole iterations per time unit. Counting per ten seconds keeps a tenth of
+// an iteration per second of precision; k6 spaces the iterations evenly either way.
+const RATE_UNIT = "10s";
+const perTenSeconds = (perSecond) => Math.round(perSecond * 10);
 
 const abortOn = [{ threshold: "count==0", abortOnFail: true }];
+const reported = (tag) => ({
+  [`http_req_duration{${tag}}`]: ["p(95)>=0"],
+  [`http_reqs{${tag}}`]: ["count>=0"],
+  [`http_req_failed{${tag}}`]: ["rate>=0"],
+});
 
-// A warm-up phase, then the measured phase, both at the same constant concurrency
-// with no think time: the result is the throughput and latency at saturation for
-// VUS concurrent clients. Every request is tagged with its phase, so the summary
-// reports the two separately and the measured numbers exclude the cold start.
-export function timedOptions() {
+// Open-model load: k6 starts iterations at a set rate whether or not earlier ones have
+// finished, so a slower server faces a growing backlog instead of slowing the clients
+// down (which a fixed number of looping users would do).
+//
+// MODE=latency: a warm-up phase, then the measured phase, both at RATE iterations per
+//   second. Cache on and off get the same RATE, below the uncached capacity, so the
+//   latencies compare service time rather than queueing.
+// MODE=capacity: the offered rate rises in STEPS equal steps up to RAMP_MAX, each held
+//   for HOLD seconds. Requests are tagged with their step, so the summary has the
+//   achieved throughput and latency at each offered rate.
+//
+// Thresholds on tagged submetrics are what make the summary include them. Only the two
+// abort conditions can fail a run.
+export function loadOptions() {
+  const thresholds = { unauthorized: abortOn, rate_limited: abortOn };
+  const vus = { preAllocatedVUs: PRE_ALLOCATED_VUS, maxVUs: MAX_VUS };
+  let scenarios;
+  if (MODE === "capacity") {
+    const stages = [];
+    for (let step = 1; step <= STEPS; step++) {
+      const target = perTenSeconds((RAMP_MAX * step) / STEPS);
+      stages.push({ target, duration: `${STEP_RAMP_SECONDS}s` });
+      stages.push({ target, duration: `${HOLD}s` });
+      Object.assign(thresholds, reported(`step:${step}`));
+    }
+    scenarios = {
+      capacity: {
+        executor: "ramping-arrival-rate",
+        startRate: perTenSeconds(RAMP_MAX / STEPS),
+        timeUnit: RATE_UNIT,
+        stages,
+        ...vus,
+        tags: { phase: "capacity" },
+      },
+    };
+  } else {
+    const phase = (duration, startTime, tag) => ({
+      executor: "constant-arrival-rate",
+      rate: perTenSeconds(RATE),
+      timeUnit: RATE_UNIT,
+      duration,
+      startTime,
+      ...vus,
+      tags: { phase: tag },
+    });
+    scenarios = { warmup: phase(WARMUP, "0s", "warmup"), measure: phase(MEASURE, WARMUP, "measure") };
+    Object.assign(thresholds, reported("phase:warmup"), reported("phase:measure"));
+  }
+  thresholds.dropped_iterations = ["count>=0"];
   return {
-    discardResponseBodies: false,
-    scenarios: {
-      warmup: {
-        executor: "constant-vus",
-        vus: VUS,
-        duration: WARMUP,
-        tags: { phase: "warmup" },
-      },
-      measure: {
-        executor: "constant-vus",
-        vus: VUS,
-        duration: MEASURE,
-        startTime: WARMUP,
-        tags: { phase: "measure" },
-      },
-    },
-    // Thresholds on tagged submetrics make the summary include them. Only the two
-    // abort conditions can fail a run.
-    thresholds: {
-      unauthorized: abortOn,
-      rate_limited: abortOn,
-      "http_req_duration{phase:warmup}": ["p(95)>=0"],
-      "http_req_duration{phase:measure}": ["p(95)>=0"],
-      "http_reqs{phase:warmup}": ["count>=0"],
-      "http_reqs{phase:measure}": ["count>=0"],
-      "http_req_failed{phase:warmup}": ["rate>=0"],
-      "http_req_failed{phase:measure}": ["rate>=0"],
-    },
+    scenarios,
+    thresholds,
     summaryTrendStats: ["avg", "min", "med", "p(90)", "p(95)", "p(99)", "max"],
   };
+}
+
+// Tags for a request: in capacity mode, the step whose rate it was sent at, or "ramp"
+// while the rate is changing between steps.
+export function stepTags(name) {
+  const tags = { name };
+  if (MODE !== "capacity") return tags;
+  const elapsed = (Date.now() - exec.scenario.startTime) / 1000;
+  const period = STEP_RAMP_SECONDS + HOLD;
+  const step = Math.floor(elapsed / period) + 1;
+  tags.step = elapsed % period < STEP_RAMP_SECONDS || step > STEPS ? "ramp" : String(step);
+  return tags;
 }
 
 export function writeSummary(data) {
@@ -113,17 +166,21 @@ export function writeSummary(data) {
 
 function summaryLine(data) {
   const lines = [];
-  for (const phase of ["warmup", "measure"]) {
-    const duration = data.metrics[`http_req_duration{phase:${phase}}`];
-    const reqs = data.metrics[`http_reqs{phase:${phase}}`];
-    const failed = data.metrics[`http_req_failed{phase:${phase}}`];
-    if (!duration || !reqs) continue;
+  const labels = ["phase:warmup", "phase:measure"];
+  for (let step = 1; step <= STEPS; step++) labels.push(`step:${step}`);
+  for (const label of labels) {
+    const duration = data.metrics[`http_req_duration{${label}}`];
+    const reqs = data.metrics[`http_reqs{${label}}`];
+    const failed = data.metrics[`http_req_failed{${label}}`];
+    if (!duration || !reqs || !reqs.values.count) continue;
     lines.push(
-      `${phase}: ${reqs.values.count} requests, ${reqs.values.rate.toFixed(1)}/s, ` +
+      `${label}: ${reqs.values.count} requests, ` +
         `p50 ${duration.values.med.toFixed(1)} ms, p95 ${duration.values["p(95)"].toFixed(1)} ms, ` +
         `failed ${(100 * (failed ? failed.values.rate : 0)).toFixed(2)}%`
     );
   }
+  const dropped = data.metrics.dropped_iterations;
+  lines.push(`dropped iterations: ${dropped ? dropped.values.count : 0}`);
   return lines.join("\n") + "\n";
 }
 

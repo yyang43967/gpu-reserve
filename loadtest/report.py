@@ -3,8 +3,8 @@
 
     python3 loadtest/report.py loadtest/out/<run>
 
-Each figure is the median over the repeats of one configuration; the range across
-repeats is shown where it matters. Standard library only.
+Each figure is the median over the repeats of one configuration; ranges across repeats
+are shown where they matter. Standard library only.
 """
 
 import json
@@ -14,204 +14,282 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
-from run import CONFIGS, seconds
+from analysis import (
+    CONFIGS,
+    SLO_P95_MS,
+    capacity,
+    median,
+    metric,
+    seconds,
+    steps,
+)
 
 # Samples this close to a phase boundary are dropped: k6 takes a moment to start, and
 # docker stats averages over its own interval.
 EDGE_SECONDS = 2
 
+Runs = dict[tuple[str, str, str], list[dict[str, Any]]]
 
-def load_runs(out: Path) -> dict[tuple[str, str], list[dict[str, Any]]]:
-    runs: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+
+def load_runs(out: Path) -> Runs:
+    runs: Runs = defaultdict(list)
     for config in CONFIGS:
-        for run_dir in sorted((out / config).glob("*-*")):
+        for run_dir in sorted((out / config).glob("*/*-*")):
             meta = json.loads((run_dir / "run.json").read_text())
             meta["summary"] = json.loads((run_dir / "summary.json").read_text())
             meta["samples"] = json.loads((run_dir / "samples.json").read_text())
-            runs[meta["script"], config].append(meta)
+            runs[meta["kind"], meta["script"], config].append(meta)
     return runs
 
 
-def metric(summary: dict[str, Any], name: str, stat: str) -> float:
-    found = summary["metrics"].get(name)
-    if found is None:
-        return 0.0
-    return float(found["values"].get(stat, 0.0))
-
-
-def window(run: dict[str, Any], phase: str, args: dict[str, Any]) -> tuple[float, float]:
+def resources(run: dict[str, Any], args: dict[str, Any]) -> dict[str, float]:
+    """CPU and connections during a latency run's measured phase."""
     start = run["samples"]["k6_started"]
     warmup, measure = seconds(args["warmup"]), seconds(args["measure"])
-    if run["script"] == "booking_race":
-        return start, start + 10**6
-    if phase == "warmup":
-        return start + EDGE_SECONDS, start + warmup - EDGE_SECONDS
-    return start + warmup + EDGE_SECONDS, start + warmup + measure - EDGE_SECONDS
-
-
-def resources(run: dict[str, Any], args: dict[str, Any]) -> dict[str, float]:
-    lo, hi = window(run, "measure", args)
+    lo, hi = start + warmup + EDGE_SECONDS, start + warmup + measure - EDGE_SECONDS
     cpu: dict[str, list[float]] = defaultdict(list)
     for sample in run["samples"]["cpu"]:
         if lo <= sample["t"] <= hi:
             cpu[sample["service"]].append(sample["cpu_percent"])
     pg = [s for s in run["samples"]["postgres"] if lo <= s["t"] <= hi]
-    commits_per_second = 0.0
+    commits = 0.0
     if len(pg) >= 2:
-        commits_per_second = (pg[-1]["commits"] - pg[0]["commits"]) / (pg[-1]["t"] - pg[0]["t"])
+        commits = (pg[-1]["commits"] - pg[0]["commits"]) / (pg[-1]["t"] - pg[0]["t"])
+    busy = [s["active"] + s["in_transaction"] for s in pg]
     return {
         "api_cpu": statistics.fmean(cpu["api"]) if cpu["api"] else 0.0,
         "pg_cpu": statistics.fmean(cpu["postgres"]) if cpu["postgres"] else 0.0,
-        # Busy: running a statement or holding a transaction open, i.e. checked out of
-        # the API's pool (5 connections plus 5 overflow).
-        "pg_active_mean": statistics.fmean(s["active"] + s["in_transaction"] for s in pg)
-        if pg
-        else 0.0,
-        "pg_active_max": max((s["active"] + s["in_transaction"] for s in pg), default=0),
-        "pg_connections_max": max((s["connections"] for s in pg), default=0),
-        "commits_per_second": commits_per_second,
+        "busy_mean": statistics.fmean(busy) if busy else 0.0,
+        "busy_max": max(busy, default=0),
+        "commits": commits,
     }
 
 
-def figures(run: dict[str, Any], args: dict[str, Any]) -> dict[str, float]:
+def latency_figures(run: dict[str, Any], args: dict[str, Any]) -> dict[str, float]:
     s = run["summary"]
-    values = {
+    return {
+        "rate": float(run["mode"]["RATE"]),
         "rps": metric(s, "http_reqs{phase:measure}", "rate"),
-        "requests": metric(s, "http_reqs{phase:measure}", "count"),
         "p50": metric(s, "http_req_duration{phase:measure}", "med"),
         "p95": metric(s, "http_req_duration{phase:measure}", "p(95)"),
         "p99": metric(s, "http_req_duration{phase:measure}", "p(99)"),
         "failed": metric(s, "http_req_failed{phase:measure}", "rate"),
         "cold_p50": metric(s, "http_req_duration{phase:warmup}", "med"),
         "cold_p95": metric(s, "http_req_duration{phase:warmup}", "p(95)"),
-        "cold_rps": metric(s, "http_reqs{phase:warmup}", "rate"),
-        "unauthorized": metric(s, "unauthorized", "count"),
-        "rate_limited": metric(s, "rate_limited", "count"),
-        "won": metric(s, "race_won", "count"),
-        "lost": metric(s, "race_lost", "count"),
-    }
-    values |= resources(run, args)
-    return values
+        "dropped": metric(s, "dropped_iterations", "count"),
+        "aborts": metric(s, "unauthorized", "count") + metric(s, "rate_limited", "count"),
+    } | resources(run, args)
 
 
-def median(runs: list[dict[str, float]], key: str) -> float:
-    return statistics.median(r[key] for r in runs)
+def step_rows(run: dict[str, Any], args: dict[str, Any]) -> list[dict[str, float]]:
+    return steps(
+        run["summary"],
+        script=run["script"],
+        ramp_max=float(run["mode"]["RAMP_MAX"]),
+        step_count=args["steps"],
+        hold=args["hold"],
+    )
 
 
-def spread(runs: list[dict[str, float]], key: str, fmt: str) -> str:
-    low, high = min(r[key] for r in runs), max(r[key] for r in runs)
+def med(rows: list[dict[str, float]], key: str) -> float:
+    return median([r[key] for r in rows])
+
+
+def span(rows: list[dict[str, float]], key: str, fmt: str) -> str:
+    low, high = min(r[key] for r in rows), max(r[key] for r in rows)
     return f"{format(low, fmt)} to {format(high, fmt)}"
+
+
+def change(before: float, after: float) -> str:
+    return f"{100 * (after - before) / before:+.0f}%" if before else "n/a"
+
+
+def latency_section(runs: Runs, args: dict[str, Any], scripts: list[str]) -> list[str]:
+    lines = [
+        "| Script | Rate (iter/s) | Cache | Postgres CPU | API CPU | p50 ms | p95 ms | p99 ms "
+        "| Req/s | Errors | Dropped | Busy conns (mean / max) | p95 range |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+    ]
+    for script in scripts:
+        figures = {
+            c: [latency_figures(r, args) for r in runs["latency", script, c]] for c in CONFIGS
+        }
+        if not all(figures.values()):
+            continue
+        for config in CONFIGS:
+            f = figures[config]
+            lines.append(
+                f"| {script} | {med(f, 'rate'):g} | {config.removeprefix('cache-')} | "
+                f"{med(f, 'pg_cpu'):.0f}% | {med(f, 'api_cpu'):.0f}% | {med(f, 'p50'):.1f} | "
+                f"{med(f, 'p95'):.1f} | {med(f, 'p99'):.1f} | {med(f, 'rps'):.1f} | "
+                f"{100 * med(f, 'failed'):.2f}% | {med(f, 'dropped'):.0f} | "
+                f"{med(f, 'busy_mean'):.1f} / {med(f, 'busy_max'):.0f} | {span(f, 'p95', '.1f')} |"
+            )
+        off, on = figures["cache-off"], figures["cache-on"]
+        lines.append(
+            f"| {script} | | change | {change(med(off, 'pg_cpu'), med(on, 'pg_cpu'))} | "
+            f"{change(med(off, 'api_cpu'), med(on, 'api_cpu'))} | "
+            f"{change(med(off, 'p50'), med(on, 'p50'))} | "
+            f"{change(med(off, 'p95'), med(on, 'p95'))} | "
+            f"{change(med(off, 'p99'), med(on, 'p99'))} | | | | | |"
+        )
+    return lines
+
+
+def cold_section(runs: Runs, args: dict[str, Any], scripts: list[str]) -> list[str]:
+    lines = ["| Script | Cache | p50 ms | p95 ms |", "|---|---|---|---|"]
+    for script in scripts:
+        for config in CONFIGS:
+            f = [latency_figures(r, args) for r in runs["latency", script, config]]
+            if f:
+                lines.append(
+                    f"| {script} | {config.removeprefix('cache-')} | "
+                    f"{med(f, 'cold_p50'):.1f} | {med(f, 'cold_p95'):.1f} |"
+                )
+    return lines
+
+
+def capacity_section(runs: Runs, args: dict[str, Any], scripts: list[str]) -> list[str]:
+    lines = [
+        "| Script | Cache | Peak req/s | Peak range "
+        f"| Sustained req/s (p95 <= {SLO_P95_MS:.0f} ms) | Sustained range | Runs not saturated |",
+        "|---|---|---|---|---|---|---|",
+    ]
+    for script in scripts:
+        for config in CONFIGS:
+            found = runs["capacity", script, config]
+            if not found:
+                continue
+            caps = [capacity(step_rows(r, args)) for r in found]
+            lines.append(
+                f"| {script} | {config.removeprefix('cache-')} | {med(caps, 'peak_rps'):.0f} | "
+                f"{span(caps, 'peak_rps', '.0f')} | {med(caps, 'sustained_rps'):.0f} | "
+                f"{span(caps, 'sustained_rps', '.0f')} | "
+                f"{sum(bool(c['limit_not_reached']) for c in caps)} of {len(caps)} |"
+            )
+    return lines
+
+
+def steps_section(runs: Runs, args: dict[str, Any], script: str) -> list[str]:
+    per_config = {c: [step_rows(r, args) for r in runs["capacity", script, c]] for c in CONFIGS}
+    if not all(per_config.values()):
+        return []
+    lines = [
+        f"`{script}`, per step (medians):",
+        "",
+        "| Offered req/s | Achieved off | Achieved on | p95 off ms | p95 on ms | Errors off "
+        "| Errors on |",
+        "|---|---|---|---|---|---|---|",
+    ]
+    for index in range(args["steps"]):
+
+        def at(config: str, key: str, i: int = index) -> float:
+            return median([rows[i][key] for rows in per_config[config]])
+
+        lines.append(
+            f"| {at('cache-off', 'offered_rps'):.0f} | {at('cache-off', 'achieved_rps'):.0f} | "
+            f"{at('cache-on', 'achieved_rps'):.0f} | {at('cache-off', 'p95'):.0f} | "
+            f"{at('cache-on', 'p95'):.0f} | {100 * at('cache-off', 'failed'):.1f}% | "
+            f"{100 * at('cache-on', 'failed'):.1f}% |"
+        )
+    return [*lines, ""]
+
+
+def race_section(runs: Runs) -> list[str]:
+    lines = [
+        "| Cache | Run | Requests | 201 | 409 | Other errors | p50 ms | p95 ms "
+        "| Winners (expected) | Overlapping active allocations | Bookings per GPU | Check |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|",
+    ]
+    for config in CONFIGS:
+        for run in runs["race", "booking_race", config]:
+            s, v = run["summary"], run["verify"]
+            won = metric(s, "race_won", "count")
+            per_gpu = sorted(set(v["race_bookings_per_gpu"].values()))
+            ok = v["ok"] and won == v["race_winners"]
+            lines.append(
+                f"| {config.removeprefix('cache-')} | {run['repeat']} | "
+                f"{metric(s, 'http_reqs{phase:measure}', 'count'):.0f} | {won:.0f} | "
+                f"{metric(s, 'race_lost', 'count'):.0f} | "
+                f"{100 * metric(s, 'http_req_failed{phase:measure}', 'rate'):.2f}% | "
+                f"{metric(s, 'http_req_duration{phase:measure}', 'med'):.0f} | "
+                f"{metric(s, 'http_req_duration{phase:measure}', 'p(95)'):.0f} | "
+                f"{v['race_winners']} ({v['race_expected_winners']}) | "
+                f"{v['overlapping_active_allocations']} | "
+                f"{', '.join(map(str, per_gpu))} on {len(v['race_bookings_per_gpu'])} GPUs | "
+                f"{'pass' if ok else 'FAIL'} |"
+            )
+    return lines
+
+
+def hit_rate_section(out: Path) -> list[str]:
+    paths = sorted((out / "hit-rate").glob("*/hit_rate.json"))
+    if not paths:
+        return []
+    lines = [
+        "| Script | Warm-up hits / misses | Warm-up rate | Measured hits / misses "
+        "| Measured rate |",
+        "|---|---|---|---|---|",
+    ]
+
+    def rate(x: dict[str, Any]) -> str:
+        return f"{100 * x['hit_rate']:.1f}%" if x.get("hit_rate") is not None else "n/a"
+
+    for path in paths:
+        h = json.loads(path.read_text())
+        w, m = h.get("warmup", {}), h["measure"]
+        lines.append(
+            f"| {path.parent.name} | {w.get('hits', 0)} / {w.get('misses', 0)} | {rate(w)} | "
+            f"{m['hits']} / {m['misses']} | {rate(m)} |"
+        )
+    return lines
 
 
 def report(out: Path) -> str:
     meta = json.loads((out / "meta.json").read_text())
     args = meta["args"]
     runs = load_runs(out)
+    scripts = [
+        s for s in ("availability", "slot_search", "browse_servers") if any(k[1] == s for k in runs)
+    ]
+    m = meta["machine"]
     lines = [
-        f"Run `{out.name}`, commit `{meta['machine']['commit'][:7]}`"
-        f"{' (dirty tree)' if meta['machine']['dirty'] else ''}.",
+        f"Run `{out.name}`, commit `{m['commit'][:7]}`{' (dirty tree)' if m['dirty'] else ''}; "
+        f"k6 {m['k6'].split()[1] if m['k6'] else '?'}; latency rates (iterations/s): "
+        f"{meta.get('latency_rates')}.",
+        "",
+        "### Fixed rate, cache off vs on",
+        "",
+        *latency_section(runs, args, scripts),
+        "",
+        "### Capacity",
+        "",
+        *capacity_section(runs, args, scripts),
         "",
     ]
-
+    for script in scripts:
+        lines += steps_section(runs, args, script)
     lines += [
-        "| Script | Cache | Runs | Req/s | p50 ms | p95 ms | p99 ms | Errors "
-        "| Req/s range | p95 range |",
-        "|---|---|---|---|---|---|---|---|---|---|",
+        "### Warm-up at the fixed rate (cold cache)",
+        "",
+        *cold_section(runs, args, scripts),
+        "",
+        "### Booking race",
+        "",
+        *race_section(runs),
+        "",
+        "### Cache hit rate (separate untimed runs, per day entry)",
+        "",
+        *hit_rate_section(out),
+        "",
     ]
-    by_key: dict[tuple[str, str], list[dict[str, float]]] = {
-        key: [figures(r, args) for r in value] for key, value in runs.items()
-    }
-    timed = [k for k in sorted(by_key) if k[0] != "booking_race"]
-    for script, config in timed:
-        f = by_key[script, config]
-        lines.append(
-            f"| {script} | {config.removeprefix('cache-')} | {len(f)} | {median(f, 'rps'):.0f} | "
-            f"{median(f, 'p50'):.1f} | {median(f, 'p95'):.1f} | {median(f, 'p99'):.1f} | "
-            f"{100 * median(f, 'failed'):.2f}% | {spread(f, 'rps', '.0f')} | "
-            f"{spread(f, 'p95', '.1f')} |"
-        )
-
-    lines += [
-        "",
-        "Warm-up (cold cache, first seconds of each run), medians:",
-        "",
-        "| Script | Cache | Req/s | p50 ms | p95 ms |",
-        "|---|---|---|---|---|",
-    ]
-    for script, config in timed:
-        f = by_key[script, config]
-        lines.append(
-            f"| {script} | {config.removeprefix('cache-')} | {median(f, 'cold_rps'):.0f} | "
-            f"{median(f, 'cold_p50'):.1f} | {median(f, 'cold_p95'):.1f} |"
-        )
-
-    lines += [
-        "",
-        "Resources during the measured phase, medians (CPU in % of one core; busy "
-        "connections are running a statement or inside a transaction, sampled 4 times a "
-        "second):",
-        "",
-        "| Script | Cache | API CPU | Postgres CPU | PG busy conns (mean / max) "
-        "| PG conns max | Commits/s |",
-        "|---|---|---|---|---|---|---|",
-    ]
-    # Not the race: it lasts a second or two, shorter than docker's CPU sampling.
-    for script, config in timed:
-        f = by_key[script, config]
-        lines.append(
-            f"| {script} | {config.removeprefix('cache-')} | {median(f, 'api_cpu'):.0f}% | "
-            f"{median(f, 'pg_cpu'):.0f}% | {median(f, 'pg_active_mean'):.1f} / "
-            f"{median(f, 'pg_active_max'):.0f} | {median(f, 'pg_connections_max'):.0f} | "
-            f"{median(f, 'commits_per_second'):.0f} |"
-        )
-
-    race_keys = [k for k in sorted(by_key) if k[0] == "booking_race"]
-    if race_keys:
-        lines += [
-            "",
-            "Booking race, every run:",
-            "",
-            "| Cache | Run | Requests | 201 | 409 | Other errors | p50 ms | p95 ms "
-            "| Winners (expected) | Overlapping active allocations | Bookings per GPU | Check |",
-            "|---|---|---|---|---|---|---|---|---|---|---|---|",
-        ]
-        for script, config in race_keys:
-            for run, f in zip(runs[script, config], by_key[script, config], strict=True):
-                v = run["verify"]
-                per_gpu = sorted(set(v["race_bookings_per_gpu"].values()))
-                lines.append(
-                    f"| {config.removeprefix('cache-')} | {run['repeat']} | {f['requests']:.0f} | "
-                    f"{f['won']:.0f} | {f['lost']:.0f} | {100 * f['failed']:.2f}% | "
-                    f"{f['p50']:.0f} | {f['p95']:.0f} | {v['race_winners']} "
-                    f"({v['race_expected_winners']}) | {v['overlapping_active_allocations']} | "
-                    f"{', '.join(map(str, per_gpu))} on {len(v['race_bookings_per_gpu'])} GPUs | "
-                    f"{'pass' if v['ok'] and f['won'] == v['race_winners'] else 'FAIL'} |"
-                )
-
-    aborts = sum(f["unauthorized"] + f["rate_limited"] for fs in by_key.values() for f in fs)
-    lines += ["", f"401 and 429 responses across all runs: {aborts:.0f} (any would abort a run)."]
-
-    hit_rates = sorted((out / "hit-rate").glob("*/hit_rate.json"))
-    if hit_rates:
-        lines += [
-            "",
-            "Cache hit rate (separate untimed runs with counting on; per day entry):",
-            "",
-            "| Script | Warm-up hits / misses | Warm-up rate | Measured hits / misses "
-            "| Measured rate |",
-            "|---|---|---|---|---|",
-        ]
-        for path in hit_rates:
-            h = json.loads(path.read_text())
-            w, m = h.get("warmup", {}), h["measure"]
-
-            def rate(x: dict[str, Any]) -> str:
-                return f"{100 * x['hit_rate']:.1f}%" if x.get("hit_rate") is not None else "n/a"
-
-            lines.append(
-                f"| {path.parent.name} | {w.get('hits', 0)} / {w.get('misses', 0)} | {rate(w)} | "
-                f"{m['hits']} / {m['misses']} | {rate(m)} |"
-            )
+    aborts = sum(
+        metric(r["summary"], "unauthorized", "count")
+        + metric(r["summary"], "rate_limited", "count")
+        for found in runs.values()
+        for r in found
+    )
+    lines.append(f"401 and 429 responses across all runs: {aborts:.0f} (any would abort a run).")
     return "\n".join(lines) + "\n"
 
 

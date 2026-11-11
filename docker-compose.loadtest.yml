@@ -33,7 +33,9 @@ services:
       POSTGRES_USER: gpureserve
       POSTGRES_PASSWORD: gpureserve
       POSTGRES_DB: gpureserve
-    command: postgres -c shared_buffers=192MB -c max_connections=40
+    # Lock waits longer than deadlock_timeout, and deadlocks, are logged: under a
+    # booking race they show how often concurrent bookings wait on each other.
+    command: postgres -c shared_buffers=192MB -c max_connections=40 -c log_lock_waits=on
     volumes:
       - loadtest-postgres:/var/lib/postgresql/data
     cpus: 1.0

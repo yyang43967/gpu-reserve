@@ -2,13 +2,23 @@
 """Run the load tests against docker-compose.loadtest.yml and keep every result.
 
     python3 loadtest/run.py                          # everything, 3 repeats
-    python3 loadtest/run.py --scripts availability --repeats 1 --warmup 10s --measure 20s
+    python3 loadtest/run.py --scripts availability --repeats 1 \
+        --steps 3 --hold 4 --warmup 5s --measure 10s
 
-For each repeat, the cache-off and cache-on configurations alternate, so slow drift on
-the host (thermal, background work) affects both alike. Before every script run the
-database is reset to the same seed and the cache is emptied. During each run, a sampler
-records the CPU of the API and Postgres containers and Postgres's connections and
-commits once a second.
+Two kinds of timed run, both open-model (k6 starts requests at a set rate whatever the
+server does):
+1. Capacity: the offered rate rises in steps to a ceiling per script, for each
+   configuration. It gives the peak throughput and the highest rate sustained within
+   the latency target (see analysis.py).
+2. Latency: a constant rate, the same for cache off and on, at 65% of the median
+   uncached peak from step 1, so the comparison is of service time, not queueing.
+Then the booking race, and the hit-rate runs.
+
+Within each repeat, the cache-off and cache-on configurations alternate, so slow drift
+on the host (thermal, background work) affects both alike. Before every run the API is
+restarted, the database is reset to the same seed, and the cache is emptied. During
+each run, a sampler records the CPU of the API and Postgres containers, and Postgres's
+connections and commits four times a second.
 
 The cache hit rate is measured in separate runs with counting turned on, because
 counting adds a Redis round trip to every read; those runs' latencies are not reported.
@@ -24,26 +34,38 @@ import contextlib
 import json
 import os
 import platform
-import re
 import subprocess
 import sys
 import threading
 import time
+import urllib.error
+import urllib.request
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from analysis import (
+    CONFIGS,
+    LATENCY_LOAD_SHARE,
+    RAMP_MAX,
+    REQUESTS_PER_ITERATION,
+    TIMED_SCRIPTS,
+    capacity,
+    median,
+    seconds,
+    steps,
+)
+
 ROOT = Path(__file__).resolve().parent.parent
 HERE = ROOT / "loadtest"
 COMPOSE = ["docker", "compose", "-f", str(ROOT / "docker-compose.loadtest.yml")]
 BASE_URL = "http://127.0.0.1:18100"
-TIMED_SCRIPTS = ("browse_servers", "availability", "slot_search")
 ALL_SCRIPTS = (*TIMED_SCRIPTS, "booking_race")
 # Scripts that read through the cache, and so get a hit-rate run.
 CACHED_SCRIPTS = ("availability", "slot_search")
-CONFIGS = ("cache-off", "cache-on")
 K6_ABORTED_BY_THRESHOLD = 99
+API_READY_TIMEOUT = 60
 
 # The API's connections as Postgres sees them, excluding the sampler's own: running a
 # statement, holding a transaction open between statements, and open at all.
@@ -62,14 +84,6 @@ PG_SAMPLE_INTERVAL = 0.25
 
 class RunFailed(Exception):
     pass
-
-
-def seconds(duration: str) -> int:
-    match = re.fullmatch(r"(\d+)(s|m)", duration)
-    if not match:
-        raise argparse.ArgumentTypeError("use a duration like 30s or 2m")
-    value, unit = int(match[1]), match[2]
-    return value * 60 if unit == "m" else value
 
 
 def compose(*args: str, env: dict[str, str] | None = None, capture: bool = True) -> str:
@@ -110,6 +124,24 @@ def configure(config: str, *, stats: bool = False) -> None:
         or settings.get("AVAILABILITY_CACHE_STATS") != str(stats).lower()
     ):
         raise RunFailed(f"the API did not pick up {config} (stats={stats})")
+
+
+def fresh_api() -> None:
+    """Restart the API and wait until it answers. Requests still queued from the
+    previous run (k6 stops sending, but the server keeps working through what it
+    accepted) would otherwise hold the connection pool at the start of the next run."""
+    compose("restart", "api")
+    deadline = time.time() + API_READY_TIMEOUT
+    while time.time() < deadline:
+        try:
+            ready = f"{BASE_URL}/api/v1/ready"
+            with urllib.request.urlopen(ready, timeout=2) as response:  # noqa: S310 - fixed http URL
+                if response.status == 200:
+                    return
+        except (OSError, urllib.error.URLError):
+            pass
+        time.sleep(0.5)
+    raise RunFailed("the API did not become ready after a restart")
 
 
 def loadtest_command(*args: str) -> dict[str, Any]:
@@ -224,15 +256,19 @@ class Sampler:
             psql.terminate()
 
 
-def run_k6(script: str, run_dir: Path, fixture: Path, args: argparse.Namespace) -> float:
-    """Run one script; returns the time k6 was started."""
+def run_k6(
+    script: str, run_dir: Path, fixture: Path, args: argparse.Namespace, mode: dict[str, str]
+) -> float:
+    """Run one script; returns the time k6 was started. `mode` holds MODE and its rate."""
     env = {
         "FIXTURE": str(fixture),
         "BASE_URL": BASE_URL,
         "SUMMARY_OUT": str(run_dir / "summary.json"),
-        "VUS": str(args.vus),
         "WARMUP": args.warmup,
         "MEASURE": args.measure,
+        "STEPS": str(args.steps),
+        "HOLD": str(args.hold),
+        **mode,
     }
     command = ["k6", "run", "--quiet", "--no-color"]
     for key, value in env.items():
@@ -248,34 +284,53 @@ def run_k6(script: str, run_dir: Path, fixture: Path, args: argparse.Namespace) 
     return started
 
 
-def one_run(script: str, config: str, repeat: int, out: Path, args: argparse.Namespace) -> None:
-    run_dir = out / config / f"{script}-{repeat}"
+def one_run(
+    script: str,
+    config: str,
+    repeat: int,
+    out: Path,
+    args: argparse.Namespace,
+    mode: dict[str, str],
+) -> dict[str, Any]:
+    kind = mode.get("MODE", "race")
+    run_dir = out / config / kind / f"{script}-{repeat}"
     run_dir.mkdir(parents=True)
+    fresh_api()
     fixture = run_dir / "fixture.json"
     data = loadtest_command("seed")
     fixture.write_text(json.dumps(data))
     sampler = Sampler()
     sampler.start()
     try:
-        started = run_k6(script, run_dir, fixture, args)
+        started = run_k6(script, run_dir, fixture, args, mode)
     finally:
         samples = sampler.stop()
     samples["k6_started"] = started
     (run_dir / "samples.json").write_text(json.dumps(samples))
-    meta = {"script": script, "config": config, "repeat": repeat, "counts": data["counts"]}
+    meta = {
+        "script": script,
+        "config": config,
+        "repeat": repeat,
+        "kind": kind,
+        "mode": mode,
+        "counts": data["counts"],
+    }
     if script == "booking_race":
         meta["verify"] = loadtest_command("verify")
         if not meta["verify"]["ok"]:
             (run_dir / "run.json").write_text(json.dumps(meta, indent=2))
             raise RunFailed(f"race correctness check failed: {meta['verify']}")
     (run_dir / "run.json").write_text(json.dumps(meta, indent=2))
-    print(f"  {config} {script} #{repeat}: {(run_dir / 'k6.log').read_text().strip()}")
+    log = (run_dir / "k6.log").read_text().strip().replace("\n", "\n    ")
+    print(f"  {config} {kind} {script} #{repeat}:\n    {log}", flush=True)
+    return json.loads((run_dir / "summary.json").read_text())
 
 
-def hit_rate_run(script: str, out: Path, args: argparse.Namespace) -> None:
+def hit_rate_run(script: str, out: Path, args: argparse.Namespace, mode: dict[str, str]) -> None:
     """An untimed run with counting on: hits and misses during warm-up and after."""
     run_dir = out / "hit-rate" / script
     run_dir.mkdir(parents=True)
+    fresh_api()
     fixture = run_dir / "fixture.json"
     fixture.write_text(json.dumps(loadtest_command("seed")))
     loadtest_command("cache-stats", "--reset")
@@ -287,7 +342,7 @@ def hit_rate_run(script: str, out: Path, args: argparse.Namespace) -> None:
     timer = threading.Timer(seconds(args.warmup), at_warmup_end)
     timer.start()
     try:
-        run_k6(script, run_dir, fixture, args)
+        run_k6(script, run_dir, fixture, args, mode)
     finally:
         timer.cancel()
     result["measure"] = loadtest_command("cache-stats", "--reset")
@@ -336,13 +391,40 @@ def machine() -> dict[str, Any]:
     }
 
 
+def latency_rates(peaks: dict[str, list[float]], overrides: dict[str, float]) -> dict[str, float]:
+    """Iterations per second for the latency runs: a share of the median uncached peak."""
+    rates = {}
+    for script, values in peaks.items():
+        per_second = median(values) / REQUESTS_PER_ITERATION[script]
+        rates[script] = round(LATENCY_LOAD_SHARE * per_second, 1)
+    return rates | overrides
+
+
+def parse_rates(text: str) -> dict[str, float]:
+    rates = {}
+    for item in filter(None, text.split(",")):
+        name, _, value = item.partition("=")
+        if name not in TIMED_SCRIPTS:
+            raise argparse.ArgumentTypeError(f"unknown script {name}")
+        rates[name] = float(value)
+    return rates
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--scripts", default=",".join(ALL_SCRIPTS))
     parser.add_argument("--repeats", type=int, default=3)
-    parser.add_argument("--vus", type=int, default=20)
-    parser.add_argument("--warmup", default="30s")
-    parser.add_argument("--measure", default="90s")
+    parser.add_argument("--steps", type=int, default=10, help="capacity steps")
+    parser.add_argument("--hold", type=int, default=12, help="seconds per capacity step")
+    parser.add_argument("--warmup", default="30s", help="latency warm-up")
+    parser.add_argument("--measure", default="90s", help="latency measured phase")
+    parser.add_argument(
+        "--rates",
+        type=parse_rates,
+        default={},
+        help="fixed latency rates (iterations/s), e.g. availability=110; skips capacity "
+        "runs for the scripts named",
+    )
     parser.add_argument("--skip-hit-rate", action="store_true")
     args = parser.parse_args()
     for duration in (args.warmup, args.measure):
@@ -351,28 +433,58 @@ def main() -> int:
     unknown = set(scripts) - set(ALL_SCRIPTS)
     if unknown:
         parser.error(f"unknown scripts: {', '.join(sorted(unknown))}")
+    timed = [s for s in scripts if s in TIMED_SCRIPTS]
+    to_ramp = [s for s in timed if s not in args.rates]
 
     out = HERE / "out" / datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     out.mkdir(parents=True)
-    print(f"building and starting the stack; results in {out}")
+    print(f"building and starting the stack; results in {out}", flush=True)
     compose("build", "api")
-    meta = {
+    meta: dict[str, Any] = {
         "started": datetime.now(UTC).isoformat(),
         "args": vars(args),
+        "ramp_max": {s: RAMP_MAX[s] for s in to_ramp},
         "machine": machine(),
         "limits": "postgres 1.0 CPU / 768 MiB, api 0.75 CPU / 512 MiB, redis 0.25 CPU / 128 MiB",
     }
     (out / "meta.json").write_text(json.dumps(meta, indent=2))
     try:
+        peaks: dict[str, list[float]] = {s: [] for s in to_ramp}
+        for repeat in range(1, args.repeats + 1):
+            for config in CONFIGS:
+                if not to_ramp:
+                    break
+                configure(config)
+                for script in to_ramp:
+                    mode = {"MODE": "capacity", "RAMP_MAX": str(RAMP_MAX[script])}
+                    summary = one_run(script, config, repeat, out, args, mode)
+                    if config == "cache-off":
+                        rows = steps(
+                            summary,
+                            script=script,
+                            ramp_max=RAMP_MAX[script],
+                            step_count=args.steps,
+                            hold=args.hold,
+                        )
+                        peaks[script].append(capacity(rows)["peak_rps"])
+
+        rates = latency_rates(peaks, args.rates)
+        meta["latency_rates"] = rates
+        (out / "meta.json").write_text(json.dumps(meta, indent=2))
+        print(f"latency rates (iterations/s): {rates}", flush=True)
+
         for repeat in range(1, args.repeats + 1):
             for config in CONFIGS:
                 configure(config)
-                for script in scripts:
-                    one_run(script, config, repeat, out, args)
+                for script in timed:
+                    mode = {"MODE": "latency", "RATE": str(rates[script])}
+                    one_run(script, config, repeat, out, args, mode)
+                if "booking_race" in scripts:
+                    one_run("booking_race", config, repeat, out, args, {})
         if not args.skip_hit_rate:
             configure("cache-on", stats=True)
-            for script in (s for s in scripts if s in CACHED_SCRIPTS):
-                hit_rate_run(script, out, args)
+            for script in (s for s in timed if s in CACHED_SCRIPTS):
+                hit_rate_run(script, out, args, {"MODE": "latency", "RATE": str(rates[script])})
     except RunFailed as exc:
         print(f"stopped: {exc}", file=sys.stderr)
         return 1

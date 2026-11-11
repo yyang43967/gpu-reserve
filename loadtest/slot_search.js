@@ -1,9 +1,9 @@
 // Slot search: N GPUs (sometimes of one model) for a few hours, somewhere in a window
 // of three to seven days starting up to three days ahead.
 import { check } from "k6";
-import { API, check401and429, generatedAt, headers, http, random, pick, studentToken, timedOptions, writeSummary } from "./lib/common.js";
+import { API, check401and429, generatedAt, headers, http, random, stepTags, pick, studentToken, loadOptions, writeSummary } from "./lib/common.js";
 
-export const options = timedOptions();
+export const options = loadOptions();
 
 const HOUR = 3600 * 1000;
 const MODELS = ["RTX_4090", "L40S", "A100_80GB", "H100_80GB"];
@@ -26,7 +26,7 @@ export default function () {
   const response = check401and429(
     http.post(`${API}/search/slots`, body(), {
       headers: headers(studentToken()),
-      tags: { name: "POST /search/slots" },
+      tags: stepTags("POST /search/slots"),
     })
   );
   check(response, { "search 200": (r) => r.status === 200 });
