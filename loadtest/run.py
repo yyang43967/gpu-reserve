@@ -6,6 +6,7 @@
         --steps 3 --hold 4 --warmup 5s --measure 10s
     python3 loadtest/run.py --scripts slot_search --skip-hit-rate \
         --capacity-from loadtest/out/<earlier run>    # latency runs only
+    python3 loadtest/run.py --scripts slot_search --capacity-only  # capacity runs only
 
 Two kinds of timed run, both open-model (k6 starts requests at a set rate whatever the
 server does):
@@ -20,7 +21,9 @@ Then the booking race, and the hit-rate runs.
 
 Within each repeat, the cache-off and cache-on configurations alternate, so slow drift
 on the host (thermal, background work) affects both alike. Before every run the API is
-restarted, the database is reset to the same seed, and the cache is emptied. During
+restarted, the database is reset to the same seed, the cache is emptied, and a short
+warm-up from concurrent clients opens the API's database connections (on endpoints that
+don't touch the cache). During
 each run, a sampler records the CPU of the API and Postgres containers, and Postgres's
 connections and commits four times a second.
 
@@ -44,6 +47,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -70,6 +74,13 @@ ALL_SCRIPTS = (*TIMED_SCRIPTS, "booking_race")
 CACHED_SCRIPTS = ("availability", "slot_search")
 K6_ABORTED_BY_THRESHOLD = 99
 API_READY_TIMEOUT = 60
+# Warm-up after each restart and seed: this many concurrent clients, each making
+# WARM_UP_ROUNDS requests, so the pool opens its connections before k6 starts.
+WARM_UP_CLIENTS = 10
+WARM_UP_ROUNDS = 3
+# Endpoints that use the database but not the availability cache, so warming up
+# leaves the cache empty for the run.
+WARM_UP_PATHS = ("/api/v1/me", "/api/v1/servers?page_size=20")
 
 # The API's connections as Postgres sees them, excluding the sampler's own: running a
 # statement, holding a transaction open between statements, and open at all.
@@ -146,6 +157,32 @@ def fresh_api() -> None:
             pass
         time.sleep(0.5)
     raise RunFailed("the API did not become ready after a restart")
+
+
+def warm_up(fixture: dict[str, Any]) -> None:
+    """A few authenticated requests from concurrent clients after a restart. A fresh
+    process opens its pooled connections and loads code paths on first use; without
+    this, that cost lands in the first seconds of the measured run."""
+    tokens = fixture["students"][:WARM_UP_CLIENTS]
+
+    def client(token: str) -> list[int]:
+        codes = []
+        for round_ in range(WARM_UP_ROUNDS):
+            path = WARM_UP_PATHS[round_ % len(WARM_UP_PATHS)]
+            request = urllib.request.Request(  # noqa: S310 - fixed http URL
+                f"{BASE_URL}{path}", headers={"Authorization": f"Bearer {token}"}
+            )
+            try:
+                with urllib.request.urlopen(request, timeout=10) as response:  # noqa: S310 - fixed http URL
+                    codes.append(response.status)
+            except urllib.error.HTTPError as exc:
+                codes.append(exc.code)
+        return codes
+
+    with ThreadPoolExecutor(max_workers=len(tokens)) as pool:
+        codes = [code for result in pool.map(client, tokens) for code in result]
+    if any(code != 200 for code in codes):
+        raise RunFailed(f"warm-up requests failed: {sorted(set(codes))}")
 
 
 def loadtest_command(*args: str) -> dict[str, Any]:
@@ -303,6 +340,7 @@ def one_run(
     fixture = run_dir / "fixture.json"
     data = loadtest_command("seed")
     fixture.write_text(json.dumps(data))
+    warm_up(data)
     sampler = Sampler()
     sampler.start()
     try:
@@ -336,7 +374,9 @@ def hit_rate_run(script: str, out: Path, args: argparse.Namespace, mode: dict[st
     run_dir.mkdir(parents=True)
     fresh_api()
     fixture = run_dir / "fixture.json"
-    fixture.write_text(json.dumps(loadtest_command("seed")))
+    data = loadtest_command("seed")
+    fixture.write_text(json.dumps(data))
+    warm_up(data)
     loadtest_command("cache-stats", "--reset")
     result: dict[str, Any] = {}
 
@@ -461,6 +501,11 @@ def main() -> int:
         "rates; skips the capacity runs",
     )
     parser.add_argument("--skip-hit-rate", action="store_true")
+    parser.add_argument(
+        "--capacity-only",
+        action="store_true",
+        help="stop after the capacity runs: no latency runs, race, or hit-rate runs",
+    )
     args = parser.parse_args()
     for duration in (args.warmup, args.measure):
         seconds(duration)
@@ -468,6 +513,8 @@ def main() -> int:
     unknown = set(scripts) - set(ALL_SCRIPTS)
     if unknown:
         parser.error(f"unknown scripts: {', '.join(sorted(unknown))}")
+    if args.capacity_only and args.capacity_from:
+        parser.error("--capacity-only runs capacity; --capacity-from skips it")
     timed = [s for s in scripts if s in TIMED_SCRIPTS]
     to_ramp = [] if args.capacity_from else [s for s in timed if s not in args.rates]
 
@@ -505,6 +552,9 @@ def main() -> int:
         meta["latency_rates"] = rates
         (out / "meta.json").write_text(json.dumps(meta, indent=2, default=str))
         print(f"latency rates (iterations/s): {rates}", flush=True)
+        if args.capacity_only:
+            print(f"done: python3 loadtest/report.py {out}")
+            return 0
 
         for repeat in range(1, args.repeats + 1):
             for config in CONFIGS:
