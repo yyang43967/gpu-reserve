@@ -139,3 +139,25 @@ Containers restart on their own after a reboot or a crash (`restart: unless-stop
 | **Total** | **1,376 MiB** | **about 360 MiB** |
 
 Measured locally on this Compose file after seeding the demo data and 330 requests (availability, reservations, auth), without an OpenAI key. Postgres grows toward its 128 MB of shared buffers as real data is read. The instance has about 1.85 GiB usable; the OS, Docker, and the SSM agent take roughly 300 MiB. Containers get no swap; the host's 1 GiB swap file covers deploy-time spikes (the migration container and image extraction).
+
+## Frontend on Vercel
+
+The frontend is a static build served by Vercel at `https://gpu.yiyangdev.com`. `frontend/vercel.json` holds the build, the SPA rewrite, caching, and headers. Set up once in the Vercel dashboard:
+
+1. Import the repository; **Root Directory** `frontend`. Framework, install, build, and output come from `vercel.json`; the Node.js version from `engines` in `package.json` (24).
+2. Environment variables (Production):
+   - `VITE_API_BASE_URL` = `https://api.gpu.yiyangdev.com/api/v1` (read at build time).
+   - `ENABLE_EXPERIMENTAL_COREPACK` = `1`, so the build uses the pnpm version in `packageManager` (12.16.1). Without it, Vercel picks pnpm by lockfile format (9.0 means pnpm 9 or 10).
+3. Production branch `main`. `vercel.json` turns off deployments for every other branch: the API's CORS policy allows only the production origin, so a preview could not sign in anyway.
+4. Domains: add `gpu.yiyangdev.com`, then in Cloudflare a `CNAME gpu → cname.vercel-dns.com`, **DNS only**. The API's `CORS_ORIGINS` and `FRONTEND_URL` (set by Terraform) already name this origin.
+
+Vercel builds `main` on every push, independently of the backend deploy, so a frontend change can go live before the API it needs. Keep API changes backward compatible (the same expand-then-contract rule as migrations), and deploy the API first when a frontend change depends on a new endpoint.
+
+**Content Security Policy.** `vercel.json` sends the policy as `Content-Security-Policy-Report-Only` first. It was checked locally by serving the build with the policy enforced (production hosts replaced by the local API and storage): every page loaded with no violation, and a request to another host was blocked. After the first deploy, open each page on the live site, upload an avatar, and check the browser console for reports; then rename the header to `Content-Security-Policy`. Images come from presigned S3 URLs (`s3.us-east-2.amazonaws.com/<bucket>/…`) and uploads go to `<bucket>.s3.us-east-2.amazonaws.com`, which the policy allows.
+
+## CI runners and cost
+
+The arm64 jobs (`image-and-smoke` in CI, and Deploy) run on GitHub's hosted `ubuntu-24.04-arm` runners, which build the Graviton image natively instead of under emulation. All other jobs run on `ubuntu-latest`.
+
+- **Public repository:** standard hosted runners, arm64 included, are free.
+- **Private repository (the case today):** every job's minutes count against the account's included Actions minutes (2,000 a month on GitHub Free), arm64 at the same rate as x64. Past that, minutes are billed per minute (arm64 is listed at about $0.005 a minute for 2 cores; check GitHub's current billing page) if a spending limit allows it; with a $0 limit, jobs stop running until the next month. The arm64 jobs run only on pushes to `main` and by hand, not on pull requests, to keep minutes down.
