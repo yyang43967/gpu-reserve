@@ -1,0 +1,13 @@
+# Copy to terraform.tfvars (not committed).
+region          = "us-east-2"
+api_hostname    = "api.gpu.yiyangdev.com"
+frontend_origin = "https://gpu.yiyangdev.com"
+email_domain    = "gpu.yiyangdev.com"
+
+budget_alert_emails = ["you@example.com"]
+
+# Demo mail only reaches verified addresses while SES is in the sandbox.
+ses_sandbox_recipients = []
+
+# Stays false while the account refuses IAM OIDC providers (Free plan).
+github_deploy_role_enabled = false

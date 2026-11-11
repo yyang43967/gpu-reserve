@@ -5,25 +5,27 @@ Two configurations:
 | Directory | What it manages | State |
 |---|---|---|
 | `bootstrap/` | The S3 bucket that holds Terraform state | In that bucket, key `bootstrap/terraform.tfstate` |
-| `.` (added next) | Everything the application runs on | In that bucket, its own key |
+| `.` | Everything the application runs on | In that bucket, key `main/terraform.tfstate` |
 
 Region: `us-east-2`. Every command below runs against one AWS account.
 
 ## Prerequisites
 
 - Terraform 1.10 or later (native S3 state locking) and AWS CLI v2.
-- Credentials from IAM Identity Center. No IAM users or access keys.
+- Credentials from the account's IAM Identity Center sign-in, short-lived. No IAM users or access keys.
 
 ```bash
-aws configure sso --profile gpu-reserve   # once: start URL, region, account, role
-aws sso login --profile gpu-reserve       # when the session expires
-export AWS_PROFILE=gpu-reserve
+aws login --profile gpu-reserve           # opens the browser; repeat when the session expires
+export AWS_PROFILE=gpu-reserve AWS_REGION=us-east-2
 aws sts get-caller-identity               # check before any plan or apply
 ```
+
+Terraform's AWS provider reads the same profile. If a plan fails with an expired-token error, log in again.
 
 ## Account notes
 
 - **Region.** The account was created with AWS's newer sign-up flow, which starts it in a single region (`us-east-2`). Everything is deployed there.
+- **Plan.** The account is on AWS's Free plan and is applied as such. Upgrade to the Paid plan (console, "Upgrade plan") only if an apply fails on an operation the plan blocks, spend approaches the spend limit, or before the free period ends on 2027-05-11; a Free-plan account is closed when it ends. Known block: IAM OpenID Connect providers are denied, so `github_deploy_role_enabled` stays `false` and deploys run from a laptop until the account is upgraded.
 - **Spend limit.** If the account's project has a monthly spend limit, reaching it pauses the project: new resources are blocked first, then idle resources are paused, and at the limit the whole project stops. Data is kept, but nothing restarts on its own. After raising the limit or reactivating the project:
   1. Start the EC2 instance (console or `aws ec2 start-instances --instance-ids <id>`).
   2. Docker starts the containers (`restart: unless-stopped`). Check `https://api.gpu.yiyangdev.com/api/v1/ready`.
@@ -67,3 +69,52 @@ terraform plan   # re-adopts the bucket's settings; review before applying
 ```
 
 **Removing it.** The bucket has `prevent_destroy`, and destroying the main configuration leaves it alone. To close the project completely, destroy the main configuration first, then remove `prevent_destroy`, empty every object version from the bucket, and run `terraform destroy` here with a local backend.
+
+## Main configuration
+
+What it creates (`terraform plan` lists 29 resources with the CI deploy role off):
+
+- The instance: `t4g.small`, Amazon Linux 2023 arm64, 30 GB encrypted gp3, IMDSv2 only, standard CPU credits, an Elastic IP, and a first-boot script that adds a 1 GiB swap file, Docker with log rotation, and the Compose plugin.
+- A security group open on 80/tcp and 443/tcp+udp only. There is no SSH port: shell access is `aws ssm start-session --target <instance-id>`.
+- The instance role: pull from ECR, read `/gpu-reserve/prod/*` parameters, use the uploads and backups buckets, send mail from the SES domain, and SSM management.
+- ECR repository `gpu-reserve/api` (immutable tags, last 10 images kept).
+- S3 buckets for uploads (CORS for the frontend origin) and backups (14-day expiry).
+- The SES domain identity for `gpu.yiyangdev.com`, with DKIM.
+- A $20 monthly cost budget, alerting at $10, at $20, and when the forecast passes $20.
+- With `github_deploy_role_enabled = true`: GitHub's OIDC provider and the deploy role.
+
+### Apply
+
+```bash
+cd infra/terraform
+cp terraform.tfvars.example terraform.tfvars   # fill in budget_alert_emails
+cp bootstrap/backend.hcl backend.hcl           # same bucket and region as the bootstrap
+terraform init -backend-config=backend.hcl
+terraform plan -out=main.tfplan
+terraform apply main.tfplan
+terraform output dns_records
+```
+
+Then, by hand:
+
+1. In Cloudflare, add the records from `dns_records`, **DNS only** (grey cloud): the `A` record for the API, the three DKIM `CNAME`s, and the `_dmarc` `TXT`. Caddy needs the `A` record to reach the instance directly for its certificate.
+2. Enter the application's secrets as SecureString parameters under `ssm_parameter_prefix` (the list is in `infra/deploy/README.md`).
+3. Deploy (see `infra/deploy/README.md`).
+
+SES verifies the domain on its own once the DKIM records resolve (minutes to an hour). Addresses in `ses_sandbox_recipients` get a verification email from AWS; mail reaches them only after the link is clicked.
+
+### Changing the instance
+
+The AMI and the first-boot script are ignored after creation, so a newer Amazon Linux image never replaces the instance and its database. To rebuild deliberately: take a backup, `terraform apply -replace=aws_instance.api`, deploy, and restore the backup. The Elastic IP moves to the new instance, so DNS does not change.
+
+### Destroy
+
+Everything except the state bucket:
+
+```bash
+# Buckets that still hold uploads or backups are refused unless this is set first.
+terraform apply -var allow_data_destroy=true
+terraform destroy
+```
+
+The instance's root volume, with the database, is deleted with it. Download the latest backup first if the data matters. Remove the Cloudflare records afterwards. Rebuilding from scratch is the Apply section again; the database comes back from a backup.
