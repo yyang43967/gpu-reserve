@@ -70,6 +70,10 @@ REDIS_TIMEOUT_SECONDS: Final = 0.5
 INVALIDATION_TIMEOUT_SECONDS: Final = 0.15
 _REDIS_ERRORS: Final = (RedisError, OSError, TimeoutError)
 
+# Hit and miss counts per day entry, kept only when stats are on (load tests). One
+# hash, no TTL; `python -m app.loadtest` reads and clears it.
+STATS_KEY: Final = f"{KEY_PREFIX}:stats"
+
 # Keys in Session.info. The cache is placed there by the session factory
 # (app.db.session.create_session_factory); the changed servers by mark_changed.
 CACHE_INFO_KEY: Final = "availability_cache"
@@ -180,9 +184,12 @@ async def load_holds(
 
 
 class AvailabilityCache:
-    def __init__(self, redis: Redis, *, ttl_seconds: int) -> None:
+    def __init__(self, redis: Redis, *, ttl_seconds: int, stats: bool = False) -> None:
         self._redis = redis
         self._ttl_seconds = ttl_seconds
+        # Counting costs a Redis round trip per read, so it is off except in the
+        # separate, untimed load-test run that measures the hit rate.
+        self._stats = stats
 
     async def holds(
         self,
@@ -207,6 +214,8 @@ class AvailabilityCache:
             return await load(session, server_ids, window)
 
         missing = [key for key, holds in cached.items() if holds is None]
+        if self._stats:
+            await self._count(hits=len(cached) - len(missing), misses=len(missing))
         if missing:
             servers = sorted({server_id for server_id, _ in missing})
             missing_days = sorted({day for _, day in missing})
@@ -272,6 +281,16 @@ class AvailabilityCache:
                 result[key] = None
         return result
 
+    async def _count(self, *, hits: int, misses: int) -> None:
+        try:
+            async with asyncio.timeout(REDIS_TIMEOUT_SECONDS):
+                async with self._redis.pipeline(transaction=False) as pipe:
+                    pipe.hincrby(STATS_KEY, "hits", hits)
+                    pipe.hincrby(STATS_KEY, "misses", misses)
+                    await pipe.execute()
+        except _REDIS_ERRORS:
+            logger.warning("Could not count cache hits", exc_info=True)
+
     async def _store(self, fills: dict[str, str]) -> None:
         try:
             async with asyncio.timeout(REDIS_TIMEOUT_SECONDS):
@@ -286,7 +305,11 @@ class AvailabilityCache:
 def build_availability_cache(settings: Settings, redis: Redis) -> AvailabilityCache | None:
     if not settings.availability_cache_enabled:
         return None
-    return AvailabilityCache(redis, ttl_seconds=settings.availability_cache_ttl_seconds)
+    return AvailabilityCache(
+        redis,
+        ttl_seconds=settings.availability_cache_ttl_seconds,
+        stats=settings.availability_cache_stats,
+    )
 
 
 # --- what callers use ---

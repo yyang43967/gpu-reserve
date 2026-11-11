@@ -1,0 +1,85 @@
+# Load-test stack, separate from the development stack.
+#
+#   python3 loadtest/run.py          # starts, seeds, and drives this stack
+#   docker compose -f docker-compose.loadtest.yml down -v
+#
+# Its own project, port, and volume: every run resets the database, so it must never
+# point at development data. No override file and no --reload: the API runs as in
+# production, one uvicorn process. No worker: the expiry and completion jobs would
+# change the data in the middle of a run.
+#
+# CPU and memory limits add up to about a t4g.small (2 vCPUs, 2 GiB), the production
+# instance size, split the way the services would compete for it there.
+
+name: gpu-reserve-loadtest
+
+x-backend-env: &backend-env
+  # "test" allows `python -m app.loadtest seed`, which resets the database.
+  ENVIRONMENT: test
+  DATABASE_URL: postgresql+asyncpg://gpureserve:gpureserve@postgres:5432/gpureserve
+  REDIS_URL: redis://redis:6379/0
+  JWT_SECRET: loadtest-only-jwt-secret-never-used-anywhere-else
+  # The runner sets these per configuration.
+  AVAILABILITY_CACHE_ENABLED: ${AVAILABILITY_CACHE_ENABLED:-true}
+  AVAILABILITY_CACHE_STATS: ${AVAILABILITY_CACHE_STATS:-false}
+  # Tokens minted by the seed; long enough that none expires during a run.
+  LOADTEST_TOKEN_TTL_MINUTES: "120"
+  ASSISTANT_MODEL: scripted:e2e
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: gpureserve
+      POSTGRES_PASSWORD: gpureserve
+      POSTGRES_DB: gpureserve
+    command: postgres -c shared_buffers=192MB -c max_connections=40
+    volumes:
+      - loadtest-postgres:/var/lib/postgresql/data
+    cpus: 1.0
+    mem_limit: 768m
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gpureserve -d gpureserve"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --maxmemory 64mb --maxmemory-policy noeviction --save "" --appendonly no
+    cpus: 0.25
+    mem_limit: 128m
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  api:
+    build:
+      context: ./backend
+      additional_contexts:
+        kb: ./kb
+    image: gpu-reserve-api:local
+    environment: *backend-env
+    ports:
+      - "127.0.0.1:18100:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    cpus: 0.75
+    mem_limit: 512m
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/ready', timeout=3)"
+      interval: 3s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  loadtest-postgres:

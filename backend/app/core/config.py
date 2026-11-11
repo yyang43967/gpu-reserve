@@ -43,6 +43,9 @@ class Settings(BaseSettings):
     # A backstop only: commits invalidate entries. It bounds how long an entry can be
     # stale if an invalidation is lost.
     availability_cache_ttl_seconds: int = Field(default=300, gt=0)
+    # Count cache hits and misses in Redis. For the load test's hit-rate run only: it
+    # adds a Redis round trip to every read.
+    availability_cache_stats: bool = False
 
     # Comma-separated in the environment, e.g. "http://localhost:5173,https://app.example.com".
     cors_origins: Annotated[list[str], NoDecode] = Field(
