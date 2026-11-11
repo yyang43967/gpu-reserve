@@ -16,12 +16,21 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 
 setup() {
   WORK="$(mktemp -d)"
-  mkdir -p "$WORK/app/releases/$TAG" "$WORK/bin"
-  cp "$HERE/../deploy.sh" "$HERE/../compose.yml" "$WORK/app/releases/$TAG/"
-  # aws: the parameters under the prefix, as get-parameters-by-path returns them.
+  mkdir -p "$WORK/app/releases/$TAG" "$WORK/bin" "$WORK/units"
+  cp -R "$HERE/../deploy.sh" "$HERE/../backup.sh" "$HERE/../lib.sh" "$HERE/../compose.yml" \
+    "$HERE/../systemd" "$WORK/app/releases/$TAG/"
+  # aws: the parameters under the prefix, as get-parameters-by-path returns them;
+  # other calls (the backup upload) are recorded.
   cat >"$WORK/bin/aws" <<STUB
 #!/usr/bin/env bash
-cat "$WORK/parameters.json"
+case "\$1" in
+  ssm) cat "$WORK/parameters.json" ;;
+  *) echo "aws \$*" >>"$WORK/calls.log" ;;
+esac
+STUB
+  cat >"$WORK/bin/systemctl" <<STUB
+#!/usr/bin/env bash
+echo "systemctl \$*" >>"$WORK/calls.log"
 STUB
   # docker: records each call; answers the two queries deploy.sh makes.
   cat >"$WORK/bin/docker" <<STUB
@@ -29,10 +38,11 @@ STUB
 echo "\$*" >>"$WORK/calls.log"
 case "\$*" in
   *"ps --quiet api"*) echo api-container ;;
+  *pg_dump*) printf 'PGDMP-test-dump' ;;
   inspect*) echo "$REPO:$TAG" ;;
 esac
 STUB
-  chmod +x "$WORK/bin/aws" "$WORK/bin/docker"
+  chmod +x "$WORK/bin/aws" "$WORK/bin/docker" "$WORK/bin/systemctl"
   python3 - "$WORK/parameters.json" "$SECRET" <<'PY'
 import json, sys
 path, secret = sys.argv[1:]
@@ -40,13 +50,14 @@ params = {
     "/gpu-reserve/prod/JWT_SECRET": secret,
     "/gpu-reserve/prod/POSTGRES_PASSWORD": "pg-password",
     "/gpu-reserve/prod/EMAIL_FROM": "GPU Reserve <no-reply@gpu.example.test>",
+    "/gpu-reserve/prod/BACKUPS_BUCKET": "backups-bucket",
 }
 json.dump({"Parameters": [{"Name": k, "Value": v} for k, v in params.items()]}, open(path, "w"))
 PY
 }
 
 run_deploy() {
-  PATH="$WORK/bin:$PATH" DEPLOY_APP_DIR="$WORK/app" \
+  PATH="$WORK/bin:$PATH" DEPLOY_APP_DIR="$WORK/app" SYSTEMD_UNIT_DIR="$WORK/units" \
     bash "$WORK/app/releases/$TAG/deploy.sh" "$@" >"$WORK/out.log" 2>&1
 }
 
@@ -60,9 +71,13 @@ grep -qxF "EMAIL_FROM='GPU Reserve <no-reply@gpu.example.test>'" "$env_file" || 
 grep -qxF "API_IMAGE='$REPO:$TAG'" "$env_file" || fail "API_IMAGE"
 ! grep -qF "$SECRET" "$WORK/out.log" || fail "a secret reached the output"
 ! grep -qF "pg-password" "$WORK/out.log" || fail "a secret reached the output"
-order="$(grep -oE 'pull|up --detach --wait --wait-timeout 120 postgres redis|run --rm migrate|up --detach --wait --wait-timeout 240 --remove-orphans' "$WORK/calls.log" | tr '\n' ',')"
-expected='pull,up --detach --wait --wait-timeout 120 postgres redis,run --rm migrate,up --detach --wait --wait-timeout 240 --remove-orphans,'
+order="$(grep -oE 'pull|up --detach --wait --wait-timeout 120 postgres redis|pg_dump|s3 cp|run --rm migrate|up --detach --wait --wait-timeout 240 --remove-orphans|systemctl enable' "$WORK/calls.log" | tr '\n' ',')"
+expected='pull,up --detach --wait --wait-timeout 120 postgres redis,pg_dump,s3 cp,run --rm migrate,up --detach --wait --wait-timeout 240 --remove-orphans,systemctl enable,'
 [ "$order" = "$expected" ] || fail "steps ran as: $order"
+grep -qE "s3 cp .* s3://backups-bucket/postgres/[0-9TZ:-]+-pre-deploy-${TAG:0:12}\.dump" "$WORK/calls.log" \
+  || fail "the pre-deploy backup was not uploaded under the expected key"
+cmp -s "$HERE/../systemd/gpu-reserve-backup.timer" "$WORK/units/gpu-reserve-backup.timer" \
+  || fail "the backup timer was not installed"
 [ "$(readlink "$WORK/app/current")" = "$WORK/app/releases/$TAG" ] || fail "current link"
 grep -q " $TAG$" "$WORK/app/deploy-history" || fail "history"
 rm -rf "$WORK"

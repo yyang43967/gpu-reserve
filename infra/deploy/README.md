@@ -6,7 +6,9 @@ The backend runs on one EC2 instance as a Docker Compose project: Caddy (TLS for
 |---|---|
 | `release.sh` | A developer machine (for now) or CI: builds and pushes the image, starts a deploy, checks the result |
 | `deploy.sh` | The instance, as root, through SSM Run Command |
-| `compose.yml`, `Caddyfile` | The instance, from the release being deployed |
+| `backup.sh`, `restore.sh` | The instance: daily from a systemd timer, before each migration, and by hand |
+| `lib.sh` | Shared by the three scripts above |
+| `compose.yml`, `Caddyfile`, `systemd/` | The instance, from the release being deployed |
 
 These files are copied into the backend image at `/app/deploy`. A deploy extracts them from the image it is deploying, so the configuration always matches the code, and a rollback brings back the configuration of that release too.
 
@@ -50,9 +52,12 @@ infra/deploy/release.sh deploy <sha>
 1. Log in to ECR, pull the image, and extract its `/app/deploy` into `/opt/gpu-reserve/releases/<sha>`.
 2. Write the env file from Parameter Store.
 3. Pull every image; start Postgres and Redis and wait until they are healthy.
-4. Run `alembic upgrade head` in a one-off container. If it fails, the running API and worker are untouched.
-5. Start the whole stack and wait until every health check passes; check that the API runs the new image.
-6. Point `/opt/gpu-reserve/current` at the release and append to `/opt/gpu-reserve/deploy-history`.
+4. Back up the database to S3 (`pre-deploy-<sha>`).
+5. Run `alembic upgrade head` in a one-off container. If it fails, the running API and worker are untouched.
+6. Start the whole stack and wait until every health check passes; check that the API runs the new image.
+7. Point `/opt/gpu-reserve/current` at the release, install the backup timer from it, and append to `/opt/gpu-reserve/deploy-history`.
+
+Deploys, backups, and restores share one lock, so they never overlap; a daily backup waits for a deploy in progress.
 
 Then `release.sh` checks `https://api.gpu.yiyangdev.com/api/v1/ready` from outside.
 
@@ -65,7 +70,34 @@ infra/deploy/release.sh tags                  # pushed tags, newest first
 infra/deploy/release.sh deploy <earlier-sha>
 ```
 
-ECR keeps the last 10 images. Migrations are not reversed: rolling back across a migration works only when the older code runs against the newer schema, which is why schema changes are additive first (add, deploy, then remove in a later release).
+ECR keeps the last 10 images. Migrations are not reversed, so rollback relies on one rule for every schema change: **expand, then contract.** Never drop or rename a column or table in the same release that stops using it. Add first; stop using it in a release; drop it in a later one. A rename is add, backfill, switch, then drop, across releases. New columns are nullable or have a server default. Then the previous release always runs against the newer schema.
+
+If a migration itself damaged data, restore the `pre-deploy-<sha>` backup taken just before it (below), then deploy the earlier SHA.
+
+## Backups and restore
+
+`backup.sh` runs `pg_dump` (custom format, compressed) inside the Postgres container, checks that `pg_restore` can read the dump back, and uploads it to `s3://<backups bucket>/postgres/<UTC time>-<reason>.dump`. The bucket expires backups after 14 days. It runs:
+
+- daily at 09:30 UTC (up to 15 minutes later), from `gpu-reserve-backup.timer`, which each deploy installs; after downtime it runs at the next boot;
+- before every deploy's migrations;
+- before every restore.
+
+Restore, on the instance:
+
+```bash
+sudo /opt/gpu-reserve/current/restore.sh latest --confirm
+sudo /opt/gpu-reserve/current/restore.sh postgres/2026-11-12T093012Z-daily.dump --confirm
+```
+
+It downloads and checks the dump, backs up the current database first (`pre-restore`; add `--no-safety-backup` only if the current database cannot be dumped), stops the API and worker, recreates the database, restores it, empties Redis (its availability cache, job queue, and rate-limit counters describe the old data), and starts the API and worker again. The site answers 502 for the minute this takes.
+
+Check the schedule and the last runs:
+
+```bash
+systemctl list-timers gpu-reserve-backup.timer
+journalctl -u gpu-reserve-backup.service --since -3d
+aws s3 ls "s3://$(cd infra/terraform && terraform output -raw backups_bucket)/postgres/"   # from a laptop
+```
 
 ## Operating the instance
 

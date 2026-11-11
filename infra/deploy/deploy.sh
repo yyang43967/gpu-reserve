@@ -14,28 +14,19 @@
 set -euo pipefail
 umask 077
 
-# Overridable only so tests can run the script against a scratch directory.
-readonly APP_DIR="${DEPLOY_APP_DIR:-/opt/gpu-reserve}"
-readonly ENV_FILE="$APP_DIR/.env"
-readonly PROJECT=gpu-reserve
 readonly SSM_PREFIX="${SSM_PREFIX:-/gpu-reserve/prod}"
 readonly RELEASES_KEPT=5
-
-log() { printf '%s deploy: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
-die() { log "error: $*"; exit 1; }
+readonly SYSTEMD_UNIT_DIR="${SYSTEMD_UNIT_DIR:-/etc/systemd/system}"
+RELEASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly RELEASE_DIR
+# shellcheck source=lib.sh
+source "$RELEASE_DIR/lib.sh"
 
 [ "$#" -eq 2 ] || die "usage: deploy.sh <git-sha> <ecr-repository-uri>"
 readonly TAG="$1" REPOSITORY="$2"
 [[ "$TAG" =~ ^[0-9a-f]{40}$ ]] || die "the tag must be a full git commit SHA"
 [[ "$REPOSITORY" =~ ^[0-9]{12}\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com/[a-z0-9/_-]+$ ]] \
   || die "unexpected repository URI"
-RELEASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-readonly RELEASE_DIR
-
-compose() {
-  docker compose --project-name "$PROJECT" --project-directory "$RELEASE_DIR" \
-    --file "$RELEASE_DIR/compose.yml" --env-file "$ENV_FILE" "$@"
-}
 
 on_error() {
   log "failed; containers now:"
@@ -44,9 +35,7 @@ on_error() {
   compose logs --no-color --tail 40 api worker migrate 2>/dev/null || true
 }
 
-# One deploy at a time.
-exec 9>"$APP_DIR/deploy.lock"
-flock --nonblock 9 || die "another deploy is running"
+take_lock 0
 trap on_error ERR
 
 write_env_file() {
@@ -74,6 +63,20 @@ print("\n".join(out))
   log "env file written ($(wc -l <"$ENV_FILE") entries)"
 }
 
+# The backup timer and service come from the release, like everything else.
+install_units() {
+  local unit dest changed=0
+  for unit in "$RELEASE_DIR"/systemd/*; do
+    dest="$SYSTEMD_UNIT_DIR/$(basename "$unit")"
+    if ! cmp -s "$unit" "$dest"; then
+      install -m 0644 "$unit" "$dest"
+      changed=1
+    fi
+  done
+  [ "$changed" = 0 ] || systemctl daemon-reload
+  systemctl enable --now gpu-reserve-backup.timer >/dev/null 2>&1
+}
+
 log "deploying $TAG"
 write_env_file
 
@@ -82,6 +85,9 @@ compose --profile migrate pull --quiet
 
 log "starting postgres and redis"
 compose up --detach --wait --wait-timeout 120 postgres redis
+
+# A backup right before the schema changes: the way back if a migration goes wrong.
+"$RELEASE_DIR/backup.sh" "pre-deploy-${TAG:0:12}"
 
 # Before the new api and worker start: a failed migration leaves the old ones running.
 log "running migrations"
@@ -94,6 +100,7 @@ running="$(docker inspect --format '{{.Config.Image}}' "$(compose ps --quiet api
 [ "$running" = "$REPOSITORY:$TAG" ] || die "api runs $running, expected $REPOSITORY:$TAG"
 
 ln -sfn "$RELEASE_DIR" "$APP_DIR/current"
+install_units
 printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$TAG" >>"$APP_DIR/deploy-history"
 log "deployed $TAG"
 

@@ -51,6 +51,9 @@ services:
       # limits how often that can happen for one name.
       - caddy-data:/data
       - caddy-config:/config
+    networks:
+      default:
+        ipv4_address: 172.30.0.10
     depends_on:
       api:
         condition: service_healthy
@@ -66,9 +69,10 @@ services:
       - --host=0.0.0.0
       - --port=8000
       - --proxy-headers
-      # Only Caddy can reach this port (it is not published), so the client address
-      # it forwards is trusted. Rate limits key on that address.
-      - --forwarded-allow-ips=*
+      # Trust X-Forwarded-For only from Caddy's fixed address (see networks below).
+      # Rate limits key on the client address it forwards; a header sent by any other
+      # container, or added by a client in front of Caddy, is ignored.
+      - --forwarded-allow-ips=172.30.0.10
     environment: *backend-env
     depends_on:
       postgres:
@@ -164,3 +168,13 @@ volumes:
   postgres-data:
   caddy-data:
   caddy-config:
+
+networks:
+  default:
+    ipam:
+      config:
+        # A fixed subnet so Caddy can have a fixed address. Other containers get
+        # addresses from the upper half only, so none can take Caddy's. Clear of the
+        # VPC (172.31.0.0/16) and Docker's default bridge (172.17.0.0/16).
+        - subnet: 172.30.0.0/24
+          ip_range: 172.30.0.128/25

@@ -142,7 +142,7 @@ jobs:
 
       # shellcheck and python3 are on the runner image.
       - name: Shellcheck
-        run: shellcheck infra/deploy/*.sh infra/deploy/tests/*.sh
+        run: shellcheck --external-sources --source-path=SCRIPTDIR infra/deploy/*.sh infra/deploy/tests/*.sh
 
       - name: Test deploy.sh
         run: bash infra/deploy/tests/deploy-test.sh
