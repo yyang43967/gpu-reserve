@@ -6,6 +6,7 @@ model asks for: which tools run, as whom, what is written, and when.
 
 import asyncio
 import json
+import logging
 import threading
 from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime, timedelta
@@ -21,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.agent import tools
 from app.agent.graph import RECURSION_LIMIT
 from app.core.config import Settings
+from app.core.logging import JsonFormatter
 from app.llm.scripted import ScriptedChatModel
 from app.main import create_app
 from app.models import (
@@ -50,6 +52,7 @@ from tests.integration.reservation_helpers import (
     add_server,
     add_user,
     book,
+    booking_body,
     next_saturday,
 )
 
@@ -162,6 +165,40 @@ async def test_nothing_is_written_before_confirmation(
     )
     assert page.status_code == 200
     assert page.json()["pending_action"] == payload
+
+
+async def test_messages_and_purposes_are_not_logged_at_info(
+    harness: Harness,
+    student: User,
+    server: Server,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO)
+    message = "Book one A100, message-marker-7f3a"
+    purpose = "purpose-marker-91c2 thesis experiments"
+    reply = "Booked it, reply-marker-5d0e"
+
+    thread_id = await harness.new_thread(student)
+    harness.script.add(call("propose_reservation", proposal(server, purpose=purpose)))
+    assert types(events(await harness.send(student, thread_id, message)))[-1] == (
+        "confirmation_required"
+    )
+    harness.script.add(say(reply))
+    assert types(events(await harness.resume(student, thread_id, "confirm")))[-1] == "done"
+    rest = await harness.client.post(
+        "/api/v1/reservations",
+        json=booking_body(
+            server.id, start() + timedelta(hours=2), hours=1, purpose=f"rest {purpose}"
+        ),
+        headers=harness.headers(student),
+    )
+    assert rest.status_code == 201, rest.text
+
+    assert any(r.name == "app.access" for r in caplog.records)
+    # Formatted as production writes them, so `extra` fields are checked too.
+    output = "\n".join(JsonFormatter().format(record) for record in caplog.records)
+    for marker in ("message-marker-7f3a", "purpose-marker-91c2", "reply-marker-5d0e"):
+        assert marker not in output
 
 
 def server_zone() -> Any:

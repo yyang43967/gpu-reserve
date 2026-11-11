@@ -20,6 +20,13 @@ class Environment(StrEnum):
     PRODUCTION = "production"
 
 
+class LogLevel(StrEnum):
+    DEBUG = "DEBUG"
+    INFO = "INFO"
+    WARNING = "WARNING"
+    ERROR = "ERROR"
+
+
 class EmailBackend(StrEnum):
     # Plain SMTP, for Mailpit locally.
     SMTP = "smtp"
@@ -31,7 +38,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     environment: Environment = Environment.LOCAL
-    log_level: str = "INFO"
+    log_level: LogLevel = LogLevel.INFO
 
     database_url: PostgresDsn = PostgresDsn(
         "postgresql+asyncpg://gpureserve:gpureserve@localhost:5432/gpureserve"
@@ -186,6 +193,11 @@ class Settings(BaseSettings):
         if isinstance(value, str) and not value.strip():
             return None
         return value
+
+    @field_validator("log_level", mode="before")
+    @classmethod
+    def log_level_upper(cls, value: object) -> object:
+        return value.strip().upper() if isinstance(value, str) else value
 
     @field_validator("cors_origins", mode="before")
     @classmethod
