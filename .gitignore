@@ -40,6 +40,7 @@ crash.log
 override.tf
 *_override.tf
 backend.hcl
+*.tfplan
 
 # Load test / eval scratch output
 loadtest/out/
