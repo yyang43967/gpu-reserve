@@ -37,11 +37,25 @@ class Settings(BaseSettings):
         "postgresql+asyncpg://gpureserve:gpureserve@localhost:5432/gpureserve"
     )
     redis_url: RedisDsn = RedisDsn("redis://localhost:6379/0")
+    # Availability and slot search read GPU allocations through Redis. Off sends every
+    # read to Postgres (used to measure the difference).
+    availability_cache_enabled: bool = True
+    # A backstop only: commits invalidate entries. It bounds how long an entry can be
+    # stale if an invalidation is lost.
+    availability_cache_ttl_seconds: int = Field(default=300, gt=0)
+    # Count cache hits and misses in Redis. For the load test's hit-rate run only: it
+    # adds a Redis round trip to every read.
+    availability_cache_stats: bool = False
 
     # Comma-separated in the environment, e.g. "http://localhost:5173,https://app.example.com".
     cors_origins: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["http://localhost:5173"]
     )
+
+    # How long a request waits for a database connection when all are in use. Past it,
+    # the request gets 503 with Retry-After instead of waiting on.
+    database_pool_timeout_seconds: float = Field(default=3.0, gt=0)
+    database_busy_retry_after_seconds: int = Field(default=2, gt=0)
 
     # Seconds to wait on each dependency in the readiness probe.
     ready_check_timeout_seconds: float = 2.0

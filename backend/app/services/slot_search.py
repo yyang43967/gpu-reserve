@@ -10,7 +10,6 @@ Window semantics: every result starts at or after `earliest` and ends at or befo
 ahead, like any booking.
 """
 
-import uuid
 from collections import deque
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -28,8 +27,8 @@ from app.core.exceptions import (
     QuotaExceeded,
     TooManyReservations,
 )
-from app.models import Gpu, GpuAllocation, GpuModel, Lab, Server, ServerStatus, User
-from app.services import booking_rules, reservations
+from app.models import GpuModel, Lab, Server, ServerStatus, User
+from app.services import availability_cache, booking_rules, reservations
 from app.services.booking_rules import BOOKING_HORIZON, SLOT, Booking, Interval
 
 MAX_PER_SERVER: Final = 3
@@ -152,27 +151,6 @@ async def _candidate_servers(session: AsyncSession, query: SlotQuery) -> list[Se
     return list(rows)
 
 
-async def _busy_by_server(
-    session: AsyncSession, server_ids: list[uuid.UUID], window: Interval
-) -> dict[uuid.UUID, list[Interval]]:
-    """Active allocations on active GPUs of the servers, overlapping the window."""
-    rows = await session.execute(
-        select(Gpu.server_id, GpuAllocation.starts_at, GpuAllocation.ends_at)
-        .join(Gpu, Gpu.id == GpuAllocation.gpu_id)
-        .where(
-            Gpu.server_id.in_(server_ids),
-            Gpu.removed_at.is_(None),
-            GpuAllocation.active.is_(True),
-            GpuAllocation.starts_at < window.end,
-            GpuAllocation.ends_at > window.start,
-        )
-    )
-    busy: dict[uuid.UUID, list[Interval]] = {server_id: [] for server_id in server_ids}
-    for row in rows:
-        busy[row.server_id].append(Interval(row.starts_at, row.ends_at))
-    return busy
-
-
 def _allowed(
     booking: Booking,
     server: Server,
@@ -221,7 +199,7 @@ async def search_slots(
     servers = await _candidate_servers(session, query)
     if not servers:
         return []
-    busy = await _busy_by_server(session, [s.id for s in servers], window)
+    busy = await availability_cache.busy_intervals(session, [s.id for s in servers], window)
     weeks = booking_rules.weeks_overlapping(window, quota_zone)
     existing = await reservations.load_quota_bookings(
         session, viewer.id, Interval(weeks[0].start, weeks[-1].end)

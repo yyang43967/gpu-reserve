@@ -31,7 +31,7 @@ from app.models import (
     Reservation,
     ReservationStatus,
 )
-from app.services import audit, notifications
+from app.services import audit, availability_cache, notifications
 from app.services.email import EmailSender
 
 logger = logging.getLogger(__name__)
@@ -98,13 +98,15 @@ async def expire_pending(session: AsyncSession, *, now: datetime) -> int | None:
                 Reservation.starts_at <= now,
             )
             .values(status=ReservationStatus.EXPIRED)
-            .returning(Reservation.id, Reservation.user_id)
+            .returning(Reservation.id, Reservation.user_id, Reservation.server_id)
             .execution_options(synchronize_session=False)
         )
     ).all()
     if not expired:
         return 0
     ids = [row.id for row in expired]
+    for server_id in {row.server_id for row in expired}:
+        availability_cache.mark_changed(session, server_id)
 
     await session.execute(
         update(GpuAllocation)
@@ -152,7 +154,7 @@ WITH finished AS (
     UPDATE reservations
     SET status = 'completed', updated_at = now()
     WHERE status = 'approved' AND ends_at <= :now
-    RETURNING id
+    RETURNING id, server_id
 ), released AS (
     UPDATE gpu_allocations
     SET active = false
@@ -165,7 +167,7 @@ WITH finished AS (
     FROM finished
     RETURNING 1
 )
-SELECT count(*) FROM finished
+SELECT server_id FROM finished
 """).bindparams(_at("now"))
 
 
@@ -183,8 +185,11 @@ async def complete_finished(session: AsyncSession, *, now: datetime) -> int | No
     """
     if not await try_job_lock(session, Job.COMPLETE_FINISHED):
         return None
-    count = await session.scalar(_COMPLETE_FINISHED, {"now": now})
-    return count or 0
+    # One row per completed reservation, naming its server.
+    server_ids = list(await session.scalars(_COMPLETE_FINISHED, {"now": now}))
+    for server_id in set(server_ids):
+        availability_cache.mark_changed(session, server_id)
+    return len(server_ids)
 
 
 # --- reminders ---

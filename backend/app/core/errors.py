@@ -8,6 +8,7 @@ from typing import Any, Final
 from fastapi import FastAPI, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from sqlalchemy.exc import TimeoutError as PoolTimeout
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
@@ -29,6 +30,7 @@ STATUS_BY_KIND: Final[Mapping[ErrorKind, int]] = {
 }
 
 VALIDATION_SLUG: Final = "validation-failed"
+DATABASE_BUSY_SLUG: Final = "database-busy"
 INTERNAL_ERROR_SLUG: Final = "internal-error"
 
 # Request parts FastAPI puts first in a validation error location.
@@ -141,8 +143,12 @@ class UnhandledErrorMiddleware:
             await response(scope, receive, send)
 
 
-def register_error_handlers(app: FastAPI, base_url: str) -> None:
-    """Install the problem-details handlers. Call before adding the CORS middleware."""
+def register_error_handlers(app: FastAPI, base_url: str, *, busy_retry_after: int) -> None:
+    """Install the problem-details handlers. Call before adding the CORS middleware.
+
+    `busy_retry_after` is the Retry-After, in seconds, sent when no database connection
+    was free in time.
+    """
 
     async def handle_domain_error(request: Request, exc: Exception) -> ProblemResponse:
         assert isinstance(exc, DomainError)  # noqa: S101 - narrowed by registration
@@ -182,7 +188,24 @@ def register_error_handlers(app: FastAPI, base_url: str) -> None:
             headers=exc.headers,
         )
 
+    async def handle_pool_timeout(request: Request, exc: Exception) -> ProblemResponse:
+        # Every connection stayed in use for the whole pool timeout: the server is
+        # overloaded, not broken. A short 503 the client can retry beats holding the
+        # request until it times out as a 500.
+        logger.warning("No database connection free; answering 503 for %s", request.url.path)
+        return build_problem(
+            base_url=base_url,
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            slug=DATABASE_BUSY_SLUG,
+            title="Service busy",
+            detail="The server is handling too many requests. Please try again shortly.",
+            instance=request.url.path,
+            headers={"Retry-After": str(busy_retry_after)},
+        )
+
     app.add_exception_handler(DomainError, handle_domain_error)
+    # SQLAlchemy raises its own TimeoutError when no pooled connection frees up in time.
+    app.add_exception_handler(PoolTimeout, handle_pool_timeout)
     app.add_exception_handler(RequestValidationError, handle_validation_error)
     app.add_exception_handler(StarletteHTTPException, handle_http_exception)
     app.add_middleware(UnhandledErrorMiddleware, base_url=base_url)

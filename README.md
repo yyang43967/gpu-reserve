@@ -127,6 +127,22 @@ The assistant was evaluated on 63 cases (bookings, rule violations, conflicts, c
 - **Low reasoning effort only** for the hosted models; Qwen was run with thinking on and off.
 - **Small sample.** With 63 cases, only disagreeing cases carry information, and the strictest Holm threshold needs at least an 8-0 split. The Haiku-vs-gpt-5.4-mini result (Holm p = 0.043) sits just under the line and is fragile; it also partly reflects consistency, since under the strict rule a case that passes one run and fails the other counts as failed, and gpt-5.4-mini's two runs disagreed on 9 cases against Haiku's 4.
 
+### Performance
+
+GPU availability is cached in Redis per server and day, and a write invalidates it by starting a new generation for that server when it commits. A k6 load test on a local stack limited to the size of a t4g.small (2 vCPUs, 2 GiB, burst capacity) measured the effect. Three repeats per configuration, medians. Detail: [loadtest/results.md](loadtest/results.md).
+
+**The cache cuts database load, not latency or throughput, on one API process.** Capacity is bound by the API's CPU: at saturation it sat at its limit while Postgres used 3–9% of a core for slot search. Slot search peaked at 41–44 req/s in all 12 capacity runs, with the cache off or on.
+
+| Cache off → on | Postgres CPU at a fixed rate | p50 | p95 | Peak throughput |
+|---|---|---|---|---|
+| Availability, 161 req/s | 29% → 8% (−73%) | 4.5 → 3.8 ms | 210 → 160 ms | 248 → 277 req/s |
+| Slot search, 5.9 req/s | 6% → 3% (−39%) | 40 → 38 ms | 123 → 120 ms | 44 → 43 req/s |
+
+- **Latency at these rates is unchanged** within the spread between repeats.
+- **Slot search's sustained rate shows no consistent difference** across two capacity runs.
+- **The cache matters when the API scales out.** More uvicorn workers or instances would load Postgres harder, and uncached availability already took 36% of Postgres's core at saturation against 8% cached. The cache keeps the database from becoming the shared bottleneck.
+- **The booking deadlock.** The load test also found that concurrent bookings on one server could deadlock on the exclusion constraint. Bookings on a server are now serialized with a row lock. In every race since, 100 students booking 2 GPUs on an 8-GPU server produced exactly 4 bookings and 96 refusals.
+
 ## Repository layout
 
 | Path | Contents |

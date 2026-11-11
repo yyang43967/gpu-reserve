@@ -4,14 +4,28 @@ Concurrency model for creating a reservation, in lock order:
 1. A transaction-scoped advisory lock on the user serializes that user's bookings, so
    the active-reservation count and the weekly quota are checked against a stable
    picture of their own reservations. Admin quota changes take the same lock.
-2. FOR SHARE on the server row. Changes to a server (gpu_count, status, limits) and
-   deletes take FOR UPDATE on the same row, so a booking always sees one consistent
-   version of the server and its active GPUs. Bookings on the same server share the
-   lock and do not block each other.
-3. The exclusion constraint on gpu_allocations decides between bookings that picked the
-   same GPU at the same time. The loser rolls back to a savepoint and tries again with
-   fresh availability.
-No path takes these locks in the opposite order.
+2. FOR NO KEY UPDATE on the server row. Bookings on the same server run one at a
+   time, so each reads free GPUs after the previous one committed. Changes to a server
+   (gpu_count, status, limits) and deletes take FOR UPDATE on the same row, so a
+   booking always sees one consistent version of the server and its active GPUs.
+   NO KEY UPDATE rather than FOR UPDATE: it does not block the foreign-key checks
+   (FOR KEY SHARE) of other rows that reference the server.
+3. The exclusion constraint on gpu_allocations stays the final authority against
+   double booking, and a conflict or deadlock is still retried from a savepoint. With
+   bookings serialized per server, neither should happen between two bookings.
+
+Bookings used to take FOR SHARE and run in parallel. An exclusion constraint is
+checked after the row is inserted, so two bookings inserting the same GPU at the same
+moment could each find the other's uncommitted row and wait for it. Postgres breaks
+that only after deadlock_timeout (1 s); under a booking race the waits and retries held
+the API's connections until requests timed out waiting for one.
+
+Lock order across paths: bookings take the user lock, then the server row. Deactivation
+takes the user lock, then the user's reservation rows. Approve takes the reservation
+row, then the server row (FOR SHARE, so it waits for bookings in progress). Cancel,
+reject, and the sweep jobs take reservation rows only. No path takes these locks in the
+opposite order, and every wait on another transaction's allocations comes after a
+path's last lock.
 """
 
 import uuid
@@ -51,7 +65,7 @@ from app.models import (
     UserRole,
 )
 from app.models.reservation import HOLDING_STATUSES, QUOTA_STATUSES
-from app.services import audit, booking_rules, locks, notifications
+from app.services import audit, availability_cache, booking_rules, locks, notifications
 from app.services.booking_rules import Booking, Interval
 from app.services.servers import get_server, visibility_conditions
 
@@ -121,8 +135,11 @@ async def _current_account(session: AsyncSession, user_id: uuid.UUID) -> _Accoun
     return _Account(is_active=row.is_active, quota_hours=row.weekly_gpu_hour_quota)
 
 
-async def _lock_server_shared(session: AsyncSession, viewer: User, server_id: uuid.UUID) -> Server:
-    """The server and its lab, with the server row locked FOR SHARE.
+async def _lock_server_for_booking(
+    session: AsyncSession, viewer: User, server_id: uuid.UUID
+) -> Server:
+    """The server and its lab, with the server row locked FOR NO KEY UPDATE, which
+    serializes bookings on the server (see the module docstring).
 
     Servers the viewer cannot see look missing, as on the browse endpoints.
     """
@@ -131,7 +148,7 @@ async def _lock_server_shared(session: AsyncSession, viewer: User, server_id: uu
         .join(Server.lab)
         .where(Server.id == server_id, *visibility_conditions(viewer))
         .options(contains_eager(Server.lab))
-        .with_for_update(read=True, of=Server)
+        .with_for_update(key_share=True, of=Server)
         .execution_options(populate_existing=True)
     )
     if server is None:
@@ -273,7 +290,7 @@ async def create_reservation(
     if not account.is_active:
         # The same answer the auth layer gives a deactivated account.
         raise InvalidToken("The account is not active.")
-    server = await _lock_server_shared(session, actor, request.server_id)
+    server = await _lock_server_for_booking(session, actor, request.server_id)
     zone = ZoneInfo(server.lab.timezone)
 
     booking_rules.check_times(interval, now=now, max_booking_hours=server.max_booking_hours)
@@ -301,6 +318,7 @@ async def create_reservation(
 
     status = ReservationStatus.PENDING if server.requires_approval else ReservationStatus.APPROVED
     reservation_id = await _allocate(session, actor, server, request, interval, status=status)
+    availability_cache.mark_changed(session, server.id)
     audit.record(
         session,
         actor_id=actor.id,
@@ -408,6 +426,7 @@ async def finish_reservation(
         .where(GpuAllocation.reservation_id == reservation.id)
         .values(active=False, ends_at=reservation.ends_at)
     )
+    availability_cache.mark_changed(session, reservation.server_id)
     payload: dict[str, str] = {"from_status": previous.value, "to_status": reservation.status.value}
     if reservation.ends_at != original_end:
         payload |= {
@@ -582,7 +601,8 @@ async def cancel_reservation(
 async def approve_reservation(
     session: AsyncSession, admin: User, reservation_id: uuid.UUID, *, now: datetime
 ) -> Reservation:
-    """Approve a pending reservation that has not started. Its GPUs are already held."""
+    """Approve a pending reservation that has not started. Its GPUs are already held,
+    so availability does not change and nothing is invalidated."""
     reservation = await _lock_reservation(session, admin, reservation_id)
     if reservation.status is not ReservationStatus.PENDING:
         raise InvalidReservationState(
@@ -625,6 +645,7 @@ async def reject_reservation(
         .where(GpuAllocation.reservation_id == reservation.id)
         .values(active=False)
     )
+    availability_cache.mark_changed(session, reservation.server_id)
     _record_decision(session, admin, reservation, "reservation.rejected", reason=reason)
     notifications.notify_owner(
         session, reservation, NotificationKind.REJECTED, actor_id=admin.id, now=now
@@ -636,10 +657,11 @@ async def reject_reservation(
 async def _ensure_server_open(session: AsyncSession, server_id: uuid.UUID) -> None:
     """Refuse an approval when the server is no longer open for booking.
 
-    The server row is locked FOR SHARE, as a booking does, so a concurrent change to
-    maintenance either commits first and is seen here, or waits for the approval. The
-    caller already holds the reservation's row lock; no path locks a server row and
-    then a reservation row, so this order cannot deadlock.
+    The server row is locked FOR SHARE, so a concurrent change to maintenance either
+    commits first and is seen here, or waits for the approval. It also waits for a
+    booking in progress on the server (FOR NO KEY UPDATE), which never waits for a
+    reservation row lock. The caller already holds the reservation's row lock; no path
+    locks a server row and then a reservation row, so this order cannot deadlock.
     """
     row = (
         await session.execute(
@@ -729,20 +751,10 @@ async def server_availability(
         booking_rules.floor_to_grid(start.astimezone(UTC)),
         booking_rules.ceil_to_grid(end.astimezone(UTC)),
     )
+    # The server and the viewer's right to see it always come from Postgres; only the
+    # allocations may come from the cache.
     server = await get_server(session, viewer, server_id)
-
-    busy_rows = await session.execute(
-        select(GpuAllocation.gpu_id, GpuAllocation.starts_at, GpuAllocation.ends_at)
-        .join(Gpu, Gpu.id == GpuAllocation.gpu_id)
-        .where(
-            Gpu.server_id == server.id,
-            Gpu.removed_at.is_(None),
-            GpuAllocation.active.is_(True),
-            GpuAllocation.starts_at < window.end,
-            GpuAllocation.ends_at > window.start,
-        )
-    )
-    busy = [Interval(row.starts_at, row.ends_at) for row in busy_rows]
+    busy = (await availability_cache.busy_intervals(session, [server.id], window))[server.id]
 
     runs: list[FreeRun] = []
     for index, free in enumerate(booking_rules.free_per_slot(window, server.gpu_count, busy)):

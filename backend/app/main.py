@@ -26,6 +26,7 @@ from app.core.config import Settings, get_settings
 from app.core.errors import register_error_handlers
 from app.db.session import create_engine, create_session_factory
 from app.rag.embeddings import Embedder
+from app.services.availability_cache import build_availability_cache
 from app.services.storage import ObjectStorage, S3Storage
 
 # Exactly what the frontend sends, so a page on an allowed origin cannot use any other
@@ -49,7 +50,9 @@ def create_app(
         engine = create_engine(settings)
         redis = Redis.from_url(str(settings.redis_url))
         app.state.engine = engine
-        app.state.session_factory = create_session_factory(engine)
+        app.state.session_factory = create_session_factory(
+            engine, availability_cache=build_availability_cache(settings, redis)
+        )
         app.state.redis = redis
         try:
             async with assistant_lifespan(
@@ -67,7 +70,11 @@ def create_app(
     app.state.storage = storage or S3Storage(settings)
 
     # Registered before CORS so that CORS wraps the error middleware and 500s stay readable.
-    register_error_handlers(app, settings.problem_base_url)
+    register_error_handlers(
+        app,
+        settings.problem_base_url,
+        busy_retry_after=settings.database_busy_retry_after_seconds,
+    )
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins,
