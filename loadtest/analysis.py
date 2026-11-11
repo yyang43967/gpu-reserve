@@ -73,8 +73,10 @@ def capacity(rows: list[dict[str, float]]) -> dict[str, float]:
     return {
         "peak_rps": peak,
         "sustained_rps": sustained,
-        # The ramp never saturated the stack: the limit is above RAMP_MAX.
-        "limit_not_reached": top["achieved_rps"] >= SUSTAINED_SHARE * top["offered_rps"],
+        # The ramp never saturated the stack: the limit is above RAMP_MAX. Fast
+        # failures keep achieved close to offered, so errors count as saturation.
+        "limit_not_reached": top["achieved_rps"] >= SUSTAINED_SHARE * top["offered_rps"]
+        and top["failed"] <= SUSTAINED_MAX_ERRORS,
     }
 
 
