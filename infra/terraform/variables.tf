@@ -100,3 +100,8 @@ variable "ses_sandbox_recipients" {
   type        = list(string)
   default     = []
 }
+
+variable "alert_email" {
+  description = "Address for operational alerts (a failed backup). Verified in SES so mail reaches it from the sandbox."
+  type        = string
+}

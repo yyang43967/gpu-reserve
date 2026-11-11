@@ -72,7 +72,7 @@ terraform plan   # re-adopts the bucket's settings; review before applying
 
 ## Main configuration
 
-What it creates (`terraform plan` lists 36 resources with the CI deploy role off):
+What it creates (`terraform plan` lists 38 resources with the CI deploy role off):
 
 - The instance: `t4g.small`, Amazon Linux 2023 arm64, 30 GB encrypted gp3, IMDSv2 only, standard CPU credits, an Elastic IP, and a first-boot script that adds a 1 GiB swap file, Docker with log rotation, and the Compose plugin.
 - A security group open on 80/tcp and 443/tcp+udp only. There is no SSH port: shell access is `aws ssm start-session --target <instance-id>`.
@@ -119,3 +119,14 @@ terraform destroy
 ```
 
 The instance's root volume, with the database, is deleted with it. Download the latest backup first if the data matters. Remove the Cloudflare records afterwards. Rebuilding from scratch is the Apply section again; the database comes back from a backup.
+
+### Turning on the CI deploy role
+
+When the account allows IAM OIDC providers (check with `aws iam list-open-id-connect-providers`; on the Free plan it is denied):
+
+1. Set `github_deploy_role_enabled = true` in `terraform.tfvars`, plan, and apply. It creates GitHub's OIDC provider and the deploy role.
+2. In GitHub, create the `production` environment and limit its deployment branches to `main`. The role trusts only jobs that run in this environment.
+3. Set the repository variables `AWS_REGION` (`us-east-2`), `AWS_DEPLOY_ROLE_ARN` (`terraform output -raw github_deploy_role_arn`), and `DEPLOY_ENABLED` (`true`). No secrets are needed.
+4. Run the Deploy workflow by hand once, then let the next merge to `main` deploy on its own.
+
+For the Evaluations workflow, create an `evals` environment with the secrets `OPENAI_API_KEY` and `ANTHROPIC_API_KEY` (required reviewers recommended: a run costs money).

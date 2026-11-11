@@ -147,6 +147,10 @@ jobs:
       - name: Test deploy.sh
         run: bash infra/deploy/tests/deploy-test.sh
 
+      # Real systemd on the runner: a failed backup must start the alert unit.
+      - name: Test the backup failure alert
+        run: sudo bash infra/deploy/tests/alert-test.sh
+
   image-and-smoke:
     name: ARM64 image and stack smoke test
     if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'

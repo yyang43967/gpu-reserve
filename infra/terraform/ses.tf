@@ -9,9 +9,10 @@ resource "aws_sesv2_email_identity" "domain" {
   }
 }
 
-# While the account is in the SES sandbox, mail only reaches verified addresses.
-# Each address here gets a verification email from AWS when it is created.
+# While the account is in the SES sandbox, mail only reaches verified addresses: the
+# demo recipients and the alert address. Each gets a verification email from AWS
+# when it is created.
 resource "aws_sesv2_email_identity" "recipient" {
-  for_each       = toset(var.ses_sandbox_recipients)
+  for_each       = toset(concat(var.ses_sandbox_recipients, [var.alert_email]))
   email_identity = each.value
 }

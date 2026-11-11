@@ -12,6 +12,7 @@ locals {
     EMAIL_FROM        = "GPU Reserve <no-reply@${var.email_domain}>"
     S3_BUCKET_UPLOADS = aws_s3_bucket.this["uploads"].bucket
     BACKUPS_BUCKET    = aws_s3_bucket.this["backups"].bucket
+    ALERT_EMAIL       = var.alert_email
   }
 }
 

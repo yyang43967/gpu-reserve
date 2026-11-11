@@ -1,0 +1,133 @@
+name: Evaluations
+
+# By hand only. Runs the retrieval acceptance set (recorded embeddings, no API calls)
+# and the agent evaluation against one model, then uploads the runs as an artifact.
+# Model keys come from the protected `evals` environment.
+
+on:
+  workflow_dispatch:
+    inputs:
+      model:
+        description: ASSISTANT_MODEL, e.g. openai:gpt-5.4-mini-2026-03-17 or anthropic:claude-haiku-5-5
+        required: true
+        default: openai:gpt-5.4-mini-2026-03-17
+      repeat:
+        description: Runs of the model on the dataset
+        required: true
+        default: "2"
+      only:
+        description: Comma-separated case ids (empty runs every case)
+        required: false
+        default: ""
+      judge:
+        description: Judge the free-text answers (needs both OpenAI and Anthropic keys)
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: evals
+  cancel-in-progress: false
+
+jobs:
+  evaluate:
+    name: Evaluate ${{ inputs.model }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    environment: evals
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: gpureserve
+          POSTGRES_PASSWORD: gpureserve
+          POSTGRES_DB: gpureserve
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U gpureserve -d gpureserve"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+    env:
+      # The Compose user can create databases, which the agent evaluation needs (one
+      # copy of a template database per case).
+      DATABASE_URL: postgresql+asyncpg://gpureserve:gpureserve@localhost:5432/gpureserve
+      # Required by the settings; nothing here signs a token a user will see.
+      JWT_SECRET: evaluation-only-signing-key-not-used-for-anything-real
+      ASSISTANT_MODEL: ${{ inputs.model }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      TIKTOKEN_CACHE_DIR: /home/runner/.cache/tiktoken
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Check the inputs
+        env:
+          REPEAT: ${{ inputs.repeat }}
+          ONLY: ${{ inputs.only }}
+        run: |
+          [[ "$ASSISTANT_MODEL" =~ ^(openai|anthropic):[A-Za-z0-9._-]+$ ]] \
+            || { echo "::error::model must be openai:<model> or anthropic:<model>"; exit 1; }
+          [[ "$REPEAT" =~ ^[1-5]$ ]] || { echo "::error::repeat must be 1 to 5"; exit 1; }
+          [[ -z "$ONLY" || "$ONLY" =~ ^[a-z0-9,-]+$ ]] || { echo "::error::only must be case ids"; exit 1; }
+
+      - name: Migrate
+        run: uv run alembic upgrade head
+
+      - name: Retrieval acceptance set
+        run: uv run python -m app.rag.evaluation acceptance
+
+      - name: Replay the agent cases through the services
+        run: uv run python -m app.agent.evaluation validate
+
+      - name: Run the model
+        env:
+          REPEAT: ${{ inputs.repeat }}
+          ONLY: ${{ inputs.only }}
+        run: |
+          list_runs() { find ../evals/agent/runs -mindepth 1 -maxdepth 1 -type d | sort; }
+          list_runs > "$RUNNER_TEMP/runs-before"
+          args=(--repeat "$REPEAT")
+          [ -z "$ONLY" ] || args+=(--only "$ONLY")
+          uv run python -m app.agent.evaluation run "${args[@]}"
+          list_runs | comm -13 "$RUNNER_TEMP/runs-before" - > "$RUNNER_TEMP/new-runs"
+          cat "$RUNNER_TEMP/new-runs"
+          test -s "$RUNNER_TEMP/new-runs"
+
+      - name: Judge
+        if: inputs.judge
+        run: xargs uv run python -m app.agent.evaluation judge < "$RUNNER_TEMP/new-runs"
+
+      - name: Comparison report
+        run: xargs uv run python -m app.agent.evaluation compare < "$RUNNER_TEMP/new-runs"
+
+      # This job's runs, the report, and the query embedding cache the runs may have
+      # added to (commit it with the results).
+      - name: Collect the results
+        if: always()
+        run: |
+          out="$GITHUB_WORKSPACE/eval-output"
+          mkdir -p "$out/runs"
+          [ ! -s "$RUNNER_TEMP/new-runs" ] || xargs -I{} cp -R {} "$out/runs/" < "$RUNNER_TEMP/new-runs"
+          cp -R ../evals/agent/results "$out/" 2>/dev/null || true
+          cp ../evals/agent/query_embeddings.json.gz "$out/"
+
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: evals-${{ github.run_id }}
+          path: eval-output/
+          if-no-files-found: warn
+          retention-days: 30

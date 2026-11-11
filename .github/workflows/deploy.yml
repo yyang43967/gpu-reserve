@@ -1,0 +1,87 @@
+name: Deploy
+
+# After CI passes on main: build the arm64 image, push it to ECR tagged with the commit
+# SHA, and deploy it to the instance through SSM. By hand: deploy a SHA that is already
+# in ECR (rollback), or build and deploy the head of main.
+#
+# AWS access comes from GitHub's OIDC token and the deploy role; there are no AWS keys
+# in GitHub. The job runs only when the repository variable DEPLOY_ENABLED is "true",
+# which stays unset until the account allows IAM OIDC providers (see
+# infra/terraform/README.md). Repository variables: DEPLOY_ENABLED, AWS_REGION,
+# AWS_DEPLOY_ROLE_ARN (terraform output github_deploy_role_arn).
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: Full commit SHA already in ECR to deploy (rollback). Empty builds and deploys the head of main.
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  # The OIDC token for the deploy role.
+  id-token: write
+
+# One deploy at a time, and never cancel one halfway.
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy to production
+    if: >-
+      vars.DEPLOY_ENABLED == 'true' && (
+        github.event_name == 'workflow_dispatch' ||
+        (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
+      )
+    # Native arm64 build, the production architecture.
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    # The deploy role trusts only jobs in this environment; its protection rules limit
+    # it to main.
+    environment: production
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+    steps:
+      - name: Choose the commit
+        id: target
+        env:
+          INPUT_SHA: ${{ inputs.sha }}
+          RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+          REF_SHA: ${{ github.sha }}
+        run: |
+          if [ -n "$INPUT_SHA" ]; then
+            sha="$INPUT_SHA"; build=false
+          elif [ -n "$RUN_SHA" ]; then
+            sha="$RUN_SHA"; build=true
+          else
+            sha="$REF_SHA"; build=true
+          fi
+          [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::not a full commit SHA: $sha"; exit 1; }
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "build=$build" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ steps.target.outputs.sha }}
+
+      - uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          role-session-name: deploy-${{ github.run_id }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Build and push the image
+        if: steps.target.outputs.build == 'true'
+        run: infra/deploy/release.sh push
+
+      - name: Deploy
+        env:
+          SHA: ${{ steps.target.outputs.sha }}
+        run: infra/deploy/release.sh deploy "$SHA"

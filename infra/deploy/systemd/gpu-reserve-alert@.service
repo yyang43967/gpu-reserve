@@ -1,0 +1,6 @@
+[Unit]
+Description=Email an alert that %i failed
+
+[Service]
+Type=oneshot
+ExecStart=/opt/gpu-reserve/current/alert.sh %i

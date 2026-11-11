@@ -7,6 +7,7 @@ The backend runs on one EC2 instance as a Docker Compose project: Caddy (TLS for
 | `release.sh` | A developer machine (for now) or CI: builds and pushes the image, starts a deploy, checks the result |
 | `deploy.sh` | The instance, as root, through SSM Run Command |
 | `backup.sh`, `restore.sh` | The instance: daily from a systemd timer, before each migration, and by hand |
+| `alert.sh` | The instance: emails the journal of a failed backup through SES |
 | `lib.sh` | Shared by the three scripts above |
 | `compose.yml`, `Caddyfile`, `systemd/` | The instance, from the release being deployed |
 
@@ -38,6 +39,8 @@ read -rs KEY && put OPENAI_API_KEY "$KEY"; unset KEY   # paste the key, then Ent
 `POSTGRES_PASSWORD` is used when Postgres first creates its data directory. Changing the parameter later does not change the database's password.
 
 ## Deploy
+
+From CI (`.github/workflows/deploy.yml`), once the account allows OIDC: after CI passes on `main`, the workflow assumes the deploy role with GitHub's OIDC token and runs `release.sh push` and `release.sh deploy <sha>`. A manual run with a SHA deploys that image without building (rollback). Until then, from a developer machine:
 
 ```bash
 export AWS_PROFILE=gpu-reserve AWS_REGION=us-east-2
@@ -90,6 +93,17 @@ sudo /opt/gpu-reserve/current/restore.sh postgres/2026-11-12T093012Z-daily.dump 
 ```
 
 It downloads and checks the dump, backs up the current database first (`pre-restore`; add `--no-safety-backup` only if the current database cannot be dumped), stops the API and worker, recreates the database, restores it, empties Redis (its availability cache, job queue, and rate-limit counters describe the old data), and starts the API and worker again. The site answers 502 for the minute this takes.
+
+A failed run starts `gpu-reserve-alert@gpu-reserve-backup.service` (`OnFailure=`), which emails the last 40 journal lines of the backup to `ALERT_EMAIL` through SES with the instance role. The address is verified in SES by Terraform, so the mail arrives while the account is in the sandbox.
+
+`tests/alert-test.sh` checks this under real systemd: it makes the backup fail, waits for the alert unit, and inspects the SES request a stand-in `aws` received. CI runs it on the runner; locally it needs a systemd container:
+
+```bash
+docker run -d --name alert-test --privileged --cgroupns=host -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
+  --tmpfs /run --tmpfs /run/lock -v "$PWD:/src:ro" <ubuntu image with systemd and python3> /lib/systemd/systemd
+docker exec alert-test bash /src/infra/deploy/tests/alert-test.sh
+docker rm -f alert-test
+```
 
 Check the schedule and the last runs:
 
