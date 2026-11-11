@@ -70,7 +70,8 @@ def latency_figures(run: dict[str, Any], args: dict[str, Any]) -> dict[str, floa
     s = run["summary"]
     return {
         "rate": float(run["mode"]["RATE"]),
-        "rps": metric(s, "http_reqs{phase:measure}", "rate"),
+        # k6's rate for a tagged submetric divides by the whole test, warm-up included.
+        "rps": metric(s, "http_reqs{phase:measure}", "count") / seconds(args["measure"]),
         "p50": metric(s, "http_req_duration{phase:measure}", "med"),
         "p95": metric(s, "http_req_duration{phase:measure}", "p(95)"),
         "p99": metric(s, "http_req_duration{phase:measure}", "p(99)"),

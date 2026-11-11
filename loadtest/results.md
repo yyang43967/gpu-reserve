@@ -1,11 +1,15 @@
 # Load-test results: availability cache
 
-Run `20261111T012740Z` at commit `edfc4d0`, k6 v2.3.0, three repeats of every configuration. Tables show the median of the three repeats, plus the range where it matters. Method: [docs/decisions.md, "Load-test method"](../docs/decisions.md). Commands: `python3 loadtest/run.py`, then `python3 loadtest/report.py loadtest/out/<run>`.
+Two runs, k6 v2.3.0, three repeats of every configuration:
+- `20261111T012740Z` at commit `edfc4d0`: capacity, fixed-rate availability and browse servers, booking races, and hit rate.
+- `20261111T041745Z` at commit `76f7f42`: fixed-rate slot search only, rerun at a rate the uncached stack sustains (see [below](#why-the-slot-search-run-was-replaced)). The application code is the same as in the first run; only the load-test tooling changed.
+
+Tables show the median of the three repeats, plus the range where it matters. Method: [docs/decisions.md, "Load-test method"](../docs/decisions.md). Commands: `python3 loadtest/run.py`, then `python3 loadtest/report.py loadtest/out/<run>`.
 
 ## Summary
 
-- **Availability:** at a fixed 120 req/s, the cache cut Postgres CPU from 29% to 8% of a core (−73%). p50 went from 4.5 to 3.8 ms and p95 from 210 to 160 ms. The highest rate held with p95 ≤ 500 ms rose from 180 to 225 req/s.
-- **Slot search:** at a fixed 21 req/s, Postgres CPU fell from 9% to 5% (−49%). The mean of busy pool connections fell from 6.8 to 3.3 of 10. p50 went from 632 to 109 ms and p95 from 1,769 to 554 ms. The sustained rate rose from 14 to 27 req/s.
+- **Availability:** at a fixed 161 req/s, the cache cut Postgres CPU from 29% to 8% of a core (−73%). p50 went from 4.5 to 3.8 ms and p95 from 210 to 160 ms. The highest rate held with p95 ≤ 500 ms rose from 180 to 225 req/s.
+- **Slot search:** at a fixed 5.9 req/s, which the uncached stack sustains, Postgres CPU fell from 6% to 3% (−39%), and latency was the same (p50 about 39 ms, p95 about 120 ms). The gain shows under load: the highest rate held with p95 ≤ 500 ms rose from 14 to 27 req/s.
 - **Browse servers** doesn't read availability and serves as the control. Its numbers moved by no more than the spread between repeats.
 - **The API process is the bottleneck in every configuration**, not Postgres. With the cache on, Postgres has plenty of headroom, and the next gain is in the API's own CPU time.
 - **Booking race:** 6 of 6 races ended with exactly 4 × 201 and 96 × 409, and the database check passed every time. That only holds since the deadlock fix described [below](#finding-booking-races-deadlocked-on-the-exclusion-constraint).
@@ -30,36 +34,49 @@ Run `20261111T012740Z` at commit `edfc4d0`, k6 v2.3.0, three repeats of every co
 
 ## Fixed rate, cache off vs on
 
-The rates were set to 65% of each script's uncached peak in the capacity phase. Each one is the same with the cache off and on.
+Each rate is the same with the cache off and on. Availability and browse servers ran at 65% of their uncached peak in the capacity phase; both sustain that rate without failures. Slot search ran at 65% of its median uncached rate sustained with no failed request (see [below](#why-the-slot-search-run-was-replaced)).
 
 | Script | Rate (req/s) | Cache | Postgres CPU | API CPU | p50 ms | p95 ms | p99 ms | Errors | Dropped | Busy conns (mean / max) | p95 range |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| availability | 120 | off | **29%** | 54% | 4.5 | 210 | 446 | 0.00% | 48 | 1.5 / 10 | 177 to 426 |
-| availability | 120 | on | **8%** | 60% | 3.8 | 160 | 373 | 0.00% | 52 | 1.4 / 10 | 117 to 374 |
+| availability | 161 | off | **29%** | 54% | 4.5 | 210 | 446 | 0.00% | 48 | 1.5 / 10 | 177 to 426 |
+| availability | 161 | on | **8%** | 60% | 3.8 | 160 | 373 | 0.00% | 52 | 1.4 / 10 | 117 to 374 |
 | | | change | **−73%** | +10% | −15% | −24% | −16% | | | | |
-| slot_search | 21 | off | **9%** | 77% | 632 | 1,769 | 2,577 | 0.24% | 0 | 6.8 / 10 | 845 to 3,688 |
-| slot_search | 21 | on | **5%** | 70% | 109 | 554 | 750 | 0.00% | 0 | 3.3 / 10 | 373 to 1,322 |
-| | | change | **−49%** | −8% | −83% | −69% | −71% | | | | |
-| browse_servers (control) | 157 | off | 10% | 56% | 3.0 | 89 | 169 | 0.00% | 25 | 1.1 / 10 | 71 to 344 |
-| browse_servers (control) | 157 | on | 10% | 58% | 3.1 | 96 | 236 | 0.00% | 11 | 1.1 / 10 | 90 to 211 |
+| slot_search | 5.9 | off | **6%** | 30% | 39.8 | 123 | 228 | 0.00% | 0 | 0.3 / 2 | 122 to 147 |
+| slot_search | 5.9 | on | **3%** | 30% | 38.4 | 120 | 230 | 0.00% | 0 | 0.3 / 1 | 116 to 1,247 |
+| | | change | **−39%** | 0% | −4% | −3% | +1% | | | | |
+| browse_servers (control) | 209 | off | 10% | 56% | 3.0 | 89 | 169 | 0.00% | 25 | 1.1 / 10 | 71 to 344 |
+| browse_servers (control) | 209 | on | 10% | 58% | 3.1 | 96 | 236 | 0.00% | 11 | 1.1 / 10 | 90 to 211 |
 
-Rates are in requests per second. k6 counts iterations, and browse servers makes two requests per iteration (a list, then one server). "Dropped" counts iterations k6 couldn't start on time because all its VUs were busy, out of about 14,500 per availability run.
+Rates are in requests per second. k6 counts iterations, and browse servers makes two requests per iteration (a list, then one server), so 104.5 iterations per second. "Dropped" counts iterations k6 couldn't start on time because all its VUs were busy, out of about 14,500 per availability run. In the slot-search runs, every measured response was a 200 (531 or 532 per run); status codes were recorded per phase from this run on.
 
 **Reading it:**
 - **Availability is a cheap query** even without the cache: it reads one server's allocations over a short window. The cache's main effect there is on Postgres, which spends about a quarter as much CPU. Latency improves less, because most of a request's time is spent in the API (authentication, serialization) either way. API CPU rose by 10% with the cache on, which is the cost of decoding cached entries. That is a trade worth making on this deployment, since a single instance runs both processes.
-- **Slot search reads every eligible server's allocations** over the search window, so it gains the most. The rate chosen for it was too high for the uncached stack. Its uncached peak of 44 req/s counted failed requests (see Capacity), so 65% of it was above what the stack sustains without the cache. The cache-off run was therefore overloaded: p95 was 1.8 s, 0.24% of requests failed, and 6.8 of 10 connections were busy on average. That doesn't make the comparison unfair, because the offered load was the same. But the slot-search latency gap is larger than it would be at a rate both configurations sustain. The capacity table shows the cleaner comparison.
-- **Failed slot searches:** their status codes weren't recorded. They don't come from authentication or rate limiting, since 401 and 429 are counted separately and were 0. Their latency levels off near the pool's 3 s checkout timeout, so they are most likely 503 `database-busy` responses. Recording status codes per step in the k6 summary is a follow-up.
+- **Slot search reads every eligible server's allocations** over the search window. At a light load, the database part of that is fast, so the cache halves Postgres CPU but doesn't change latency. The time goes to the API's own work, which is the same either way. The benefit appears when Postgres becomes the constraint: in the capacity phase, the sustained rate nearly doubles (14 to 27 req/s), and in the replaced overloaded run below, latency fell by 69–83%.
+- **One cache-on slot-search run had a p95 of 1,247 ms**, against 116 and 120 ms for the other two. Its p50 was normal (39 ms), and nothing failed. A tail like this from a single run doesn't recur and isn't explained by these measurements. The median is unaffected.
+
+### Why the slot-search run was replaced
+
+The first run set slot search's fixed rate to 65% of its uncached peak: 28.3 req/s. That peak counted every completed request, including fast failures. The uncached stack was already shedding load at that rate, so the run measured an overloaded system:
+
+| Script | Rate (req/s) | Cache | Postgres CPU | API CPU | p50 ms | p95 ms | p99 ms | Errors | Busy conns (mean / max) | p95 range |
+|---|---|---|---|---|---|---|---|---|---|---|
+| slot_search | 28.3 | off | 9% | 77% | 632 | 1,769 | 2,577 | 0.24% | 6.8 / 10 | 845 to 3,688 |
+| slot_search | 28.3 | on | 5% | 70% | 109 | 554 | 750 | 0.00% | 3.3 / 10 | 373 to 1,322 |
+
+The comparison was fair in the sense that both configurations faced the same offered load. But it measured queueing rather than service time, which is exactly what the fixed-rate comparison is meant to avoid. The failures' status codes weren't recorded then. Their latency levels off near the pool's 3 s checkout timeout, which points to 503 `database-busy`.
+
+The rerun takes the rate from the same capacity results with a stricter rule: the highest step with p95 ≤ 500 ms, at least 95% of requests completed, and no failed request at all. The three uncached runs sustained 4.5, 9.0 and 22.5 req/s by that rule; the median is 9.0, and 65% of it is 5.9 req/s. In one run the rule cut the rate from 13.5 to 9.0 req/s because of a single connection closed without a response right after the API restart. The rule is applied as defined, even so. The runner now derives the rate this way (`--capacity-from` reuses an earlier run's capacity results), and every script records responses by status code per step and phase.
 
 ### Warm-up at the fixed rate
 
-The first 30 s after an API restart, with a cache that's empty at the start. This phase is excluded from the table above.
+The first 30 s after an API restart, with a cache that's empty at the start. This phase is excluded from the tables above.
 
 | Script | Cache | p50 ms | p95 ms |
 |---|---|---|---|
 | availability | off | 4.5 | 218 |
 | availability | on | 3.9 | 251 |
-| slot_search | off | 317 | 1,466 |
-| slot_search | on | 85 | 405 |
+| slot_search | off | 40.0 | 165 |
+| slot_search | on | 37.6 | 111 |
 | browse_servers | off | 3.0 | 97 |
 | browse_servers | on | 3.0 | 81 |
 
@@ -78,7 +95,7 @@ Ramping arrival rate, from 10% to 100% of a ceiling set at about twice the throu
 | browse_servers | off | 322 | 297 to 342 | 300 | 250 to 350 |
 | browse_servers | on | 348 | 330 to 367 | 300 | 300 to 350 |
 
-All 18 capacity runs saturated before their last step. Peak counts every completed request, including failures. For slot search, the peak is the rate at which the stack answers, partly with fast 503s, not the rate it serves well. That is why the peaks are equal while the sustained rates differ by almost 2×. Per step, medians:
+All 18 capacity runs saturated before their last step. Peak counts every completed request, including failures. For slot search, the peak is the rate at which the stack answers, partly with fast failures, not the rate it serves well. That is why the peaks are equal while the sustained rates differ by almost 2×. Per step, medians:
 
 `availability`
 
@@ -125,7 +142,7 @@ All 18 capacity runs saturated before their last step. Peak counts every complet
 | 450 | 293 | 345 | 1,743 | 1,506 | 0.1% | 0.0% |
 | 500 | 320 | 328 | 1,652 | 1,527 | 0.0% | 0.0% |
 
-Past saturation, p95 levels off at about 3 s with the cache off or on. That is the pool's checkout timeout: requests that can't get a connection get 503 `database-busy` with `Retry-After` instead of queueing. One slot-search capacity run (cache off, repeat 2) also logged a single connection closed without a response (`EOF`) on its first request, right after the API restart.
+Past saturation, p95 levels off at about 3 s with the cache off or on. That matches the pool's checkout timeout, after which a request that can't get a connection gets 503 `database-busy` with `Retry-After` instead of queueing. These capacity runs predate status-code counting, so the 503s are inferred from latency, not counted. One slot-search capacity run (cache off, repeat 2) also logged a single connection closed without a response (`EOF`) on its first request, right after the API restart.
 
 ## Booking race
 
@@ -172,6 +189,6 @@ The read-only scripts never write, so the generations never change, and each run
 
 ## Follow-ups
 
-- **Profile slot search in the API.** With the cache on, it is CPU-bound in the API process (70% of a 75% limit at 21 req/s), not in Postgres. Decoding many day entries per server and computing free windows are the likely costs. A trial run before this one also suggested cache-on slot search could be slower at low load. These runs don't show that, but a profile would settle where the time goes.
-- **Record status codes per step** in the k6 summary, so failures under overload can be split into 503 `database-busy` and anything else, instead of being inferred from latency.
+- **Profile slot search in the API.** Its time is spent in the API process, not in Postgres: 30% of a core at 5.9 req/s with the cache off or on, and 70–77% (at the 75% limit) at 28 req/s. Decoding many day entries per server and computing free windows are the likely costs. A profile would show where the time goes.
+- **Faster cache serialization.** Cached entries are JSON encoded and decoded with the standard library, and that cost shows: availability's API CPU is 10% higher with the cache on. orjson or msgpack would cut it. Either is a new dependency, so it needs its own decision, and it should come after the profile confirms that decoding is where the time goes.
 - **Run on the target instance.** These numbers use burst capacity on a laptop. A run on a t4g.small, in both burst and baseline, would give absolute numbers for capacity planning.

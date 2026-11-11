@@ -133,10 +133,10 @@ GPU availability is cached in Redis per server and day, and a write invalidates 
 
 | At a fixed rate | Postgres CPU | p50 | p95 | Sustained rate (p95 ≤ 500 ms) |
 |---|---|---|---|---|
-| Availability, 120 req/s | 29% → 8% | 4.5 → 3.8 ms | 210 → 160 ms | 180 → 225 req/s |
-| Slot search, 21 req/s | 9% → 5% | 632 → 109 ms | 1,769 → 554 ms | 14 → 27 req/s |
+| Availability, 161 req/s | 29% → 8% | 4.5 → 3.8 ms | 210 → 160 ms | 180 → 225 req/s |
+| Slot search, 5.9 req/s | 6% → 3% | 40 → 38 ms | 123 → 120 ms | 14 → 27 req/s |
 
-The load test also found that concurrent bookings on one server could deadlock on the exclusion constraint. Bookings on a server are now serialized with a row lock. In every race since, 100 students booking 2 GPUs on an 8-GPU server produced exactly 4 bookings and 96 refusals.
+At a light load, the cache halves slot search's Postgres CPU but doesn't change its latency, which is spent in the API. The gain shows as capacity. The load test also found that concurrent bookings on one server could deadlock on the exclusion constraint. Bookings on a server are now serialized with a row lock. In every race since, 100 students booking 2 GPUs on an 8-GPU server produced exactly 4 bookings and 96 refusals.
 
 ## Repository layout
 
