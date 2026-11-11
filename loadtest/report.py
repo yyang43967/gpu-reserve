@@ -20,6 +20,7 @@ from analysis import (
     capacity,
     median,
     metric,
+    pooled_sustained,
     seconds,
     statuses,
     steps,
@@ -166,22 +167,46 @@ def cold_section(runs: Runs, args: dict[str, Any], scripts: list[str]) -> list[s
     return lines
 
 
+# The last steps of a capacity ramp, where every configuration is saturated.
+SATURATED_STEPS = 3
+
+
+def saturated_cpu(run: dict[str, Any], args: dict[str, Any]) -> dict[str, float]:
+    """Mean API and Postgres CPU over the last SATURATED_STEPS steps of a capacity run."""
+    period = 1 + args["hold"]  # each step starts with a one-second change of rate
+    start = run["samples"]["k6_started"]
+    lo = start + (args["steps"] - SATURATED_STEPS) * period + 1 + EDGE_SECONDS
+    hi = start + args["steps"] * period - EDGE_SECONDS
+    cpu: dict[str, list[float]] = defaultdict(list)
+    for sample in run["samples"]["cpu"]:
+        if lo <= sample["t"] <= hi:
+            cpu[sample["service"]].append(sample["cpu_percent"])
+    return {
+        "api_cpu": statistics.fmean(cpu["api"]) if cpu["api"] else 0.0,
+        "pg_cpu": statistics.fmean(cpu["postgres"]) if cpu["postgres"] else 0.0,
+    }
+
+
 def capacity_section(runs: Runs, args: dict[str, Any], scripts: list[str]) -> list[str]:
     lines = [
         "| Script | Cache | Peak req/s | Peak range "
-        f"| Sustained req/s (p95 <= {SLO_P95_MS:.0f} ms) | Sustained range | Runs not saturated |",
-        "|---|---|---|---|---|---|---|",
+        f"| Sustained req/s (p95 <= {SLO_P95_MS:.0f} ms, median step) | Per-run sustained "
+        "| API CPU at saturation | Postgres CPU at saturation | Runs not saturated |",
+        "|---|---|---|---|---|---|---|---|---|",
     ]
     for script in scripts:
         for config in CONFIGS:
             found = runs["capacity", script, config]
             if not found:
                 continue
-            caps = [capacity(step_rows(r, args)) for r in found]
+            rows = [step_rows(r, args) for r in found]
+            caps = [capacity(r) for r in rows]
+            cpu = [saturated_cpu(r, args) for r in found]
             lines.append(
                 f"| {script} | {config.removeprefix('cache-')} | {med(caps, 'peak_rps'):.0f} | "
-                f"{span(caps, 'peak_rps', '.0f')} | {med(caps, 'sustained_rps'):.0f} | "
-                f"{span(caps, 'sustained_rps', '.0f')} | "
+                f"{span(caps, 'peak_rps', '.0f')} | {pooled_sustained(rows):.0f} | "
+                f"{', '.join(f'{c["sustained_rps"]:.0f}' for c in caps)} | "
+                f"{med(cpu, 'api_cpu'):.0f}% | {med(cpu, 'pg_cpu'):.0f}% | "
                 f"{sum(bool(c['limit_not_reached']) for c in caps)} of {len(caps)} |"
             )
     return lines

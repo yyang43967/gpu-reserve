@@ -104,3 +104,19 @@ def capacity(rows: list[dict[str, float]]) -> dict[str, float]:
 
 def median(values: list[float]) -> float:
     return statistics.median(values)
+
+
+def pooled_sustained(runs: list[list[dict[str, float]]]) -> float:
+    """The sustained rate across repeats: per step, the median of each figure over the
+    runs, then the highest step whose medians pass. One run's noisy step can end that
+    run's own sustained rate early; the median step is less sensitive to it."""
+    passing = [0.0]
+    for index in range(len(runs[0])):
+        step = {key: median([run[index][key] for run in runs]) for key in runs[0][index]}
+        if (
+            step["p95"] <= SLO_P95_MS
+            and step["achieved_rps"] >= SUSTAINED_SHARE * step["offered_rps"]
+            and step["failed"] <= SUSTAINED_MAX_ERRORS
+        ):
+            passing.append(step["offered_rps"])
+    return max(passing)
