@@ -35,7 +35,14 @@ class EmailBackend(StrEnum):
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+        # A validation error otherwise prints the input it rejected, which for a missing
+        # field is every other value read from the environment, keys included.
+        hide_input_in_errors=True,
+    )
 
     environment: Environment = Environment.LOCAL
     log_level: LogLevel = LogLevel.INFO
