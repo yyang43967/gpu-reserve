@@ -595,9 +595,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         if student_password is not None:
             validate_password(student_password)
         admin_email = users.normalize_email(os.environ.get(ADMIN_EMAIL_ENV, DEFAULT_ADMIN_EMAIL))
+        settings = Settings()
         summary = asyncio.run(
             run(
-                Settings(),
+                settings,
                 reset_first=args.reset,
                 admin_email=admin_email,
                 admin_password=admin_password,
@@ -615,7 +616,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         f"{summary.students} students, and {summary.reservations} reservations ({statuses})."
     )
     if student_password is None:
-        print(f"Students cannot sign in: set {STUDENT_PASSWORD_ENV} to give them a password.")
+        if settings.demo_login_email is not None:
+            print(
+                f"The demo account ({settings.demo_login_email}) can sign in with "
+                "DEMO_LOGIN_PASSWORD. The other students cannot: they have random passwords."
+            )
+        else:
+            print(f"Students cannot sign in: set {STUDENT_PASSWORD_ENV} to give them a password.")
     return EXIT_OK
 
 

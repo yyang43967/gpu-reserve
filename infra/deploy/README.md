@@ -139,11 +139,11 @@ Containers restart on their own after a reboot or a crash (`restart: unless-stop
 | api | 448 MiB | 206 MiB |
 | worker | 256 MiB | 89 MiB |
 | redis | 96 MiB | 5 MiB |
-| caddy | 64 MiB | 21 MiB |
+| caddy | 96 MiB | 21 MiB (42 MiB in production) |
 | migrate (one-off, during deploys) | 256 MiB | n/a |
-| **Total** | **1,376 MiB** | **about 360 MiB** |
+| **Total** | **1,408 MiB** | **about 360 MiB** |
 
-Measured locally on this Compose file after seeding the demo data and 330 requests (availability, reservations, auth), without an OpenAI key. Postgres grows toward its 128 MB of shared buffers as real data is read. The instance has about 1.85 GiB usable; the OS, Docker, and the SSM agent take roughly 300 MiB. Containers get no swap; the host's 1 GiB swap file covers deploy-time spikes (the migration container and image extraction).
+Measured locally on this Compose file after seeding the demo data and 330 requests (availability, reservations, auth), without an OpenAI key. In production, idle after the first deploy and the seed: API 208 MiB, worker 114, Postgres 64, Caddy 42, Redis 5. Caddy uses about twice its local figure there (certificates, TLS and HTTP/3 state), so its limit was raised from 64 to 96 MiB. Postgres grows toward its 128 MB of shared buffers as real data is read. The instance has about 1.85 GiB usable; the OS, Docker, and the SSM agent take roughly 300 MiB. Containers get no swap; the host's 1 GiB swap file covers deploy-time spikes (the migration container and image extraction).
 
 ## Frontend on Vercel
 

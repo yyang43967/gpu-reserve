@@ -290,3 +290,27 @@ async def test_the_demo_account_must_be_a_seeded_student(
             now=NOW,
         )
     assert await db_session.scalar(select(func.count()).select_from(User)) == 0
+
+
+def test_the_command_says_the_demo_account_can_sign_in(
+    migrated_database_url: str,
+    clean_database: None,
+    cheap_hashing: None,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from app.seed import EXIT_OK, main
+
+    monkeypatch.setenv("DATABASE_URL", migrated_database_url)
+    monkeypatch.setenv("ADMIN_PASSWORD", PASSWORD)
+    monkeypatch.delenv("SEED_STUDENT_PASSWORD", raising=False)
+    monkeypatch.setenv("DEMO_LOGIN_EMAIL", DEMO_EMAIL)
+    monkeypatch.setenv("DEMO_LOGIN_PASSWORD", DEMO_PASSWORD)
+
+    assert main([]) == EXIT_OK
+
+    out = capsys.readouterr().out
+    assert f"The demo account ({DEMO_EMAIL}) can sign in" in out
+    assert "The other students cannot" in out
+    assert "Students cannot sign in" not in out
+    assert DEMO_PASSWORD not in out

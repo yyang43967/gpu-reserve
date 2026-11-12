@@ -2,8 +2,8 @@
 # `gpu-reserve` from /opt/gpu-reserve/current, with the env file it writes from SSM
 # Parameter Store (/opt/gpu-reserve/.env, mode 0600).
 #
-# Memory on a t4g.small (2 GiB, about 1.85 GiB usable): limits add up to 1,376 MiB,
-# leaving about 470 MiB for the OS, Docker, and the SSM agent. Containers get no swap
+# Memory on a t4g.small (2 GiB, about 1.85 GiB usable): limits add up to 1,408 MiB,
+# leaving about 440 MiB for the OS, Docker, and the SSM agent. Containers get no swap
 # (memswap_limit = mem_limit); the host's 1 GiB swap file absorbs deploy-time spikes.
 
 name: gpu-reserve
@@ -64,8 +64,10 @@ services:
     depends_on:
       api:
         condition: service_healthy
-    mem_limit: 64m
-    memswap_limit: 64m
+    # Measured at about 42 MiB idle in production, after obtaining its certificate (TLS
+    # and HTTP/3 state); 64 MiB left too little room for a burst of connections.
+    mem_limit: 96m
+    memswap_limit: 96m
 
   api:
     <<: *restart
