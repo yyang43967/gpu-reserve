@@ -19,8 +19,9 @@ unit="${1:-}"
 to="$(env_value ALERT_EMAIL)"
 from="$(env_value EMAIL_FROM)"
 region="$(env_value AWS_REGION)"
-[ -n "$to" ] && [ -n "$from" ] && [ -n "$region" ] \
-  || die "ALERT_EMAIL, EMAIL_FROM, and AWS_REGION must be set; no alert sent for $unit"
+if [ -z "$to" ] || [ -z "$from" ] || [ -z "$region" ]; then
+  die "ALERT_EMAIL, EMAIL_FROM, and AWS_REGION must be set; no alert sent for $unit"
+fi
 
 host="$(hostname)"
 journal="$(journalctl --unit "$unit" --since -2h --lines 40 --no-pager --output short-iso 2>&1 \

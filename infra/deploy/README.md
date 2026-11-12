@@ -99,6 +99,8 @@ It downloads and checks the dump, backs up the current database first (`pre-rest
 
 A failed run starts `gpu-reserve-alert@gpu-reserve-backup.service` (`OnFailure=`), which emails the last 40 journal lines of the backup to `ALERT_EMAIL` through SES with the instance role. The address is verified in SES by Terraform, so the mail arrives while the account is in the sandbox.
 
+The scripts are checked with a pinned shellcheck image, in CI and locally alike: `bash infra/deploy/tests/shellcheck.sh`.
+
 `tests/alert-test.sh` checks this under real systemd: it makes the backup fail, waits for the alert unit, and inspects the SES request a stand-in `aws` received. CI runs it on the runner; locally it needs a systemd container:
 
 ```bash

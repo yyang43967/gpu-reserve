@@ -140,9 +140,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # shellcheck and python3 are on the runner image.
+      # A pinned shellcheck image, the same one local runs use (not the runner's own).
       - name: Shellcheck
-        run: shellcheck --external-sources --source-path=SCRIPTDIR infra/deploy/*.sh infra/deploy/tests/*.sh
+        run: bash infra/deploy/tests/shellcheck.sh
 
       - name: Test deploy.sh
         run: bash infra/deploy/tests/deploy-test.sh
