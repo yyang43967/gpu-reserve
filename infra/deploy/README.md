@@ -4,7 +4,8 @@ The backend runs on one EC2 instance as a Docker Compose project: Caddy (TLS for
 
 | File | Where it runs |
 |---|---|
-| `release.sh` | A developer machine (for now) or CI: builds and pushes the image, starts a deploy, checks the result |
+| `release.sh` | A developer machine (for now) or CI: builds and pushes the image, starts a deploy, checks the result; `verify-backup` from a developer machine |
+| `verify-backup.sh` | The instance, sent by `release.sh verify-backup`: restores the newest backup into a throwaway container and checks it |
 | `deploy.sh` | The instance, as root, through SSM Run Command |
 | `backup.sh`, `restore.sh` | The instance: daily from a systemd timer, before each migration, and by hand |
 | `alert.sh` | The instance: emails the journal of a failed backup through SES |
@@ -97,9 +98,28 @@ sudo /opt/gpu-reserve/current/restore.sh postgres/2026-11-12T093012Z-daily.dump 
 
 It downloads and checks the dump, backs up the current database first (`pre-restore`; add `--no-safety-backup` only if the current database cannot be dumped), stops the API and worker, recreates the database, restores it, empties Redis (its availability cache, job queue, and rate-limit counters describe the old data), and starts the API and worker again. The site answers 502 for the minute this takes.
 
+### Verifying backups (monthly)
+
+Once a month, and after any change to the backup scripts or the Postgres image, check that the newest backup actually restores, from a laptop:
+
+```bash
+export AWS_PROFILE=gpu-reserve AWS_REGION=us-east-2
+infra/deploy/release.sh verify-backup
+```
+
+It sends `verify-backup.sh` to the instance through SSM, which never touches the production database:
+
+1. Runs `gpu-reserve-backup.service`, the daily unit, so the newest dump is minutes old.
+2. Restores that dump into a throwaway container from the production Postgres image: no network, 256 MiB, its own anonymous volume, the same `pg_restore` flags as `restore.sh`.
+3. Prints the restored copy's migration version, extensions, exclusion constraints, invalid indexes, and the row count of every table, and compares them with production (bookings written after the dump show as differences).
+4. Inserts an overlapping allocation into the copy, inside a rolled-back transaction, and passes only if `ex_gpu_allocations_no_overlap` rejects it.
+5. Removes the container, its volume, and the downloaded dump on any exit, and leftovers of a run that was killed outright at the start of the next.
+
+It takes under a minute; the copy uses about 40 MiB. The output is printed and the command fails if any step does. After a deploy that includes it, the same script also runs from a Session Manager shell: `sudo /opt/gpu-reserve/current/verify-backup.sh`.
+
 A failed run starts `gpu-reserve-alert@gpu-reserve-backup.service` (`OnFailure=`), which emails the last 40 journal lines of the backup to `ALERT_EMAIL` through SES with the instance role. The address is verified in SES by Terraform, so the mail arrives while the account is in the sandbox.
 
-The scripts are checked with a pinned shellcheck image, in CI and locally alike: `bash infra/deploy/tests/shellcheck.sh`.
+The scripts are checked with a pinned shellcheck image, in CI and locally alike: `bash infra/deploy/tests/shellcheck.sh`. `tests/release-test.sh` runs `release.sh deploy` and `verify-backup` against a stand-in `aws` that plays the SSM agent (`docker run --rm -v "$PWD:/src:ro" -w /src python:3.12-slim bash infra/deploy/tests/release-test.sh`).
 
 `tests/alert-test.sh` checks this under real systemd: it makes the backup fail, waits for the alert unit, and inspects the SES request a stand-in `aws` received. CI runs it on the runner; locally it needs a systemd container:
 
@@ -187,6 +207,6 @@ In order. Every step that creates, changes, or deletes something in AWS or DNS i
 8. **Frontend:** create the Vercel project and domain ("Frontend on Vercel"); check `https://gpu.yiyangdev.com` loads and signs in as the demo student.
 9. **End to end:** as the demo student, book a slot and ask the assistant a policy question. Register your own account with a verified address, request an H100 server, approve it as the admin, and check the email arrives.
 10. **CSP:** signed in as your own account (the demo account cannot upload), upload an avatar and check that it displays. Open every page with the browser console open: if there are no `Content-Security-Policy-Report-Only` reports, rename the header in `frontend/vercel.json` to `Content-Security-Policy`, commit, and let Vercel redeploy. Check the console again on the enforced policy.
-11. **Backups:** `sudo systemctl start gpu-reserve-backup.service`; check the dump in the backups bucket. Restore it once with `restore.sh latest --confirm` and check the demo data is intact. Test the alert path with `sudo systemctl start gpu-reserve-alert@manual-test.service`; the email should arrive.
+11. **Backups:** `release.sh verify-backup` ("Verifying backups"); it runs the daily unit and restores the dump into a throwaway container, never into production. Test the alert with a backup run that fails at the upload (a one-off unit with `OnFailure=` and a bucket name that does not exist); the email should arrive.
 12. **Load test** on the instance, and the keep-alive experiment (separate plan; the temporary t4g.micro is approved first).
 13. **CI deploys:** upgrade the account, activate advanced features, enable the OIDC deploy role, and switch deploys to CI ("Temporary: deploys from a developer machine" in `docs/decisions.md`).

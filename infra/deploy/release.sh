@@ -5,6 +5,8 @@
 #   release.sh push           build HEAD for linux/arm64 and push it, tagged with its SHA
 #   release.sh deploy <sha>   deploy that tag to the instance through SSM, then check it
 #   release.sh tags           list pushed tags, newest first, and the deployed one
+#   release.sh verify-backup  restore the newest backup into a throwaway database on
+#                             the instance and check it (verify-backup.sh); monthly
 #
 # Rollback: `release.sh deploy <earlier-sha>`. Tags are immutable, so a SHA always
 # names the image that was pushed for it; there is no `latest`.
@@ -15,6 +17,7 @@ readonly ENVIRONMENT="${ENVIRONMENT:-prod}"
 readonly REPOSITORY_NAME="$PROJECT/api"
 readonly SSM_PREFIX="/$PROJECT/$ENVIRONMENT"
 readonly DEPLOY_TIMEOUT_SECONDS=1800
+readonly VERIFY_TIMEOUT_SECONDS=900
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 readonly ROOT
@@ -79,6 +82,52 @@ instance_id() {
   printf '%s' "$id"
 }
 
+# Runs a bash script on the instance as root through SSM Run Command, waits for it,
+# and prints its output to stderr. Returns non-zero unless the command succeeded.
+# AWS-RunShellScript runs its commands with sh; the script is written to a file there
+# and run with bash, so it gets the shell it was written and tested for.
+# Callers use it as `run_on_instance ... || die`, where bash ignores `set -e` inside
+# the function, so every step that can fail returns explicitly.
+run_on_instance() {
+  local instance="$1" comment="$2" timeout="$3" script="$4" region_name parameters
+  region_name="$(region)" || return 1
+  parameters="$(python3 - "$script" "$timeout" <<'PY'
+import json, sys
+script, timeout = sys.argv[1:]
+marker = "GPU_RESERVE_SCRIPT"
+if marker in script:
+    sys.exit(f"the script must not contain {marker}")
+commands = [
+    "f=$(mktemp)",
+    f"cat >\"$f\" <<'{marker}'",
+    script.rstrip("\n"),
+    marker,
+    'bash "$f"; rc=$?; rm -f "$f"; exit $rc',
+]
+print(json.dumps({"commands": commands, "executionTimeout": [timeout]}))
+PY
+)" || return 1
+
+  local command_id
+  command_id="$(aws ssm send-command --region "$region_name" --instance-ids "$instance" \
+    --document-name AWS-RunShellScript --comment "$comment" \
+    --parameters "$parameters" --query Command.CommandId --output text)" || return 1
+  [ -n "$command_id" ] || return 1
+
+  local status="Pending" waited=0
+  while [[ "$status" =~ ^(Pending|InProgress|Delayed)$ ]]; do
+    sleep "${SSM_POLL_SECONDS:-5}"
+    waited=$((waited + ${SSM_POLL_SECONDS:-5}))
+    [ "$waited" -le "$timeout" ] || die "timed out waiting for command $command_id"
+    status="$(aws ssm get-command-invocation --region "$region_name" --command-id "$command_id" \
+      --instance-id "$instance" --query Status --output text 2>/dev/null || echo Pending)"
+  done
+  aws ssm get-command-invocation --region "$region_name" --command-id "$command_id" \
+    --instance-id "$instance" --query '[StandardOutputContent, StandardErrorContent]' --output text >&2
+  log "command $command_id finished: $status"
+  [ "$status" = "Success" ]
+}
+
 cmd_deploy() {
   local tag="${1:-}"
   check_tag "$tag"
@@ -108,27 +157,9 @@ rm -rf "\$dir" && mv "\$dir.tmp" "\$dir"
 SSM_PREFIX='$SSM_PREFIX' bash "\$dir/deploy.sh" "\$tag" "\$repo"
 EOF
 )"
-  local parameters
-  parameters="$(python3 -c 'import json, sys; print(json.dumps({"commands": [sys.argv[1]], "executionTimeout": [sys.argv[2]]}))' \
-    "$script" "$DEPLOY_TIMEOUT_SECONDS")"
-
   log "deploying $tag to $instance"
-  local command_id
-  command_id="$(aws ssm send-command --region "$region_name" --instance-ids "$instance" \
-    --document-name AWS-RunShellScript --comment "deploy $tag" \
-    --parameters "$parameters" --query Command.CommandId --output text)"
-
-  local status="Pending" waited=0
-  while [[ "$status" =~ ^(Pending|InProgress|Delayed)$ ]]; do
-    sleep 5
-    waited=$((waited + 5))
-    [ "$waited" -le "$DEPLOY_TIMEOUT_SECONDS" ] || die "timed out waiting for command $command_id"
-    status="$(aws ssm get-command-invocation --region "$region_name" --command-id "$command_id" \
-      --instance-id "$instance" --query Status --output text 2>/dev/null || echo Pending)"
-  done
-  aws ssm get-command-invocation --region "$region_name" --command-id "$command_id" \
-    --instance-id "$instance" --query '[StandardOutputContent, StandardErrorContent]' --output text >&2
-  [ "$status" = "Success" ] || die "deploy finished with status $status"
+  run_on_instance "$instance" "deploy $tag" "$DEPLOY_TIMEOUT_SECONDS" "$script" \
+    || die "deploy of $tag failed"
 
   log "checking https://$hostname/api/v1/ready"
   local attempt
@@ -143,6 +174,15 @@ EOF
   die "the API did not become ready"
 }
 
+cmd_verify_backup() {
+  local instance
+  instance="$(instance_id)"
+  log "verifying the newest backup on $instance"
+  run_on_instance "$instance" "verify backup" "$VERIFY_TIMEOUT_SECONDS" \
+    "$(cat "$ROOT/infra/deploy/verify-backup.sh")" || die "backup verification failed"
+  log "the newest backup restores and matches production"
+}
+
 cmd_tags() {
   aws ecr describe-images --region "$(region)" --repository-name "$REPOSITORY_NAME" \
     --query 'reverse(sort_by(imageDetails, &imagePushedAt))[].[imagePushedAt, imageTags[0]]' \
@@ -154,5 +194,6 @@ case "${1:-}" in
   push) cmd_push ;;
   deploy) shift; cmd_deploy "$@" ;;
   tags) cmd_tags ;;
-  *) die "usage: release.sh push | deploy <sha> | tags" ;;
+  verify-backup) cmd_verify_backup ;;
+  *) die "usage: release.sh push | deploy <sha> | tags | verify-backup" ;;
 esac
