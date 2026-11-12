@@ -154,7 +154,7 @@ The frontend is a static build served by Vercel at `https://gpu.yiyangdev.com`. 
 1. Import the repository; **Root Directory** `frontend`. Framework, install, build, and output come from `vercel.json`; the Node.js version from `engines` in `package.json` (24).
 2. Environment variables (Production):
    - `VITE_API_BASE_URL` = `https://api.gpu.yiyangdev.com/api/v1` (read at build time).
-   - `ENABLE_EXPERIMENTAL_COREPACK` = `1`, so the build uses the pnpm version in `packageManager` (12.16.1). Without it, Vercel picks pnpm by lockfile format (9.0 means pnpm 9 or 10).
+   - Nothing for pnpm: `vercel.json` runs install and build as `corepack pnpm …`, which uses the version pinned (with its hash) in `packageManager`, 12.16.1. Vercel's own pnpm selection is bypassed, so `ENABLE_EXPERIMENTAL_COREPACK` is not needed.
 3. Production branch `main`. `vercel.json` turns off deployments for every other branch: the API's CORS policy allows only the production origin, so a preview could not sign in anyway.
 4. Domains: add `gpu.yiyangdev.com`, then in Cloudflare a `CNAME gpu → cname.vercel-dns.com`, **DNS only**. The API's `CORS_ORIGINS` and `FRONTEND_URL` (set by Terraform) already name this origin.
 
