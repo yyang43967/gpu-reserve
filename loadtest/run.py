@@ -500,6 +500,9 @@ def target() -> dict[str, Any]:
     return found
 
 
+COMMIT_UNKNOWN = "commit unknown"
+
+
 def source_commit() -> tuple[str, bool | None]:
     """The commit being run, and whether the tree had changes. A source archive (as on
     the load-test driver) has no Git metadata; upload-source.sh stamps its commit in a
@@ -542,6 +545,14 @@ def machine() -> dict[str, Any]:
     ).stdout.split(maxsplit=2)
     k6 = subprocess.run(["k6", "version"], capture_output=True, text=True, check=False)
     commit, dirty = source_commit()
+    if not commit:
+        print(
+            "warning: the commit under test is unknown (no COMMIT file and no Git checkout);"
+            f" this run's results are marked {COMMIT_UNKNOWN!r}",
+            file=sys.stderr,
+            flush=True,
+        )
+        commit = COMMIT_UNKNOWN
     return {
         "host": {
             "model": sysctl("hw.model"),
