@@ -30,8 +30,24 @@ connections and commits four times a second.
 The cache hit rate is measured in separate runs with counting turned on, because
 counting adds a Redis round trip to every read; those runs' latencies are not reported.
 
-Results go to loadtest/out/<UTC time>/ (ignored by Git); `report.py` summarizes them.
-Standard library only, so it runs with the system python3. Needs docker and k6.
+Results go to loadtest/out/<UTC time>[-label]/ (ignored by Git); `report.py`
+summarizes them. Standard library only, so it runs with the system python3. Needs docker
+and k6.
+
+By default it drives docker-compose.loadtest.yml on this machine. On a twin of the
+production instance (loadtest/instance/README.md), name the Compose files, project, and
+env file, point --base-url at the twin, and set DOCKER_HOST to reach its Docker:
+
+    DOCKER_HOST=ssh://ec2-user@<twin> python3 loadtest/run.py --no-build \
+        --compose-file infra/deploy/compose.yml --compose-file loadtest/compose.instance.yml \
+        --project gpu-reserve-loadtest --env-file /opt/gpu-reserve-loadtest/.env \
+        --base-url http://<twin>:80 --label burst
+
+`--soak 30m --soak-rates ... --settle 10m` instead runs the memory soak (soak.js) and
+nothing else.
+
+Container memory is sampled with CPU, so a run's samples show how the API and worker
+grew under load.
 """
 # A host script that drives docker and k6 found on PATH, with fixed arguments.
 # ruff: noqa: S603, S607
@@ -61,14 +77,21 @@ from analysis import (
     TIMED_SCRIPTS,
     capacity,
     median,
+    memory_mib,
+    memory_trend,
     seconds,
     steps,
 )
 
 ROOT = Path(__file__).resolve().parent.parent
 HERE = ROOT / "loadtest"
+# Set from the command line in main(); these are the local stack's.
 COMPOSE = ["docker", "compose", "-f", str(ROOT / "docker-compose.loadtest.yml")]
 BASE_URL = "http://127.0.0.1:18100"
+LOCAL_LIMITS = "postgres 1.0 CPU / 768 MiB, api 0.75 CPU / 512 MiB, redis 0.25 CPU / 128 MiB"
+# Containers whose CPU and memory are sampled, when the stack has them (the local
+# stack has no worker or Caddy).
+SAMPLED_SERVICES = ("api", "postgres", "worker", "caddy", "redis")
 ALL_SCRIPTS = (*TIMED_SCRIPTS, "booking_race")
 # Scripts that read through the cache, and so get a hit-rate run.
 CACHED_SCRIPTS = ("availability", "slot_search")
@@ -192,18 +215,22 @@ def loadtest_command(*args: str) -> dict[str, Any]:
 
 @dataclass
 class Sampler:
-    """Samples container CPU and Postgres activity once a second in the background."""
+    """Samples container CPU and memory about once a second, and Postgres activity four
+    times a second, in the background."""
 
     started: float = field(default_factory=time.time)
     cpu: list[dict[str, Any]] = field(default_factory=list)
+    memory: list[dict[str, Any]] = field(default_factory=list)
     postgres: list[dict[str, Any]] = field(default_factory=list)
     _stop: threading.Event = field(default_factory=threading.Event)
     _threads: list[threading.Thread] = field(default_factory=list)
     _stats: subprocess.Popen[str] | None = None
 
     def start(self) -> None:
-        names = [compose("ps", "-q", service).strip() for service in ("api", "postgres")]
-        self._names = dict(zip(names, ("api", "postgres"), strict=True))
+        running = compose("ps", "--services").split()
+        services = [service for service in SAMPLED_SERVICES if service in running]
+        names = [compose("ps", "-q", service).strip() for service in services]
+        self._names = dict(zip(names, services, strict=True))
         self._stats = subprocess.Popen(
             ["docker", "stats", "--format", "{{json .}}", *names],
             stdout=subprocess.PIPE,
@@ -221,7 +248,12 @@ class Sampler:
             self._stats.terminate()
         for thread in self._threads:
             thread.join(timeout=5)
-        return {"started": self.started, "cpu": self.cpu, "postgres": self.postgres}
+        return {
+            "started": self.started,
+            "cpu": self.cpu,
+            "memory": self.memory,
+            "postgres": self.postgres,
+        }
 
     def _read_cpu(self) -> None:
         if self._stats is None or self._stats.stdout is None:
@@ -240,13 +272,14 @@ class Sampler:
             service = self._names.get(row.get("Container", ""))
             if service is None:
                 continue
+            now = time.time()
             self.cpu.append(
-                {
-                    "t": time.time(),
-                    "service": service,
-                    "cpu_percent": float(row["CPUPerc"].rstrip("%")),
-                }
+                {"t": now, "service": service, "cpu_percent": float(row["CPUPerc"].rstrip("%"))}
             )
+            with contextlib.suppress(ValueError):
+                self.memory.append(
+                    {"t": now, "service": service, "mem_mib": memory_mib(row["MemUsage"])}
+                )
 
     def _poll_postgres(self) -> None:
         """One psql session for the whole run, so sampling costs one connection and no
@@ -312,6 +345,8 @@ def run_k6(
         **mode,
     }
     command = ["k6", "run", "--quiet", "--no-color"]
+    if script == "soak":
+        env |= {"SOAK": args.soak, "SOAK_RATES": format_rates(args.soak_rates)}
     for key, value in env.items():
         command += ["-e", f"{key}={value}"]
     command.append(str(HERE / f"{script}.js"))
@@ -394,6 +429,77 @@ def hit_rate_run(script: str, out: Path, args: argparse.Namespace, mode: dict[st
     print(f"  hit rate {script}: {result}")
 
 
+def soak_run(out: Path, args: argparse.Namespace) -> None:
+    """The memory soak: soak.js at fixed rates for --soak, then --settle with no load,
+    sampling all along. The API is restarted once, before the load, and not again."""
+    run_dir = out / "soak"
+    run_dir.mkdir(parents=True)
+    configure("cache-on")
+    fresh_api()
+    fixture = run_dir / "fixture.json"
+    data = loadtest_command("seed")
+    fixture.write_text(json.dumps(data))
+    warm_up(data)
+    sampler = Sampler()
+    sampler.start()
+    try:
+        started = run_k6("soak", run_dir, fixture, args, {})
+        print(f"  soak load done; settling for {args.settle}", flush=True)
+        time.sleep(seconds(args.settle))
+    finally:
+        samples = sampler.stop()
+    samples["k6_started"] = started
+    (run_dir / "samples.json").write_text(json.dumps(samples))
+    load_seconds = seconds(args.soak)
+    trends = {
+        service: memory_trend(samples["memory"], service, started, load_seconds)
+        for service in sorted({s["service"] for s in samples["memory"]})
+    }
+    meta = {
+        "kind": "soak",
+        "soak": args.soak,
+        "settle": args.settle,
+        "rates": args.soak_rates,
+        "counts": data["counts"],
+        "memory": trends,
+    }
+    (run_dir / "run.json").write_text(json.dumps(meta, indent=2, default=str))
+    log = (run_dir / "k6.log").read_text().strip().replace("\n", "\n    ")
+    print(f"  soak:\n    {log}", flush=True)
+    for service, trend in trends.items():
+        print(f"  memory {service}: " + ", ".join(f"{k} {v:.1f}" for k, v in trend.items()))
+
+
+def target() -> dict[str, Any]:
+    """What the run was pointed at: Compose command, base URL, Docker host, and the
+    API's and Caddy's effective settings (uvicorn flags, upstream keep-alive)."""
+    found: dict[str, Any] = {
+        "compose": COMPOSE,
+        "base_url": BASE_URL,
+        "docker_host": os.environ.get("DOCKER_HOST", ""),
+    }
+    running = compose("ps", "--services").split()
+    for service in (s for s in ("api", "caddy") if s in running):
+        container = compose("ps", "-q", service).strip()
+        inspected = subprocess.run(
+            [
+                "docker",
+                "inspect",
+                container,
+                "--format",
+                "{{json .Config.Cmd}}|{{json .HostConfig.CgroupParent}}",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        command, cgroup = inspected.split("|", 1)
+        found[service] = {"command": json.loads(command), "cgroup_parent": json.loads(cgroup)}
+    for name in ("API_KEEP_ALIVE_SECONDS", "API_UPSTREAM_KEEPALIVE"):
+        found[name] = os.environ.get(name, "")
+    return found
+
+
 def machine() -> dict[str, Any]:
     def sysctl(name: str) -> str:
         try:
@@ -469,6 +575,10 @@ def latency_rates(
     return rates | overrides
 
 
+def format_rates(rates: dict[str, float]) -> str:
+    return ",".join(f"{name}={value}" for name, value in rates.items())
+
+
 def parse_rates(text: str) -> dict[str, float]:
     rates = {}
     for item in filter(None, text.split(",")):
@@ -480,6 +590,8 @@ def parse_rates(text: str) -> dict[str, float]:
 
 
 def main() -> int:
+    # The target is chosen on the command line; every helper uses these.
+    global COMPOSE, BASE_URL
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--scripts", default=",".join(ALL_SCRIPTS))
     parser.add_argument("--repeats", type=int, default=3)
@@ -506,9 +618,49 @@ def main() -> int:
         action="store_true",
         help="stop after the capacity runs: no latency runs, race, or hit-rate runs",
     )
+    parser.add_argument(
+        "--compose-file",
+        action="append",
+        type=Path,
+        help="Compose file to drive instead of docker-compose.loadtest.yml (repeatable)",
+    )
+    parser.add_argument("--project", help="Compose project name, with --compose-file")
+    parser.add_argument("--env-file", type=Path, help="Compose env file, with --compose-file")
+    parser.add_argument("--base-url", default=BASE_URL, help="API origin k6 sends to")
+    parser.add_argument("--no-build", action="store_true", help="use the image as it is")
+    parser.add_argument("--label", default="", help="appended to the results directory")
+    parser.add_argument("--soak", help="run only the memory soak for this long, e.g. 30m")
+    parser.add_argument(
+        "--soak-rates",
+        type=parse_rates,
+        default={},
+        help="soak iterations/s per script, e.g. browse_servers=10,availability=40,slot_search=4",
+    )
+    parser.add_argument("--settle", default="10m", help="sampling after the soak's load")
+    parser.add_argument(
+        "--configs",
+        default=",".join(CONFIGS),
+        help="cache configurations to run, e.g. cache-on (default: both)",
+    )
     args = parser.parse_args()
-    for duration in (args.warmup, args.measure):
+    for duration in (args.warmup, args.measure, args.settle, *([args.soak] if args.soak else [])):
         seconds(duration)
+    if args.soak and set(args.soak_rates) != set(TIMED_SCRIPTS):
+        parser.error(f"--soak needs --soak-rates for {', '.join(TIMED_SCRIPTS)}")
+    configs = [c for c in args.configs.split(",") if c]
+    if not configs or set(configs) - set(CONFIGS):
+        parser.error(f"--configs takes {', '.join(CONFIGS)}")
+    if (args.project or args.env_file) and not args.compose_file:
+        parser.error("--project and --env-file go with --compose-file")
+    if args.compose_file:
+        COMPOSE = ["docker", "compose"]
+        if args.project:
+            COMPOSE += ["-p", args.project]
+        for path in args.compose_file:
+            COMPOSE += ["-f", str(path.resolve())]
+        if args.env_file:
+            COMPOSE += ["--env-file", str(args.env_file)]
+    BASE_URL = args.base_url.rstrip("/")
     scripts = [s for s in args.scripts.split(",") if s]
     unknown = set(scripts) - set(ALL_SCRIPTS)
     if unknown:
@@ -518,34 +670,45 @@ def main() -> int:
     timed = [s for s in scripts if s in TIMED_SCRIPTS]
     to_ramp = [] if args.capacity_from else [s for s in timed if s not in args.rates]
 
-    out = HERE / "out" / datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    name = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ") + (f"-{args.label}" if args.label else "")
+    out = HERE / "out" / name
     out.mkdir(parents=True)
-    print(f"building and starting the stack; results in {out}", flush=True)
-    compose("build", "api")
+    print(f"starting the stack; results in {out}", flush=True)
+    if not args.no_build:
+        compose("build", "api")
     meta: dict[str, Any] = {
         "started": datetime.now(UTC).isoformat(),
         "args": vars(args),
         "ramp_max": {s: RAMP_MAX[s] for s in to_ramp},
         "capacity_from": str(args.capacity_from) if args.capacity_from else None,
         "machine": machine(),
-        "limits": "postgres 1.0 CPU / 768 MiB, api 0.75 CPU / 512 MiB, redis 0.25 CPU / 128 MiB",
+        "limits": LOCAL_LIMITS if not args.compose_file else "as in the Compose files",
     }
     (out / "meta.json").write_text(json.dumps(meta, indent=2, default=str))
     try:
+        configure("cache-on")
+        meta["target"] = target()
+        (out / "meta.json").write_text(json.dumps(meta, indent=2, default=str))
+        if args.soak:
+            soak_run(out, args)
+            print(f"done: {out}")
+            return 0
         sustained: dict[str, list[float]] = {s: [] for s in to_ramp}
         if args.capacity_from:
             fixed = [s for s in timed if s not in args.rates]
             sustained = earlier_capacity(args.capacity_from, fixed, args)
             meta["clean_sustained"] = sustained
         for repeat in range(1, args.repeats + 1):
-            for config in CONFIGS:
+            for config in configs:
                 if not to_ramp:
                     break
                 configure(config)
                 for script in to_ramp:
                     mode = {"MODE": "capacity", "RAMP_MAX": str(RAMP_MAX[script])}
                     summary = one_run(script, config, repeat, out, args, mode)
-                    if config == "cache-off":
+                    # The latency rate comes from the uncached runs, or the cached ones
+                    # when only those run.
+                    if config == configs[0]:
                         sustained[script].append(clean_sustained(summary, script, args))
 
         rates = latency_rates(sustained, args.rates)
@@ -557,7 +720,7 @@ def main() -> int:
             return 0
 
         for repeat in range(1, args.repeats + 1):
-            for config in CONFIGS:
+            for config in configs:
                 configure(config)
                 for script in timed:
                     mode = {"MODE": "latency", "RATE": str(rates[script])}

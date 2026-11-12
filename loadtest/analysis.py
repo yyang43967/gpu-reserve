@@ -120,3 +120,52 @@ def pooled_sustained(runs: list[list[dict[str, float]]]) -> float:
         ):
             passing.append(step["offered_rps"])
     return max(passing)
+
+
+MEMORY_UNITS = {
+    "B": 1 / 2**20,
+    "KiB": 1 / 2**10,
+    "MiB": 1.0,
+    "GiB": 2**10,
+    "kB": 1e3 / 2**20,
+    "MB": 1e6 / 2**20,
+    "GB": 1e9 / 2**20,
+}
+
+
+def memory_mib(usage: str) -> float:
+    """MiB from docker stats' MemUsage, e.g. "219.2MiB / 448MiB" -> 219.2."""
+    match = re.match(r"\s*([\d.]+)\s*([KMG]i?B|[kMG]B|B)", usage)
+    if not match:
+        raise ValueError(f"unrecognized memory usage: {usage!r}")
+    return float(match[1]) * MEMORY_UNITS[match[2]]
+
+
+def memory_trend(
+    samples: list[dict[str, Any]], service: str, load_start: float, load_seconds: float
+) -> dict[str, float]:
+    """Where a container's memory stood at the start of the load, at its end, and after
+    it settled, and how fast it grew over the second half of the load (MiB per 10
+    minutes, least squares). Steady growth through the second half suggests a leak;
+    a slope near zero after an early rise is warm-up."""
+    rows = [(s["t"] - load_start, s["mem_mib"]) for s in samples if s["service"] == service]
+    load_end = load_seconds
+
+    def window(start: float, end: float) -> float:
+        values = [mib for t, mib in rows if start <= t < end]
+        return statistics.median(values) if values else float("nan")
+
+    second_half = [(t, mib) for t, mib in rows if load_end / 2 <= t < load_end]
+    slope = float("nan")
+    if len(second_half) >= 2:
+        times = [t for t, _ in second_half]
+        values = [mib for _, mib in second_half]
+        slope = statistics.linear_regression(times, values).slope * 600
+    last = max((t for t, _ in rows), default=load_end)
+    return {
+        "first_minute_mib": window(0, 60),
+        "last_minute_of_load_mib": window(load_end - 60, load_end),
+        "after_settling_mib": window(last - 60, last + 1),
+        "peak_mib": max((mib for _, mib in rows), default=float("nan")),
+        "second_half_slope_mib_per_10min": slope,
+    }
