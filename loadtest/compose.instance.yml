@@ -1,0 +1,32 @@
+# Load test on a twin of the production instance (loadtest/instance/README.md).
+#
+# Applied on top of the production infra/deploy/compose.yml, as its own Compose
+# project, so the twin runs the production stack (Caddy, API, worker, Postgres, Redis,
+# same image, limits, and uvicorn flags) with only these differences:
+#
+# - ENVIRONMENT=test, which `python -m app.loadtest seed` requires (it resets the
+#   database), plus the runner's cache settings and long-lived load-test tokens;
+# - mail to the seeded domain is suppressed, so the worker never calls SES (the twin's
+#   role cannot either);
+# - the API's port is published for the direct-to-uvicorn arm of the keep-alive
+#   experiment (the twin's security group admits only the k6 driver).
+#
+#   docker compose -p gpu-reserve-loadtest -f infra/deploy/compose.yml \
+#     -f loadtest/compose.instance.yml --env-file <env file> up -d --wait
+
+x-loadtest-env: &loadtest-env
+  ENVIRONMENT: test
+  AVAILABILITY_CACHE_ENABLED: ${AVAILABILITY_CACHE_ENABLED:-true}
+  AVAILABILITY_CACHE_STATS: ${AVAILABILITY_CACHE_STATS:-false}
+  LOADTEST_TOKEN_TTL_MINUTES: "120"
+  ASSISTANT_MODEL: scripted:e2e
+  EMAIL_SUPPRESSED_DOMAINS: loadtest.example.edu
+
+services:
+  api:
+    environment: *loadtest-env
+    ports:
+      - "${API_DIRECT_PORT:-8000}:8000"
+
+  worker:
+    environment: *loadtest-env

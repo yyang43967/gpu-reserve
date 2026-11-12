@@ -1,0 +1,22 @@
+# Simulated CPU baseline of a t4g.small, added after compose.instance.yml.
+#
+# In standard credit mode, once its credits are spent a t4g.small runs at its baseline:
+# 20% of each of its 2 vCPUs, 0.4 of a vCPU for everything on the instance. Production
+# sets no per-container CPU limits, so the containers share whatever the instance has.
+# To reproduce that without draining the credit balance (hours), every container goes
+# into one systemd slice capped at 40% of a CPU (`twin-setup.sh` creates it); they
+# compete for that share the way they would on a throttled instance. Only the
+# containers are capped, not the OS, Docker, or the SSM agent, so the simulation is
+# slightly generous.
+
+services:
+  caddy:
+    cgroup_parent: loadtest-baseline.slice
+  api:
+    cgroup_parent: loadtest-baseline.slice
+  worker:
+    cgroup_parent: loadtest-baseline.slice
+  postgres:
+    cgroup_parent: loadtest-baseline.slice
+  redis:
+    cgroup_parent: loadtest-baseline.slice

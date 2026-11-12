@@ -181,7 +181,7 @@ export function writeSummary(data) {
 
 function summaryLine(data) {
   const lines = [];
-  const labels = ["phase:warmup", "phase:measure"];
+  const labels = ["phase:warmup", "phase:measure", "phase:soak"];
   for (let step = 1; step <= STEPS; step++) labels.push(`step:${step}`);
   for (const label of labels) {
     const duration = data.metrics[`http_req_duration{${label}}`];

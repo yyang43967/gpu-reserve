@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Shellcheck for the deploy scripts with one pinned version, so CI and local runs
+# Shellcheck for the deploy and load-test scripts with one pinned version, so CI and local runs
 # cannot disagree. CI runs this script; locally, from anywhere in the repository:
 #   bash infra/deploy/tests/shellcheck.sh
 # Needs Docker. Raising the version is a deliberate change here.
@@ -11,4 +11,4 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 cd "$ROOT"
 exec docker run --rm -v "$ROOT:/src:ro" -w /src "$IMAGE" \
   --external-sources --source-path=SCRIPTDIR \
-  infra/deploy/*.sh infra/deploy/tests/*.sh
+  infra/deploy/*.sh infra/deploy/tests/*.sh loadtest/instance/*.sh
