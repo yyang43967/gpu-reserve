@@ -1,4 +1,5 @@
 import "./index.css";
+import "@/lib/zod-config";
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { StrictMode } from "react";
