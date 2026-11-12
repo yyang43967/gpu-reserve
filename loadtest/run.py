@@ -500,6 +500,31 @@ def target() -> dict[str, Any]:
     return found
 
 
+def source_commit() -> tuple[str, bool | None]:
+    """The commit being run, and whether the tree had changes. A source archive (as on
+    the load-test driver) has no Git metadata; upload-source.sh stamps its commit in a
+    COMMIT file and only archives a clean tree."""
+    stamped = ROOT / "COMMIT"
+    if stamped.is_file():
+        return stamped.read_text().strip(), False
+    try:
+        head = subprocess.run(
+            ["git", "-C", str(ROOT), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        status = subprocess.run(
+            ["git", "-C", str(ROOT), "status", "--porcelain"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return "", None
+    return head.stdout.strip(), bool(status.stdout.strip())
+
+
 def machine() -> dict[str, Any]:
     def sysctl(name: str) -> str:
         try:
@@ -516,17 +541,12 @@ def machine() -> dict[str, Any]:
         check=False,
     ).stdout.split(maxsplit=2)
     k6 = subprocess.run(["k6", "version"], capture_output=True, text=True, check=False)
-    git = subprocess.run(
-        ["git", "-C", str(ROOT), "rev-parse", "HEAD"], capture_output=True, text=True, check=False
-    )
-    dirty = subprocess.run(
-        ["git", "-C", str(ROOT), "status", "--porcelain"], capture_output=True, text=True
-    )
+    commit, dirty = source_commit()
     return {
         "host": {
             "model": sysctl("hw.model"),
             "cpu": sysctl("machdep.cpu.brand_string"),
-            "cores": sysctl("hw.ncpu"),
+            "cores": sysctl("hw.ncpu") or str(os.cpu_count() or ""),
             "memory_bytes": sysctl("hw.memsize"),
             "os": platform.platform(),
         },
@@ -536,8 +556,8 @@ def machine() -> dict[str, Any]:
             "os": docker[2].strip() if len(docker) > 2 else "",
         },
         "k6": k6.stdout.strip(),
-        "commit": git.stdout.strip(),
-        "dirty": bool(dirty.stdout.strip()),
+        "commit": commit,
+        "dirty": dirty,
     }
 
 
