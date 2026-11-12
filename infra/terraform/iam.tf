@@ -39,10 +39,15 @@ data "aws_iam_policy_document" "api" {
     resources = [aws_ecr_repository.api.arn]
   }
 
+  # GetParametersByPath is authorized against the path itself; GetParameter(s) against
+  # each parameter under it. Both ARNs are needed.
   statement {
-    sid       = "ReadParameters"
-    actions   = ["ssm:GetParametersByPath", "ssm:GetParameters", "ssm:GetParameter"]
-    resources = ["arn:${local.partition}:ssm:${var.region}:${local.account_id}:parameter${local.ssm_prefix}/*"]
+    sid     = "ReadParameters"
+    actions = ["ssm:GetParametersByPath", "ssm:GetParameters", "ssm:GetParameter"]
+    resources = [
+      "arn:${local.partition}:ssm:${var.region}:${local.account_id}:parameter${local.ssm_prefix}",
+      "arn:${local.partition}:ssm:${var.region}:${local.account_id}:parameter${local.ssm_prefix}/*",
+    ]
   }
 
   statement {
