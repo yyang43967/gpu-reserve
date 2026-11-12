@@ -56,7 +56,8 @@ case "${1:-}" in
   status)
     label="${2:?label}"
     unit="loadtest-$label"
-    echo "$unit: $(systemctl show -p ActiveState,Result,ExecMainStatus --value "$unit" | paste -sd ' ')"
+    # KEY=VALUE pairs: systemctl prints properties in its own order, not the one asked.
+    echo "$unit: $(systemctl show -p ActiveState -p Result -p ExecMainStatus "$unit" | sort | paste -sd ' ')"
     tail -n "${LINES_SHOWN:-25}" "$DIR/logs/$label.log" 2>/dev/null || echo "(no log yet)"
     ;;
   *)
