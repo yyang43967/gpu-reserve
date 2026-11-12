@@ -37,3 +37,55 @@ def test_tracing_needs_both_keys() -> None:
         langfuse_public_key="pk-lf-test",  # type: ignore[arg-type]
         langfuse_secret_key="sk-lf-test",  # type: ignore[arg-type]
     ).tracing_enabled
+
+
+SECRET_SENTINEL = "sk-proj-sentinel-0123456789abcdefghijklmnop"
+
+
+def test_a_missing_setting_does_not_echo_the_others(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("JWT_SECRET", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", SECRET_SENTINEL)
+
+    with pytest.raises(ValidationError) as caught:
+        Settings(_env_file=None)  # type: ignore[call-arg]
+
+    # pydantic shortens long inputs in the middle, so a leak can be a prefix only:
+    # check that no input is printed at all, not just that the whole key is absent.
+    for text in (str(caught.value), repr(caught.value)):
+        assert "jwt_secret" in text
+        assert "input_value" not in text
+        assert SECRET_SENTINEL[:8] not in text
+
+
+def test_a_rejected_url_does_not_echo_its_password(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Connection URLs are not SecretStr, so a rejected one would print its password.
+    password = "pw-4821"
+    monkeypatch.setenv("DATABASE_URL", f"mysql://u:{password}@db/app")
+
+    with pytest.raises(ValidationError) as caught:
+        Settings(_env_file=None)  # type: ignore[call-arg]
+
+    for text in (str(caught.value), repr(caught.value)):
+        assert "database_url" in text
+        assert "input_value" not in text
+        assert password not in text
+
+
+@pytest.mark.parametrize(
+    "values",
+    [{"demo_login_email": "demo@example.edu"}, {"demo_login_password": "demo-password-123"}],
+)
+def test_demo_login_needs_both_email_and_password(values: dict[str, str]) -> None:
+    with pytest.raises(ValidationError, match="DEMO_LOGIN_EMAIL and DEMO_LOGIN_PASSWORD"):
+        Settings(**values)  # type: ignore[arg-type]
+
+
+def test_suppressed_email_domains_are_split_and_lowercased(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("EMAIL_SUPPRESSED_DOMAINS", "Example.edu, example.org ,")
+
+    assert Settings(_env_file=None).email_suppressed_domains == [  # type: ignore[call-arg]
+        "example.edu",
+        "example.org",
+    ]

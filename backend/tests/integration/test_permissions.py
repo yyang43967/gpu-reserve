@@ -149,6 +149,8 @@ MATRIX = [
         Access.PUBLIC,
         body=lambda ctx: {"email": ctx.target.email, "password": PASSWORD},
     ),
+    # These tests configure no demo account, so the route answers 404 once reached.
+    RouteCase("GET", "/auth/demo", Access.PUBLIC, accepted=frozenset({404})),
     RouteCase("POST", "/auth/refresh", Access.REFRESH_COOKIE),
     RouteCase("POST", "/auth/logout", Access.AUTHENTICATED),
     RouteCase("GET", "/me", Access.AUTHENTICATED),

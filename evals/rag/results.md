@@ -265,3 +265,11 @@ The assistant does not embed the user's message. It calls `search_policies` with
 - **Decision:** no separate rewriting step before retrieval. Both conditions find a gold section for 17/19 questions; at rank 1 the assistant's query does slightly better (hit@1 9/19 against 8/19 for the raw question), which is within the margin. The assistant already writes its own query, and an extra model call per search would add latency and cost for no measurable gain on this set. The useful lesson is that the model's query sometimes adds context the user did not ask about (n08, n12); the prompt tells it to use a self-contained question in the policies' terms.
 - **Higher than the Phase 6 blind subset (7/10)**, likely because the author knew the rules, as above. The roughly 70% estimate for questions from people who have never read anything about the rules stands.
 - **Cost:** the 19 model calls used 27,429 input and 725 output tokens (reasoning included), at most $0.024 at list prices; the embeddings are negligible. The run was done by hand against the live API; replaying it from recorded embeddings belongs with the evaluation runner.
+
+## Follow-up: no margin on the acceptance gate
+The acceptance set passes at exactly the requirement, 27/30, and rerunning it on 2026-11-11 (the manual evaluation workflow's steps, against a fresh database) gave the same 27/30. One more miss fails the gate and the hit-rate test in CI. Anything that moves scores can do that: an edit to `kb/`, a new embedding model, or a change to chunking.
+
+What would add margin, within the rules at the top of this file (decisions come from the dev set and the blind sets; acceptance is a gate, not a tuning set):
+- Look at the three remaining misses (b03, b04, b05) for a shared failure mode, using dev and blind questions of the same kind rather than the acceptance questions themselves.
+- Try hybrid retrieval (Postgres full-text rank combined with vector similarity), measured on the dev set and the Phase 7 blind set. b04 and b05 use the documents' own words ("active", "waiting for an admin") that a lexical match would weight.
+- Write a second blind set to check whether any gain carries over to questions nobody has tuned against.

@@ -24,6 +24,8 @@ from app.api import (
 )
 from app.core.config import Settings, get_settings
 from app.core.errors import register_error_handlers
+from app.core.logging import configure_logging
+from app.core.request_context import RequestContextMiddleware
 from app.db.session import create_engine, create_session_factory
 from app.rag.embeddings import Embedder
 from app.services.availability_cache import build_availability_cache
@@ -47,6 +49,7 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        configure_logging(settings)
         engine = create_engine(settings)
         redis = Redis.from_url(str(settings.redis_url))
         app.state.engine = engine
@@ -82,6 +85,9 @@ def create_app(
         allow_methods=CORS_ALLOWED_METHODS,
         allow_headers=CORS_ALLOWED_HEADERS,
     )
+    # Outermost, so every response carries the request id and is in the access log,
+    # including CORS rejections and 500s.
+    app.add_middleware(RequestContextMiddleware)
 
     app.include_router(health.router, prefix=API_PREFIX)
     app.include_router(auth.router, prefix=API_PREFIX)

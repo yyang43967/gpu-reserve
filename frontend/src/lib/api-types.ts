@@ -15,6 +15,12 @@ export interface User {
   created_at: string;
 }
 
+/** The public demo account, shown on the sign-in page. */
+export interface DemoLogin {
+  email: string;
+  password: string;
+}
+
 export interface TokenResponse {
   access_token: string;
   token_type: "bearer";

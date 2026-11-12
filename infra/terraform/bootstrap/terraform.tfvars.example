@@ -1,0 +1,2 @@
+# Copy to terraform.tfvars (not committed).
+region = "us-east-2"

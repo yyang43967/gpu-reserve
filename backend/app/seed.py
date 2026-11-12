@@ -1,6 +1,7 @@
-"""Demo data for local development and evaluations.
+"""Demo data for local development, evaluations, and the public demo deployment.
 
     ADMIN_PASSWORD=... SEED_STUDENT_PASSWORD=... python -m app.seed [--reset]
+    ADMIN_PASSWORD=... python -m app.seed --allow-production    # the demo deployment
 
 Creates 3 labs in different time zones, 10 servers across the GPU models (H100 servers
 need approval, one server is in maintenance), 1 admin, 8 students, and about 30
@@ -15,6 +16,12 @@ Passwords come from the environment, never from arguments or the code:
 - ADMIN_PASSWORD (required), like `python -m app.cli create-admin`;
 - SEED_STUDENT_PASSWORD (optional) for all students. Without it, students get a random
   password nobody knows, and only the admin can sign in.
+- The demo account (DEMO_LOGIN_EMAIL and DEMO_LOGIN_PASSWORD, from the settings) gets its
+  own password. It must be one of the seeded students.
+
+Production is refused unless --allow-production is given, and even then --reset and
+SEED_STUDENT_PASSWORD are refused: the seed never deletes production data, and only the
+demo account gets a password anyone knows.
 """
 
 import argparse
@@ -412,8 +419,18 @@ async def seed(
     admin_password: str,
     student_password: str | None,
     quota_zone: ZoneInfo,
+    demo_login: tuple[str, str] | None = None,
 ) -> SeedSummary:
-    """Create the demo data in the session's transaction. The caller commits."""
+    """Create the demo data in the session's transaction. The caller commits.
+
+    `demo_login` is (email, password) for the student that serves as the public demo
+    account; it must be one of STUDENTS."""
+    demo_email, demo_password = demo_login or (None, None)
+    if demo_email is not None and demo_email not in {email for _, email in STUDENTS}:
+        raise CommandError(
+            f"The demo account {demo_email} is not one of the seeded students: "
+            + ", ".join(email for _, email in STUDENTS)
+        )
     admin = await users.create_user(
         session,
         email=admin_email,
@@ -425,11 +442,19 @@ async def seed(
         await users.create_user(
             session,
             email=email,
-            password=student_password or secrets.token_urlsafe(32),
+            password=(
+                demo_password
+                if email == demo_email and demo_password is not None
+                else student_password or secrets.token_urlsafe(32)
+            ),
             full_name=name,
         )
         for name, email in STUDENTS
     ]
+
+    for student in students:
+        # The flag that protects the shared account and lets the daily job reset it.
+        student.is_demo = student.email == demo_email
 
     lab_ids: dict[str, tuple[uuid.UUID, ZoneInfo]] = {}
     for spec in LABS:
@@ -503,9 +528,26 @@ async def run(
     admin_password: str,
     student_password: str | None,
     now: datetime,
+    allow_production: bool = False,
 ) -> SeedSummary:
     if settings.environment is Environment.PRODUCTION:
-        raise CommandError("Refusing to seed demo data in production.")
+        if not allow_production:
+            raise CommandError(
+                "Refusing to seed demo data in production. For a demo deployment, add "
+                "--allow-production."
+            )
+        if reset_first:
+            raise CommandError("--reset is refused in production: it deletes every table.")
+        if student_password is not None:
+            raise CommandError(
+                f"{STUDENT_PASSWORD_ENV} is refused in production: only the demo account "
+                "gets a password anyone knows."
+            )
+    demo_login = None
+    if settings.demo_login_email is not None and settings.demo_login_password is not None:
+        demo_password = settings.demo_login_password.get_secret_value()
+        validate_password(demo_password)
+        demo_login = (settings.demo_login_email, demo_password)
     engine = create_engine(settings)
     try:
         async with create_session_factory(engine)() as session, session.begin():
@@ -522,6 +564,7 @@ async def run(
                 admin_password=admin_password,
                 student_password=student_password,
                 quota_zone=settings.quota_zone,
+                demo_login=demo_login,
             )
     finally:
         await engine.dispose()
@@ -536,6 +579,11 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Delete all existing data first. Without it, a database with users is refused.",
     )
+    parser.add_argument(
+        "--allow-production",
+        action="store_true",
+        help="Seed with ENVIRONMENT=production, for a public demo. Refused with --reset.",
+    )
     return parser
 
 
@@ -547,14 +595,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         if student_password is not None:
             validate_password(student_password)
         admin_email = users.normalize_email(os.environ.get(ADMIN_EMAIL_ENV, DEFAULT_ADMIN_EMAIL))
+        settings = Settings()
         summary = asyncio.run(
             run(
-                Settings(),
+                settings,
                 reset_first=args.reset,
                 admin_email=admin_email,
                 admin_password=admin_password,
                 student_password=student_password,
                 now=datetime.now(UTC),
+                allow_production=args.allow_production,
             )
         )
     except (CommandError, DomainError) as exc:
@@ -566,7 +616,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         f"{summary.students} students, and {summary.reservations} reservations ({statuses})."
     )
     if student_password is None:
-        print(f"Students cannot sign in: set {STUDENT_PASSWORD_ENV} to give them a password.")
+        if settings.demo_login_email is not None:
+            print(
+                f"The demo account ({settings.demo_login_email}) can sign in with "
+                "DEMO_LOGIN_PASSWORD. The other students cannot: they have random passwords."
+            )
+        else:
+            print(f"Students cannot sign in: set {STUDENT_PASSWORD_ENV} to give them a password.")
     return EXIT_OK
 
 

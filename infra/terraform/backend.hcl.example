@@ -1,0 +1,6 @@
+# Copy to backend.hcl (not committed) after the first apply, using the
+# backend_config output. The key is set in versions.tf.
+bucket       = "gpu-reserve-tfstate-<account-id>-us-east-2"
+region       = "us-east-2"
+use_lockfile = true
+encrypt      = true

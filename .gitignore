@@ -36,6 +36,11 @@ test-results/
 *.tfvars
 !*.tfvars.example
 crash.log
+# Local overrides (the bootstrap's first run) and per-account backend settings.
+override.tf
+*_override.tf
+backend.hcl
+*.tfplan
 
 # Load test / eval scratch output
 loadtest/out/

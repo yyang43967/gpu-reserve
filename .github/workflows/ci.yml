@@ -104,6 +104,53 @@ jobs:
       - name: Build
         run: pnpm build
 
+  terraform:
+    name: Terraform
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: infra/terraform
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: 1.17.2
+          # Plain stdout/stderr; the wrapper only matters for reading outputs in steps.
+          terraform_wrapper: false
+
+      - name: Check formatting
+        run: terraform fmt -recursive -check
+
+      # No credentials and no backend: validate checks syntax, types, and references only.
+      - name: Validate
+        run: |
+          for dir in $(find . -name '*.tf' -not -path '*/.terraform/*' -exec dirname {} \; | sort -u); do
+            echo "::group::$dir"
+            terraform -chdir="$dir" init -backend=false -input=false -lockfile=readonly
+            terraform -chdir="$dir" validate
+            echo "::endgroup::"
+          done
+
+  deploy-scripts:
+    name: Deploy scripts
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+
+      # A pinned shellcheck image, the same one local runs use (not the runner's own).
+      - name: Shellcheck
+        run: bash infra/deploy/tests/shellcheck.sh
+
+      - name: Test deploy.sh
+        run: bash infra/deploy/tests/deploy-test.sh
+
+      # Real systemd on the runner: a failed backup must start the alert unit.
+      - name: Test the backup failure alert
+        run: sudo bash infra/deploy/tests/alert-test.sh
+
   image-and-smoke:
     name: ARM64 image and stack smoke test
     if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'

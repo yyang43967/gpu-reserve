@@ -137,11 +137,22 @@ export function on(
     request.method === method && request.path === path ? respond(request) : undefined;
 }
 
+/** The deployment has no demo account (the default in tests). */
+export const noDemoLogin: Route = on("GET", "/auth/demo", () =>
+  problem(404, "demo-login-disabled"),
+);
+
+/** The deployment's demo account. Put it before signedInAs/signedOut to override. */
+export function demoLogin(email = "ada@example.edu", password = "demo-password"): Route {
+  return on("GET", "/auth/demo", () => Response.json({ email, password }));
+}
+
 /** A refresh cookie for this user: the app boots signed in. Logging out clears it. */
 export function signedInAs(role: UserRole = "student", overrides: Partial<User> = {}): Route[] {
   const user = makeUser({ role, ...overrides });
   let cookieValid = true;
   return [
+    noDemoLogin,
     on("POST", "/auth/refresh", () =>
       cookieValid ? Response.json(tokenResponse(user)) : problem(401, "invalid-token"),
     ),
@@ -153,10 +164,11 @@ export function signedInAs(role: UserRole = "student", overrides: Partial<User> 
   ];
 }
 
-/** No refresh cookie: the app boots signed out. */
-export const signedOut: Route = on("POST", "/auth/refresh", () =>
-  problem(401, "invalid-token", { detail: "No refresh token was sent." }),
-);
+/** No refresh cookie: the app boots signed out. No demo account either. */
+export const signedOut: Route = (request) =>
+  on("POST", "/auth/refresh", () =>
+    problem(401, "invalid-token", { detail: "No refresh token was sent." }),
+  )(request) ?? noDemoLogin(request);
 
 export function makeOverview(overrides: Partial<Overview> = {}): Overview {
   return {

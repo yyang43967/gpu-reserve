@@ -112,12 +112,14 @@ async def login(
     password: str,
 ) -> AuthResult:
     email = users.normalize_email(email)
+    demo = settings.is_demo_account(email)
     # Before any hashing, so throttled requests cost no argon2 work.
-    await limiter.check_login(client_ip=client_ip, email=email)
+    await limiter.check_login(client_ip=client_ip, email=email, check_email=not demo)
     try:
         user = await _verify_credentials(session, email, password)
     except InvalidCredentials:
-        await limiter.record_login_failure(email)
+        if not demo:
+            await limiter.record_login_failure(email)
         raise
     await limiter.clear_login_failures(email)
 

@@ -1,10 +1,23 @@
-# The API behind Caddy. The production deployment builds on this block (domain, TLS,
-# security headers); what is here is what the assistant's streaming depends on.
+# The API behind Caddy.
 #
-# API_SITE_ADDRESS is the API's domain in production; a plain ":8080" serves HTTP for
-# local checks. API_UPSTREAM is the API container on the Compose network.
+# API_SITE_ADDRESS is the API's hostname in production, for which Caddy obtains and
+# renews a certificate on its own; ":80" serves plain HTTP for local checks.
+# API_UPSTREAM is the API container on the Compose network.
 
 {$API_SITE_ADDRESS::8080} {
+	header {
+		# HTTPS only for a year, for this hostname only (no includeSubDomains: other
+		# names under the domain are not ours to commit to HTTPS).
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		# The API serves JSON, not pages; nothing should frame it.
+		Content-Security-Policy "frame-ancestors 'none'"
+		Permissions-Policy "camera=(), microphone=(), geolocation=()"
+		-Server
+	}
+
 	# Assistant runs answer with server-sent events. A compressor buffers its output,
 	# so streaming responses are left uncompressed; everything else may be compressed.
 	@compressible not {

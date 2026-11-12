@@ -15,7 +15,8 @@ export function retryAfterMessage(seconds: number | null): string {
   if (seconds === null) return "Please wait a moment and try again.";
   if (seconds < 60) return `Try again in ${String(seconds)} seconds.`;
   const minutes = Math.ceil(seconds / 60);
-  return `Try again in ${String(minutes)} minute${minutes === 1 ? "" : "s"}.`;
+  if (minutes < 120) return `Try again in ${String(minutes)} minute${minutes === 1 ? "" : "s"}.`;
+  return `Try again in ${String(Math.ceil(minutes / 60))} hours.`;
 }
 
 /** A sentence describing any request failure, for use outside forms too. */

@@ -256,7 +256,10 @@ async def test_reindex_task_runs_the_ingestion(
 
     assert await tasks.reindex_kb(ctx) == IngestReport(embedded=3)
     assert await tasks.reindex_kb(ctx) == IngestReport(unchanged=3)
-    assert tasks.reindex_kb in WorkerSettings.functions
+    # Registered wrapped (see with_job_name); the wrapper keeps a reference to it.
+    assert any(
+        getattr(f, "__wrapped__", None) is tasks.reindex_kb for f in WorkerSettings.functions
+    )
 
 
 async def test_reindex_task_without_api_key_fails_clearly(

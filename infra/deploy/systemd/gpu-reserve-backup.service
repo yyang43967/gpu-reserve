@@ -1,0 +1,10 @@
+[Unit]
+Description=Back up the GPU Reserve database to S3
+After=docker.service
+Requires=docker.service
+# Emails the journal of a failed run (alert.sh, through SES).
+OnFailure=gpu-reserve-alert@%n.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/gpu-reserve/current/backup.sh daily

@@ -236,6 +236,7 @@ async def dispatch_notifications(
     *,
     now: datetime,
     frontend_url: str,
+    suppressed_domains: frozenset[str] = frozenset(),
     batch_size: int = DISPATCH_BATCH_SIZE,
 ) -> DispatchReport:
     """Deliver due notifications: status pending and next_attempt_at <= now.
@@ -247,6 +248,8 @@ async def dispatch_notifications(
 
     For each due row:
     - notifications.prepare_email returns None for a stale reminder: mark it skipped.
+    - the recipient's domain is in `suppressed_domains` (addresses that cannot receive
+      mail, such as the demo accounts'): mark it skipped without sending.
     - otherwise send it. On success: status sent, sent_at = now.
     - on an exception from the sender: attempts += 1 and last_error = str(error).
       Below MAX_DELIVERY_ATTEMPTS, stay pending with
@@ -264,7 +267,15 @@ async def dispatch_notifications(
             note = await _claim_next_due(session, now)
             if note is None:
                 break
-            await _deliver(session, sender, note, now=now, frontend_url=frontend_url, counts=report)
+            await _deliver(
+                session,
+                sender,
+                note,
+                now=now,
+                frontend_url=frontend_url,
+                suppressed_domains=suppressed_domains,
+                counts=report,
+            )
             await session.commit()
     return report.freeze()
 
@@ -306,6 +317,7 @@ async def _deliver(
     *,
     now: datetime,
     frontend_url: str,
+    suppressed_domains: frozenset[str],
     counts: _Counts,
 ) -> None:
     """Send one locked row and record the outcome on it. The caller commits.
@@ -328,7 +340,7 @@ async def _deliver(
     except Exception as error:
         _record_failure(note, error, now=now, counts=counts)
         return
-    if email is None:
+    if email is None or _domain(email.to_address) in suppressed_domains:
         note.status = NotificationStatus.SKIPPED
         counts.skipped += 1
         return
@@ -340,6 +352,10 @@ async def _deliver(
     note.status = NotificationStatus.SENT
     note.sent_at = now
     counts.sent += 1
+
+
+def _domain(address: str) -> str:
+    return address.rpartition("@")[2].lower()
 
 
 def _record_failure(

@@ -38,6 +38,9 @@ x-backend-env: &backend-env
   LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
   LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
   LANGFUSE_HOST: ${LANGFUSE_HOST:-}
+  # The public demo account shown on the sign-in page; both or neither.
+  DEMO_LOGIN_EMAIL: ${DEMO_LOGIN_EMAIL:-}
+  DEMO_LOGIN_PASSWORD: ${DEMO_LOGIN_PASSWORD:-}
 
 services:
   postgres:
@@ -77,6 +80,7 @@ services:
       context: ./backend
       additional_contexts:
         kb: ./kb
+        deploy: ./infra/deploy
     image: gpu-reserve-api:local
     profiles: [core, full]
     environment: *backend-env
