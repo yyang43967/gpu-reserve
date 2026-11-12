@@ -29,5 +29,11 @@
 	reverse_proxy {$API_UPSTREAM:api:8000} {
 		# Write each event to the client as soon as the API sends it.
 		flush_interval -1
+		# How long an idle connection to the API is kept for reuse; 2m is Caddy's
+		# default. uvicorn closes idle connections after API_KEEP_ALIVE_SECONDS
+		# (compose.yml), so the two are adjustable together (loadtest/results.md).
+		transport http {
+			keepalive {$API_UPSTREAM_KEEPALIVE:2m}
+		}
 	}
 }

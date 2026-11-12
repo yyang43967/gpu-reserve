@@ -48,6 +48,7 @@ services:
     environment:
       API_SITE_ADDRESS: ${API_SITE_ADDRESS:?}
       API_UPSTREAM: api:8000
+      API_UPSTREAM_KEEPALIVE: ${API_UPSTREAM_KEEPALIVE:-2m}
     ports:
       - "80:80"
       - "443:443"
@@ -82,6 +83,8 @@ services:
       # Rate limits key on the client address it forwards; a header sent by any other
       # container, or added by a client in front of Caddy, is ignored.
       - --forwarded-allow-ips=172.30.0.10
+      # Seconds an idle client connection (Caddy's) stays open; 5 is uvicorn's default.
+      - --timeout-keep-alive=${API_KEEP_ALIVE_SECONDS:-5}
     environment: *backend-env
     depends_on:
       postgres:
