@@ -86,6 +86,21 @@ data "aws_iam_policy_document" "github_deploy" {
     actions   = ["ssm:GetCommandInvocation", "ssm:ListCommandInvocations"]
     resources = ["*"]
   }
+
+  # release.sh finds the instance by its Name tag. DescribeInstances supports no
+  # resource-level permissions, so it cannot be narrowed to the instance.
+  statement {
+    sid       = "FindInstance"
+    actions   = ["ec2:DescribeInstances"]
+    resources = ["*"]
+  }
+
+  # The hostname for the ready check after a deploy. A plain String, so no KMS access.
+  statement {
+    sid       = "ReadSiteAddress"
+    actions   = ["ssm:GetParameter"]
+    resources = [aws_ssm_parameter.deploy_setting["API_SITE_ADDRESS"].arn]
+  }
 }
 
 resource "aws_iam_role_policy" "github_deploy" {
