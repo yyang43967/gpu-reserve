@@ -9,6 +9,14 @@
 
 locals {
   github_oidc_host = "token.actions.githubusercontent.com"
+  github_owner     = split("/", var.github_repository)[0]
+  github_repo_name = split("/", var.github_repository)[1]
+  # repo:<owner>@<owner id>/<name>@<repository id>:environment:<environment>
+  github_deploy_subject = join("", [
+    "repo:${local.github_owner}@${var.github_owner_id}/",
+    "${local.github_repo_name}@${var.github_repository_id}",
+    ":environment:${var.github_deploy_environment}",
+  ])
 }
 
 resource "aws_iam_openid_connect_provider" "github" {
@@ -35,10 +43,13 @@ data "aws_iam_policy_document" "github_assume" {
     }
 
     # Only jobs that run in the protected environment, not any branch or pull request.
+    # The repository uses GitHub's immutable subject, which carries the owner's and the
+    # repository's numeric IDs, so a later account or repository that takes the same
+    # names does not match.
     condition {
       test     = "StringEquals"
       variable = "${local.github_oidc_host}:sub"
-      values   = ["repo:${var.github_repository}:environment:${var.github_deploy_environment}"]
+      values   = [local.github_deploy_subject]
     }
   }
 }
