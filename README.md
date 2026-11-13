@@ -69,7 +69,7 @@ flowchart LR
     gha -->|"SSM Run Command: deploy"| ec2
 ```
 
-Evaluations and local development also use Langfuse for tracing and Modal for serving Qwen3.6 on vLLM. Production has no tracing configured. More detail, including request sequences and the lock order, is in [docs/architecture.md](docs/architecture.md).
+Langfuse traces evaluations and local development; production has no tracing configured. Qwen3.6 was served with vLLM on Modal ([serving/](serving/README.md)) only for the model comparison, never for production traffic. More detail, including request sequences and the lock order, is in [docs/architecture.md](docs/architecture.md).
 
 **Stack:** FastAPI, SQLAlchemy (async), Alembic, ARQ, LangGraph · React 19, TypeScript, TanStack Query, React Hook Form + Zod, Tailwind, shadcn/ui · Postgres 16 with `btree_gist` and `pgvector`, Redis 7 · Terraform, Docker Compose, Caddy, GitHub Actions · k6, Playwright, pytest with testcontainers.
 
