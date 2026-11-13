@@ -1119,12 +1119,13 @@ Prices for `us-east-2`, on demand, checked November 2026:
 - **Not confirmed by AWS's documentation:** whether a member account's budgets and anomaly detection count credits applied by the management account. The Terraform budget excludes credits by design, so it is unaffected.
 
 ### Temporary: deploys from a developer machine
-- **State.** While the account refuses IAM OIDC providers, the CI deploy role cannot exist. Deploys run `infra/deploy/release.sh` from a developer machine with short-lived `aws login` credentials: it builds and pushes the image, then runs the deploy on the instance through SSM. CI keeps building and testing the image but does not push or deploy.
+- **Resolved on 2026-11-13.** CI deploys through OIDC: after CI passes on `main`, the Deploy workflow assumes the deploy role, builds and pushes the image, and deploys it through SSM. The first run, started by hand, deployed `fa304a2`; the first automatic one deployed `a4e6b08` after a merge. Both were checked on the instance (image tag, revision label, deploy history), through the public ready check, and in CloudTrail (the role's session for the token exchange and for `ssm:SendCommand`). `release.sh` from a developer machine stays as the manual and rollback path. The rest of this entry is the state it replaced.
+- **State.** While the account refused IAM OIDC providers, the CI deploy role could not exist. Deploys run `infra/deploy/release.sh` from a developer machine with short-lived `aws login` credentials: it builds and pushes the image, then runs the deploy on the instance through SSM. CI keeps building and testing the image but does not push or deploy.
 - **What is ruled out.** No IAM user and no long-lived access keys in GitHub secrets, not even for a while. Keys in CI are the risk OIDC exists to remove: they do not expire, they leak through logs and forks, and they would outlive the reason they were added.
 - **Exit condition.** This ends when the CI pipeline deploys through OIDC, which is required for the deploy phase to count as done:
   1. Apply on the Free plan and deploy from the developer machine, to prove the rest of the stack on this account.
   2. Once the site works end to end, upgrade the account to the Paid plan and activate advanced features (after checking exactly what activation changes and whether it can be undone). Done on 2026-11-13; OIDC providers are allowed.
-  3. Check again that OIDC providers are allowed, set `github_deploy_role_enabled = true`, apply, and switch the workflow to push and deploy with the role. `release.sh` stays as the manual and rollback path, with the same steps on the instance.
+  3. Check again that OIDC providers are allowed, set `github_deploy_role_enabled = true`, apply, and switch the workflow to push and deploy with the role. `release.sh` stays as the manual and rollback path, with the same steps on the instance. Done on 2026-11-13, after one fix: the role's trust policy had to match GitHub's ID-based subject ("The subject carries IDs, matched exactly").
 
 ### Production stack and deploys
 - **Memory budget on a t4g.small.** Limits: Postgres 512 MiB, API 448, worker 256, Redis 96, Caddy 96; 1,408 MiB in all, plus a 256 MiB migration container during deploys. The instance has about 1.85 GiB usable and the OS, Docker, and the SSM agent take roughly 300 MiB, so even with every container at its limit about 140 MiB remains. Caddy started at 64 MiB; in production it idled at 42 MiB (twice the local figure, from certificate, TLS, and HTTP/3 state), which left too little room for a burst, so it was raised to 96. Measured on the same Compose file with demo data after a few hundred requests, the containers used about 360 MiB together (API 206, worker 89, Postgres 37, Caddy 21, Redis 5), so in practice the headroom is closer to 1.2 GiB. The API's limit is the one with a reason to grow (an assistant run holds a model response and graph state), and it has more than twice its measured use.
@@ -1238,3 +1239,24 @@ The repository becomes public at the end of the documentation phase. Before that
 2. Rotate anything found, even if it was removed later: history is published with the repository.
 3. Only then change the visibility.
 Being public also makes the hosted arm64 runners free.
+
+### Phase 10 closed
+Closed on 2026-11-13 with the first automatic deploy from `main`.
+
+**Delivered:**
+- **Infrastructure in Terraform** (`us-east-2`): one `t4g.small` with an Elastic IP, ECR, S3 for uploads and backups, SES from a subdomain, Parameter Store for settings and hand-entered secrets, a monthly budget, and GitHub's OIDC provider with a deploy role limited to the one repository, the one instance, and the `production` environment. State in S3 with locking.
+- **Production stack:** Postgres, Redis, the API, the worker, and Caddy in Compose, with memory limits, health checks, and Caddy's keep-alive below uvicorn's. Structured JSON logs.
+- **Deploys:** CI builds the arm64 image, pushes it tagged with the commit, and deploys it through SSM after CI passes on `main`; rollback is a deploy of an earlier SHA. Each deploy takes a backup, then runs migrations (expand/contract) before the new containers start.
+- **Backups:** a daily dump to S3 with an alert on failure, and a restore check (`release.sh verify-backup`) that compares a restored copy with production.
+- **Frontend on Vercel** with an enforced Content Security Policy, a public demo account reset daily, and a global daily cap on the assistant.
+- **Load test on a twin of the instance**, with the keep-alive fix and the worker health check fix it found.
+- **Account:** upgraded to the Paid plan with advanced features; budgets in the project and the management account, and an anomaly alert, in place of a spend limit.
+
+**Follow-ups, not started:**
+- **Demo data ages** ("Open item: the demo data ages"): the seeded history is in the past after about two weeks.
+- **Email deliverability:** notifications reached Junk in testing. A custom MAIL FROM domain in SES (so SPF aligns) and a plain-text part in every message.
+- **Avatar size:** uploads are stored and served at full size; resize on upload or serve a thumbnail.
+- **End-to-end test of the demo sign-in:** the "Try the demo" path has unit tests only; the end-to-end stack has no demo account configured.
+- **Load test** (`loadtest/results.md`, "Follow-ups"): a memory soak of the assistant's path with the scripted model, to explain production's rise from 208 to 318 MiB; two uvicorn workers against the memory limit; shedding load quickly instead of 503s after the 3 s pool timeout.
+- **RAG acceptance margin** (`evals/rag/results.md`, "Follow-up: no margin on the acceptance gate"): acceptance passes at exactly the 90% gate.
+- **Before the repository is made public:** the history scan and rotation above.
