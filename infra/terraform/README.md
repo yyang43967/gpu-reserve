@@ -125,7 +125,7 @@ The instance's root volume, with the database, is deleted with it. Download the 
 When the account allows IAM OIDC providers (check with `aws iam list-open-id-connect-providers`; on the Free plan it is denied):
 
 1. Set `github_deploy_role_enabled = true` in `terraform.tfvars`, plan, and apply. It creates GitHub's OIDC provider and the deploy role.
-2. In GitHub, create the `production` environment and limit its deployment branches to `main`. The role trusts only jobs that run in this environment.
+2. In GitHub, create the `production` environment and limit its deployment branches to `main` only ("Selected branches and tags", one rule: `main`). The role trusts only jobs that run in this environment, and its token names the environment, not the branch, so this rule is the only thing that keeps other branches off a role that can run any command on the instance (`docs/decisions.md`, "The `production` environment is the branch check").
 3. Set the repository variables `AWS_REGION` (`us-east-2`), `AWS_DEPLOY_ROLE_ARN` (`terraform output -raw github_deploy_role_arn`), and `DEPLOY_ENABLED` (`true`). No secrets are needed.
 4. Run the Deploy workflow by hand once, then let the next merge to `main` deploy on its own.
 
