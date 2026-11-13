@@ -707,3 +707,62 @@ async def test_listing_a_page_uses_a_fixed_number_of_statements(
     assert counts[0] == counts[1]
     # Authenticate, count, page, then server, lab, user, allocations, and GPUs.
     assert counts[1] <= 8
+
+
+async def test_only_admins_see_whether_a_reservation_is_seeded(
+    api_client: AsyncClient,
+    db_session: AsyncSession,
+    student_headers: dict[str, str],
+    admin_headers: dict[str, str],
+    restricted: Server,
+) -> None:
+    start = next_saturday(datetime.now(UTC))
+    first = await _post(
+        api_client, RESERVATIONS, student_headers, booking_body(restricted.id, start)
+    )
+    second = await _post(
+        api_client, RESERVATIONS, student_headers, booking_body(restricted.id, start + 3 * H)
+    )
+    third = await _post(
+        api_client, RESERVATIONS, student_headers, booking_body(restricted.id, start + 6 * H)
+    )
+    assert "seeded" not in first
+    seeded_id = uuid.UUID(first["id"])
+    reservation = await db_session.get(Reservation, seeded_id)
+    assert reservation is not None
+    reservation.seeded = True
+    await db_session.commit()
+
+    # Every response a student gets lacks the field, including their own seeded booking.
+    student_list = await api_client.get(RESERVATIONS, headers=student_headers)
+    student_one = await api_client.get(f"{RESERVATIONS}/{seeded_id}", headers=student_headers)
+    student_cancel = await _post(
+        api_client, f"{RESERVATIONS}/{third['id']}/cancel", student_headers
+    )
+    assert all("seeded" not in item for item in student_list.json()["items"])
+    assert "seeded" not in student_one.json()
+    assert "seeded" not in student_cancel
+
+    # Admins get it everywhere they read a reservation.
+    admin_list = await api_client.get(
+        RESERVATIONS, headers=admin_headers, params={"status": "pending"}
+    )
+    flags = {item["id"]: item["seeded"] for item in admin_list.json()["items"]}
+    assert flags == {first["id"]: True, second["id"]: False}
+    admin_one = await api_client.get(f"{RESERVATIONS}/{seeded_id}", headers=admin_headers)
+    assert admin_one.json()["seeded"] is True
+    approved = await _post(api_client, f"{RESERVATIONS}/{seeded_id}/approve", admin_headers)
+    rejected = await _post(
+        api_client,
+        f"{RESERVATIONS}/{second['id']}/reject",
+        admin_headers,
+        {"reason": "Booked for a class"},
+    )
+    assert (approved["seeded"], rejected["seeded"]) == (True, False)
+
+
+def test_the_schema_documents_seeded_for_admins_only(running_app: FastAPI) -> None:
+    schemas = running_app.openapi()["components"]["schemas"]
+
+    assert "seeded" in schemas["AdminReservationRead"]["required"]
+    assert "seeded" not in schemas["ReservationRead"]["properties"]

@@ -11,6 +11,7 @@ import { TextareaField } from "@/components/form-field";
 import { PageHeader } from "@/components/page-header";
 import { Pagination } from "@/components/pagination";
 import { EmptyState, ErrorState, LoadingState } from "@/components/states";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -155,7 +156,14 @@ function PendingItem({
       aria-label={`${reservation.user.full_name}, ${reservation.server.hostname}`}
     >
       <div className="grid gap-0.5">
-        <p className="font-medium">{reservation.user.full_name}</p>
+        <p className="flex flex-wrap items-center gap-2 font-medium">
+          {reservation.user.full_name}
+          {reservation.seeded && (
+            <Badge variant="secondary" title="Demo data, replaced every night">
+              Demo
+            </Badge>
+          )}
+        </p>
         <p className="text-sm [overflow-wrap:anywhere] text-muted-foreground">
           {reservation.user.email}
         </p>

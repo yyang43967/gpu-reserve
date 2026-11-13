@@ -4,7 +4,7 @@ from typing import Annotated, Self
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, StringConstraints
 
-from app.models import CreatedVia, GpuModel, Reservation, ReservationStatus
+from app.models import CreatedVia, GpuModel, Reservation, ReservationStatus, User, UserRole
 from app.models.reservation import DECISION_REASON_MAX_LENGTH, PURPOSE_MAX_LENGTH
 from app.models.server import MAX_GPUS_PER_SERVER
 from app.services.booking_rules import MINUTES_PER_HOUR
@@ -89,6 +89,22 @@ class ReservationRead(BaseModel):
             ),
             gpu_indexes=sorted(allocation.gpu.index for allocation in reservation.allocations),
         )
+
+
+class AdminReservationRead(ReservationRead):
+    """What admins get: also whether the booking is part of the demo data, which the
+    nightly replay recreates. Other users never receive the field."""
+
+    seeded: bool
+
+
+def read_reservation(
+    reservation: Reservation, viewer: User
+) -> AdminReservationRead | ReservationRead:
+    base = ReservationRead.build(reservation)
+    if viewer.role is UserRole.ADMIN:
+        return AdminReservationRead(**base.model_dump(), seeded=reservation.seeded)
+    return base
 
 
 DecisionReason = Annotated[

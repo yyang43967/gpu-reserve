@@ -128,6 +128,11 @@ export interface Reservation {
   user: { id: string; full_name: string; email: string };
   /** Numbers of the GPUs this reservation holds or held. */
   gpu_indexes: number[];
+  /**
+   * Admins only: part of the demo data, which is replaced every night. Absent in
+   * responses to anyone else.
+   */
+  seeded?: boolean;
 }
 
 /** A stretch of 30-minute slots with the same number of free GPUs. */
