@@ -54,6 +54,13 @@ def test_both_compose_files_use_the_same_check() -> None:
     assert worker_healthcheck(COMPOSE_FILES[0]) == worker_healthcheck(COMPOSE_FILES[1])
 
 
+def test_the_timeout_leaves_room_for_a_throttled_cpu() -> None:
+    # At 0.4 of a CPU under load the check took up to 4.9 s.
+    for compose_file in COMPOSE_FILES:
+        services = yaml.safe_load(compose_file.read_text())["services"]
+        assert services["worker"]["healthcheck"]["timeout"] == "10s", compose_file
+
+
 def test_the_check_reads_the_key_arq_writes() -> None:
     keys = re.findall(r"exists\('([^']+)'\)", " ".join(worker_healthcheck(COMPOSE_FILES[0])))
     assert keys == [arq_health_check_key()]

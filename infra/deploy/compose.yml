@@ -120,7 +120,8 @@ services:
     # which is what `arq --check` reads too. `arq --check` imports the whole app first,
     # which took longer than the timeout with the instance's CPU at its baseline, so a
     # deploy (`up --wait`) on a credit-exhausted instance would fail; importing the
-    # Redis client alone is about a fifth of the work.
+    # Redis client alone is about a fifth of the work. Even so, at 0.4 of a CPU under
+    # load the check took up to 4.9 s, so the timeout is 10 s.
     healthcheck:
       test:
         - CMD
@@ -128,7 +129,7 @@ services:
         - -c
         - "import os, sys, redis; sys.exit(0 if redis.Redis.from_url(os.environ['REDIS_URL'], socket_timeout=3).exists('arq:queue:health-check') else 1)"
       interval: 30s
-      timeout: 5s
+      timeout: 10s
       retries: 3
       start_period: 20s
 

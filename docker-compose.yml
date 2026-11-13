@@ -122,7 +122,7 @@ services:
         - -c
         - "import os, sys, redis; sys.exit(0 if redis.Redis.from_url(os.environ['REDIS_URL'], socket_timeout=3).exists('arq:queue:health-check') else 1)"
       interval: 30s
-      timeout: 5s
+      timeout: 10s
       retries: 3
       start_period: 15s
 
