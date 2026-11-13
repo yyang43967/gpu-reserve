@@ -122,6 +122,36 @@ async def test_completion_ignores_pending_and_sends_no_email(
     assert await _count(db_session, Notification) == 0
 
 
+async def test_scoped_runs_change_only_the_reservations_named(
+    db_session: AsyncSession, student: User, server: Server, restricted: Server
+) -> None:
+    """The demo refresh names the reservations it made; nothing else may change, even
+    while another run holds the sweep's lock."""
+    finished = [
+        await book(db_session, student, server, SATURDAY + i * 2 * H, now=NOW) for i in range(2)
+    ]
+    pending = [
+        await book(db_session, student, restricted, SATURDAY + i * 2 * H, now=NOW) for i in range(2)
+    ]
+    later = SATURDAY + 6 * H
+    other = async_sessionmaker(db_session.bind)()
+    async with other.begin():
+        assert await jobs.try_job_lock(other, jobs.Job.COMPLETE_FINISHED)
+        assert await jobs.try_job_lock(other, jobs.Job.EXPIRE_PENDING)
+
+        completed = await jobs.complete_finished(db_session, now=later, only=[finished[0].id])
+        expired = await jobs.expire_pending(db_session, now=later, only=[pending[0].id])
+        nothing = await jobs.expire_pending(db_session, now=later, only=[])
+        await db_session.commit()
+    await other.close()
+
+    assert (completed, expired, nothing) == (1, 1, 0)
+    assert await _status(db_session, finished[0]) is ReservationStatus.COMPLETED
+    assert await _status(db_session, finished[1]) is ReservationStatus.APPROVED
+    assert await _status(db_session, pending[0]) is ReservationStatus.EXPIRED
+    assert await _status(db_session, pending[1]) is ReservationStatus.PENDING
+
+
 async def test_completion_is_idempotent(
     db_session: AsyncSession, student: User, server: Server
 ) -> None:
