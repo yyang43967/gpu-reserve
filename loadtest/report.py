@@ -33,6 +33,14 @@ EDGE_SECONDS = 2
 Runs = dict[tuple[str, str, str], list[dict[str, Any]]]
 
 
+def source(meta: dict[str, Any]) -> str:
+    """The commit a run used, with a warning when it was not recorded."""
+    commit = meta.get("commit") or ""
+    if not commit or commit == "commit unknown":
+        return "**commit unknown** (the runner could not determine it)"
+    return f"commit `{commit[:7]}`" + (" (dirty tree)" if meta.get("dirty") else "")
+
+
 def load_runs(out: Path) -> Runs:
     runs: Runs = defaultdict(list)
     for config in CONFIGS:
@@ -296,7 +304,7 @@ def report(out: Path) -> str:
     ]
     m = meta["machine"]
     lines = [
-        f"Run `{out.name}`, commit `{m['commit'][:7]}`{' (dirty tree)' if m['dirty'] else ''}; "
+        f"Run `{out.name}`, {source(m)}; "
         f"k6 {m['k6'].split()[1] if m['k6'] else '?'}; latency rates (iterations/s): "
         f"{meta.get('latency_rates')}"
         + (

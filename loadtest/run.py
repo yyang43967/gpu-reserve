@@ -500,6 +500,34 @@ def target() -> dict[str, Any]:
     return found
 
 
+COMMIT_UNKNOWN = "commit unknown"
+
+
+def source_commit() -> tuple[str, bool | None]:
+    """The commit being run, and whether the tree had changes. A source archive (as on
+    the load-test driver) has no Git metadata; upload-source.sh stamps its commit in a
+    COMMIT file and only archives a clean tree."""
+    stamped = ROOT / "COMMIT"
+    if stamped.is_file():
+        return stamped.read_text().strip(), False
+    try:
+        head = subprocess.run(
+            ["git", "-C", str(ROOT), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        status = subprocess.run(
+            ["git", "-C", str(ROOT), "status", "--porcelain"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return "", None
+    return head.stdout.strip(), bool(status.stdout.strip())
+
+
 def machine() -> dict[str, Any]:
     def sysctl(name: str) -> str:
         try:
@@ -516,17 +544,20 @@ def machine() -> dict[str, Any]:
         check=False,
     ).stdout.split(maxsplit=2)
     k6 = subprocess.run(["k6", "version"], capture_output=True, text=True, check=False)
-    git = subprocess.run(
-        ["git", "-C", str(ROOT), "rev-parse", "HEAD"], capture_output=True, text=True, check=False
-    )
-    dirty = subprocess.run(
-        ["git", "-C", str(ROOT), "status", "--porcelain"], capture_output=True, text=True
-    )
+    commit, dirty = source_commit()
+    if not commit:
+        print(
+            "warning: the commit under test is unknown (no COMMIT file and no Git checkout);"
+            f" this run's results are marked {COMMIT_UNKNOWN!r}",
+            file=sys.stderr,
+            flush=True,
+        )
+        commit = COMMIT_UNKNOWN
     return {
         "host": {
             "model": sysctl("hw.model"),
             "cpu": sysctl("machdep.cpu.brand_string"),
-            "cores": sysctl("hw.ncpu"),
+            "cores": sysctl("hw.ncpu") or str(os.cpu_count() or ""),
             "memory_bytes": sysctl("hw.memsize"),
             "os": platform.platform(),
         },
@@ -536,14 +567,23 @@ def machine() -> dict[str, Any]:
             "os": docker[2].strip() if len(docker) > 2 else "",
         },
         "k6": k6.stdout.strip(),
-        "commit": git.stdout.strip(),
-        "dirty": bool(dirty.stdout.strip()),
+        "commit": commit,
+        "dirty": dirty,
     }
+
+
+def ramp_max(script: str, args: argparse.Namespace) -> float:
+    """The capacity ramp's last step for a script: --ramp-max, or the default."""
+    return args.ramp_max.get(script, RAMP_MAX[script])
 
 
 def clean_sustained(summary: dict[str, Any], script: str, args: argparse.Namespace) -> float:
     rows = steps(
-        summary, script=script, ramp_max=RAMP_MAX[script], step_count=args.steps, hold=args.hold
+        summary,
+        script=script,
+        ramp_max=ramp_max(script, args),
+        step_count=args.steps,
+        hold=args.hold,
     )
     return capacity(rows)["clean_sustained_rps"]
 
@@ -638,6 +678,13 @@ def main() -> int:
     )
     parser.add_argument("--settle", default="10m", help="sampling after the soak's load")
     parser.add_argument(
+        "--ramp-max",
+        type=parse_rates,
+        default={},
+        help="capacity ramp ceilings (iterations/s) instead of the defaults, "
+        "e.g. availability=200,slot_search=45",
+    )
+    parser.add_argument(
         "--configs",
         default=",".join(CONFIGS),
         help="cache configurations to run, e.g. cache-on (default: both)",
@@ -679,7 +726,7 @@ def main() -> int:
     meta: dict[str, Any] = {
         "started": datetime.now(UTC).isoformat(),
         "args": vars(args),
-        "ramp_max": {s: RAMP_MAX[s] for s in to_ramp},
+        "ramp_max": {s: ramp_max(s, args) for s in to_ramp},
         "capacity_from": str(args.capacity_from) if args.capacity_from else None,
         "machine": machine(),
         "limits": LOCAL_LIMITS if not args.compose_file else "as in the Compose files",
@@ -704,7 +751,7 @@ def main() -> int:
                     break
                 configure(config)
                 for script in to_ramp:
-                    mode = {"MODE": "capacity", "RAMP_MAX": str(RAMP_MAX[script])}
+                    mode = {"MODE": "capacity", "RAMP_MAX": str(ramp_max(script, args))}
                     summary = one_run(script, config, repeat, out, args, mode)
                     # The latency rate comes from the uncached runs, or the cached ones
                     # when only those run.
@@ -712,6 +759,18 @@ def main() -> int:
                         sustained[script].append(clean_sustained(summary, script, args))
 
         rates = latency_rates(sustained, args.rates)
+        # No step was sustained without errors, so there is no rate below capacity to
+        # compare at. The capacity results stand; the latency runs are skipped.
+        unrated = sorted(s for s in timed if rates.get(s, 0) <= 0)
+        for script in unrated:
+            print(
+                f"warning: {script} sustained no step without errors; skipping its latency"
+                " runs (lower --ramp-max to resolve the knee)",
+                file=sys.stderr,
+                flush=True,
+            )
+        meta["latency_skipped"] = unrated
+        timed = [s for s in timed if s not in unrated]
         meta["latency_rates"] = rates
         (out / "meta.json").write_text(json.dumps(meta, indent=2, default=str))
         print(f"latency rates (iterations/s): {rates}", flush=True)
