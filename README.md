@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/yyang43967/gpu-reserve/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/yyang43967/gpu-reserve/actions/workflows/ci.yml)
 
-Booking for shared GPU servers in university labs: students reserve GPUs within fair-use quotas, admins approve requests for restricted machines, and an AI assistant answers policy questions and books hardware, but only after the user confirms.
+A booking platform for shared GPU servers in university labs: students reserve GPUs within fair-use quotas, admins approve requests for restricted machines, and an AI assistant answers policy questions and books hardware, but only after the user confirms.
 
 **Live demo: [gpu.yiyangdev.com](https://gpu.yiyangdev.com).** The sign-in page has a one-click demo student login. Demo data is replayed around the current date every night.
 
@@ -10,10 +10,10 @@ Booking for shared GPU servers in university labs: students reserve GPUs within 
 
 ## Highlights
 
-- **Double booking is impossible at the database level.** A Postgres exclusion constraint on (GPU, time range) is the authority. The load test found that concurrent bookings could deadlock on it; bookings on a server are now serialized with a row lock. Since the fix, every timed race of 100 students for 4 possible bookings (6 on a laptop, 15 on a twin of the production instance) ended with exactly 4 bookings, 96 refusals, and no overlapping allocation. [Load-test results](loadtest/results.md#booking-race)
-- **The assistant never writes without confirmation.** Every booking or cancellation stops at a confirmation card, and the database makes the confirmed write happen exactly once. Over a 63-case evaluation, including prompt injection and requests for other users' data, there were 0 safety failures in all 8 runs. [Agent evaluation](evals/agent/results/2026-11-10.md)
+- **Double booking is impossible at the database level.** A Postgres exclusion constraint on (GPU, time range) is the authority. The load test found that concurrent bookings could deadlock on it; bookings on a server are now serialized with a row lock. Since the fix, every timed race of 100 students for 4 possible bookings (6 runs on a laptop, 15 on a twin of the production instance) ended with exactly 4 bookings, 96 refusals, and no overlapping allocation. [Load-test results](loadtest/results.md#booking-race)
+- **The assistant never writes without confirmation.** Every booking or cancellation stops at a confirmation card, and the database makes the confirmed write happen exactly once. Over a 63-case evaluation, including prompt injection and requests for other users' data, there were 0 safety failures in all 8 runs. A safety failure means following an injected or another user's instruction, or leaking their data; a wrong card (counted separately in the table below) is a confirmation card that differs from the request or that nobody asked for, and writes nothing unless the user confirms it. [Agent evaluation](evals/agent/results/2026-11-10.md)
 - **The production model was chosen by evaluation.** claude-haiku-5-5 passed 58/63 cases in both runs, against 50/63 for gpt-5.4-mini and 48/63 for a self-hosted Qwen3.6-35B-A3B on vLLM, at about a quarter of gpt-5.4-mini's cost per run. The lead over gpt-5.4-mini is significant but marginal (Holm-corrected p = 0.043). [Decision](docs/decisions.md#production-model-chosen-from-the-eval)
-- **The availability cache cuts database load, not latency.** At a fixed rate it lowered Postgres CPU by 73% for availability on the laptop and 75% on the production twin. Throughput is bound by the API's CPU, so slot-search capacity showed no consistent difference. [Load-test results](loadtest/results.md#summary)
+- **The availability cache mainly cuts database load.** At a fixed rate it lowered Postgres CPU by 73% for availability on the laptop and 75% on the production twin. Capacity barely moved, because throughput is bound by the API's CPU: slot search showed no consistent difference, and availability a small gain (peak 248 → 277 req/s on the laptop). [Load-test results](loadtest/results.md#summary)
 - **Production on one small instance, estimated at about $18.60 a month.** Terraform, deploys from CI through GitHub OIDC with no stored AWS keys, daily backups with a restore check against production, and an enforced Content Security Policy. [Cost estimate](docs/decisions.md#cost)
 
 ## Architecture
@@ -44,7 +44,7 @@ flowchart LR
     end
 
     subgraph llm["Model providers"]
-        anthropic["Anthropic: claude-haiku-5-5"]
+        anthropic["Anthropic: Claude Haiku 5.5"]
         openai["OpenAI: embeddings"]
     end
 
@@ -98,7 +98,7 @@ Each decision, with the options considered and the evidence, is in [docs/decisio
 | Qwen3.6-35B-A3B, thinking off (vLLM, L40S) | 23/63 (37%) | 33, 28 | 1, 5 | 3.0 / 10.0 s | $0.06 GPU |
 
 - **Pairwise** (exact McNemar on strict outcomes, Holm-corrected over 6 pairs): Haiku beats gpt-5.4-mini (9 vs 1 disagreeing cases, p = 0.043) and Qwen with thinking on (12 vs 2, p = 0.039). Qwen with thinking off is worse than every other configuration (p < 0.001). Qwen with thinking on and gpt-5.4-mini show no significant difference.
-- **Limits:** with 63 cases the Haiku result sits just under the threshold. The checkers were revised after reading the hosted models' pilot answers. Hand labels cover hosted answers only. The full report lists these and the rest.
+- **Limits:** with 63 cases the Haiku-over-gpt-5.4-mini result (Holm-corrected p = 0.043) sits just under the 0.05 significance level. The checkers were revised after reading the hosted models' pilot answers. Hand labels cover hosted answers only. The full report lists these and the rest.
 
 ### Retrieval
 
@@ -111,7 +111,7 @@ k6 against a laptop stack with CPU limits that add up to a t4g.small, then again
 | Availability cache off → on | Laptop | Production twin |
 |---|---|---|
 | Postgres CPU, availability at a fixed rate | 29% → 8% (−73%) | 22% → 5% (−75%) |
-| Postgres CPU, slot search at a fixed rate | 6% → 3% (−39%) | 6% → 3% (−47%) |
+| Postgres CPU, slot search at a fixed rate | −39% | −47% |
 | Availability p95 at that rate | 210 → 160 ms (ranges overlap) | 23 → 15 ms |
 | Slot search p95 at that rate | 123 → 120 ms (unchanged) | 320 → 231 ms |
 | Slot-search capacity | no consistent difference | sustained 12 req/s either way; best successful step 15 → 17 |
