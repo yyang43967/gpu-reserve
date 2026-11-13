@@ -210,7 +210,8 @@ def warm_up(fixture: dict[str, Any]) -> None:
 
 def loadtest_command(*args: str) -> dict[str, Any]:
     output = compose("exec", "-T", "api", "python", "-m", "app.loadtest", *args)
-    return json.loads(output)
+    result: dict[str, Any] = json.loads(output)
+    return result
 
 
 @dataclass
@@ -400,7 +401,8 @@ def one_run(
     (run_dir / "run.json").write_text(json.dumps(meta, indent=2, default=str))
     log = (run_dir / "k6.log").read_text().strip().replace("\n", "\n    ")
     print(f"  {config} {kind} {script} #{repeat}:\n    {log}", flush=True)
-    return json.loads((run_dir / "summary.json").read_text())
+    summary: dict[str, Any] = json.loads((run_dir / "summary.json").read_text())
+    return summary
 
 
 def hit_rate_run(script: str, out: Path, args: argparse.Namespace, mode: dict[str, str]) -> None:
@@ -574,7 +576,7 @@ def machine() -> dict[str, Any]:
 
 def ramp_max(script: str, args: argparse.Namespace) -> float:
     """The capacity ramp's last step for a script: --ramp-max, or the default."""
-    return args.ramp_max.get(script, RAMP_MAX[script])
+    return float(args.ramp_max.get(script, RAMP_MAX[script]))
 
 
 def clean_sustained(summary: dict[str, Any], script: str, args: argparse.Namespace) -> float:

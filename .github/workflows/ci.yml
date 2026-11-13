@@ -55,13 +55,13 @@ jobs:
         run: uv run python -c "import os, tiktoken; tiktoken.get_encoding(os.environ['TIKTOKEN_ENCODING'])"
 
       - name: Lint
-        run: uv run ruff check .
+        run: uv run ruff check . ../loadtest
 
       - name: Check formatting
-        run: uv run ruff format --check .
+        run: uv run ruff format --check . ../loadtest
 
       - name: Type check
-        run: uv run mypy app
+        run: uv run mypy app ../loadtest
 
       - name: Test (unit and integration)
         run: uv run pytest

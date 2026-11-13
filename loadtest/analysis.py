@@ -22,8 +22,8 @@ SUSTAINED_MAX_ERRORS = 0.01
 # counts failures, so a stack shedding load with fast 503s would set it too high.
 LATENCY_LOAD_SHARE = 0.65
 # Status codes counted per tag by the k6 scripts (lib/common.js).
-STATUSES = ("0", "200", "201", "400", "401", "403", "404", "409", "422", "429", "500", "502")
-STATUSES += ("503", "504", "other")
+STATUSES: tuple[str, ...] = ("0", "200", "201", "400", "401", "403", "404", "409")
+STATUSES += ("422", "429", "500", "502", "503", "504", "other")
 
 
 def seconds(duration: str) -> int:
