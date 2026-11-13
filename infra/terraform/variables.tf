@@ -72,7 +72,7 @@ variable "allow_data_destroy" {
 }
 
 variable "github_deploy_role_enabled" {
-  description = "Create GitHub's OIDC provider and the CI deploy role. Off while the account refuses OIDC providers."
+  description = "Create GitHub's OIDC provider and the CI deploy role. Turn on once the GitHub environment exists with deployment limited to main."
   type        = bool
   default     = false
 }

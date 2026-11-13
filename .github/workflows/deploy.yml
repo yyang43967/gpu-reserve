@@ -6,7 +6,7 @@ name: Deploy
 #
 # AWS access comes from GitHub's OIDC token and the deploy role; there are no AWS keys
 # in GitHub. The job runs only when the repository variable DEPLOY_ENABLED is "true",
-# which stays unset until the account allows IAM OIDC providers (see
+# which is set once the deploy role exists (see "Turning on the CI deploy role" in
 # infra/terraform/README.md). Repository variables: DEPLOY_ENABLED, AWS_REGION,
 # AWS_DEPLOY_ROLE_ARN (terraform output github_deploy_role_arn).
 

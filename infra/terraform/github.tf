@@ -2,8 +2,10 @@
 # environment exchanges its token for this role's short-lived credentials. No access
 # keys are stored in GitHub.
 #
-# Off by default: on AWS's Free plan the account's service control policy refuses
-# IAM OpenID Connect providers. Until it is enabled, deploys run from a laptop.
+# Off by default and turned on per environment in terraform.tfvars, once its GitHub
+# environment exists with deployment limited to main (README, "Turning on the CI deploy
+# role"). The production account refused OIDC providers until its advanced features
+# were activated; see docs/decisions.md, "Account upgrade and advanced features".
 
 locals {
   github_oidc_host = "token.actions.githubusercontent.com"
