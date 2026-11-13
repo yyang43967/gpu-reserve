@@ -197,13 +197,13 @@ async def test_the_demo_account_cannot_cancel_its_seeded_bookings(
         demo = await _user(db, DEMO_EMAIL)
         rows = (
             await db.execute(
-                select(Reservation.id, Reservation.created_at)
+                select(Reservation.id, Reservation.seeded)
                 .where(Reservation.user_id == demo.id)
                 .order_by(Reservation.created_at)
             )
         ).all()
         seeded_id, visitor_id = rows[0].id, rows[-1].id
-        assert rows[0].created_at == demo.created_at < rows[-1].created_at
+        assert rows[0].seeded and not rows[-1].seeded
 
         with pytest.raises(DemoAccountReadOnly):
             await reservations.cancel_reservation(db, demo, seeded_id, now=datetime.now(UTC))

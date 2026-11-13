@@ -37,7 +37,7 @@ from enum import StrEnum
 from typing import Final
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import delete, exists, select, text
+from sqlalchemy import delete, exists, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.cli import CommandError, read_password, validate_password
@@ -455,6 +455,9 @@ async def seed(
     for student in students:
         # The flag that protects the shared account and lets the daily job reset it.
         student.is_demo = student.email == demo_email
+        # The nightly replay books these students' plan again. The admin is not marked:
+        # in a deployment it is a real person's account.
+        student.seeded = True
 
     lab_ids: dict[str, tuple[uuid.UUID, ZoneInfo]] = {}
     for spec in LABS:
@@ -497,6 +500,13 @@ async def seed(
             now=now,
             quota_zone=quota_zone,
         )
+
+    # The database was empty, so every student booking is part of the seed.
+    await session.execute(
+        update(Reservation)
+        .where(Reservation.user_id.in_([student.id for student in students]))
+        .values(seeded=True)
+    )
 
     # What has happened by now: pending requests past their start expire, approved
     # reservations past their end complete. The same jobs the worker runs.

@@ -114,6 +114,27 @@ async def test_seed_has_running_pending_and_imminent_bookings(db_session: AsyncS
     assert early == 1
 
 
+async def test_seed_marks_students_and_their_bookings_but_not_the_admin(
+    db_session: AsyncSession,
+) -> None:
+    await _seed(db_session)
+
+    users = (await db_session.execute(select(User.role, User.seeded))).all()
+    assert {(role, seeded) for role, seeded in users} == {
+        (UserRole.STUDENT, True),
+        (UserRole.ADMIN, False),
+    }
+    rows = (
+        await db_session.execute(
+            select(User.role, Reservation.seeded).join(User, User.id == Reservation.user_id)
+        )
+    ).all()
+    assert {(role, seeded) for role, seeded in rows} == {
+        (UserRole.STUDENT, True),
+        (UserRole.ADMIN, False),
+    }
+
+
 async def test_seeding_sends_no_email(db_session: AsyncSession) -> None:
     await _seed(db_session)
 

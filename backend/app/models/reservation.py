@@ -3,7 +3,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING, Final
 
-from sqlalchemy import CheckConstraint, Enum, ForeignKey, Index, Text, func, text, true
+from sqlalchemy import CheckConstraint, Enum, ForeignKey, Index, Text, false, func, text, true
 from sqlalchemy.dialects.postgresql import ExcludeConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -82,6 +82,9 @@ class Reservation(TimestampMixin, Base):
         default=CreatedVia.WEB,
         server_default=CreatedVia.WEB.value,
     )
+    # Booked by the demo seed or its nightly replay for a seeded student. The replay
+    # deletes and recreates exactly these rows; nothing else is ever touched by it.
+    seeded: Mapped[bool] = mapped_column(default=False, server_default=false())
 
     # Loaded explicitly; a lazy load in async code would fail at runtime.
     user: Mapped["User"] = relationship(foreign_keys=[user_id], lazy="raise")
