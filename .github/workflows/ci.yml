@@ -54,14 +54,17 @@ jobs:
       - name: Fetch the tiktoken encoding
         run: uv run python -c "import os, tiktoken; tiktoken.get_encoding(os.environ['TIKTOKEN_ENCODING'])"
 
+      # The scripts outside backend/ that need only the standard library are checked
+      # with it. serving/ is not: its deployment script needs modal, which the backend
+      # environment does not install, and the scripts run by hand against a GPU server.
       - name: Lint
-        run: uv run ruff check . ../loadtest
+        run: uv run ruff check . ../loadtest ../evals/rag/overlap.py
 
       - name: Check formatting
-        run: uv run ruff format --check . ../loadtest
+        run: uv run ruff format --check . ../loadtest ../evals/rag/overlap.py
 
       - name: Type check
-        run: uv run mypy app ../loadtest
+        run: uv run mypy app ../loadtest ../evals/rag/overlap.py
 
       - name: Test (unit and integration)
         run: uv run pytest

@@ -20,15 +20,71 @@ from collections import Counter
 from pathlib import Path
 
 KB_DIR = Path(__file__).resolve().parents[2] / "kb"
-HEADING_SEPARATOR = " › "
+HEADING_SEPARATOR = " \u203a "  # as in the labeled heading paths
 # A question is flagged when it contains at least this share of its gold heading's words.
 FLAG_SHARE = 0.5
 STEM_LENGTH = 5
 SUFFIXES = ("ations", "ation", "ings", "ing", "ed", "es", "s", "ly")
 STOPWORDS = frozenset(
-    """a an and are as at be before by can do does for from has have how i if in is it
-    its my of on or our so that the their them then there this to up was what when where
-    which who why will with you your more than about after into out over per""".split()
+    [
+        "a",
+        "an",
+        "and",
+        "are",
+        "as",
+        "at",
+        "be",
+        "before",
+        "by",
+        "can",
+        "do",
+        "does",
+        "for",
+        "from",
+        "has",
+        "have",
+        "how",
+        "i",
+        "if",
+        "in",
+        "is",
+        "it",
+        "its",
+        "my",
+        "of",
+        "on",
+        "or",
+        "our",
+        "so",
+        "that",
+        "the",
+        "their",
+        "them",
+        "then",
+        "there",
+        "this",
+        "to",
+        "up",
+        "was",
+        "what",
+        "when",
+        "where",
+        "which",
+        "who",
+        "why",
+        "will",
+        "with",
+        "you",
+        "your",
+        "more",
+        "than",
+        "about",
+        "after",
+        "into",
+        "out",
+        "over",
+        "per",
+    ]
 )
 HEADING = re.compile(r"^(#{2,3}) (.+?)\s*$")
 
@@ -48,15 +104,17 @@ def content_words(text: str) -> set[str]:
 def section_texts(path: Path) -> dict[str, str]:
     """Heading path -> body text of that section (without its subsections)."""
     sections: dict[str, list[str]] = {}
-    h2 = None
-    current = None
+    h2: str | None = None
+    current: str | None = None
     for line in path.read_text(encoding="utf-8").splitlines():
         match = HEADING.match(line)
         if match:
             level, text = match.groups()
             if level == "##":
                 h2 = current = text
-            elif h2 is not None:
+            elif h2 is None:
+                continue  # a level-3 heading before any level-2 heading has no parent
+            else:
                 current = f"{h2}{HEADING_SEPARATOR}{text}"
             sections[current] = []
         elif current is not None:
@@ -107,8 +165,10 @@ def main() -> int:
     print(f"questions: {len(rows)}  labels: {len(shares)}  median heading share: {median:.2f}")
     if body_shares:
         body_shares.sort()
-        print(f"median body share: {body_shares[len(body_shares) // 2]:.2f}  "
-              f"max: {body_shares[-1]:.2f}")
+        print(
+            f"median body share: {body_shares[len(body_shares) // 2]:.2f}  "
+            f"max: {body_shares[-1]:.2f}"
+        )
     print("categories:", dict(Counter(r["category"] for r in rows)))
     print("authors:", dict(Counter(r["author"] for r in rows)))
     if missing:
