@@ -151,7 +151,7 @@ tail /opt/gpu-reserve/deploy-history
 
 The worker resets the shared demo account every day at 00:00 UTC: it deletes the bookings and conversations visitors made and clears the account's rate limits (`docs/decisions.md`, "Public demo account").
 
-Containers restart on their own after a reboot or a crash (`restart: unless-stopped`). After the account's spend limit paused the project, start the instance again (`infra/terraform/README.md`); the containers follow.
+Containers restart on their own after a reboot or a crash (`restart: unless-stopped`). If the instance was stopped, start it again (`infra/terraform/README.md`, "Account notes"); the containers follow.
 
 ## Memory on a t4g.small
 
