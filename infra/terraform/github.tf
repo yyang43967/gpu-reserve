@@ -2,11 +2,21 @@
 # environment exchanges its token for this role's short-lived credentials. No access
 # keys are stored in GitHub.
 #
-# Off by default: on AWS's Free plan the account's service control policy refuses
-# IAM OpenID Connect providers. Until it is enabled, deploys run from a laptop.
+# Off by default and turned on per environment in terraform.tfvars, once its GitHub
+# environment exists with deployment limited to main (README, "Turning on the CI deploy
+# role"). The production account refused OIDC providers until its advanced features
+# were activated; see docs/decisions.md, "Account upgrade and advanced features".
 
 locals {
   github_oidc_host = "token.actions.githubusercontent.com"
+  github_owner     = split("/", var.github_repository)[0]
+  github_repo_name = split("/", var.github_repository)[1]
+  # repo:<owner>@<owner id>/<name>@<repository id>:environment:<environment>
+  github_deploy_subject = join("", [
+    "repo:${local.github_owner}@${var.github_owner_id}/",
+    "${local.github_repo_name}@${var.github_repository_id}",
+    ":environment:${var.github_deploy_environment}",
+  ])
 }
 
 resource "aws_iam_openid_connect_provider" "github" {
@@ -33,10 +43,13 @@ data "aws_iam_policy_document" "github_assume" {
     }
 
     # Only jobs that run in the protected environment, not any branch or pull request.
+    # The repository uses GitHub's immutable subject, which carries the owner's and the
+    # repository's numeric IDs, so a later account or repository that takes the same
+    # names does not match.
     condition {
       test     = "StringEquals"
       variable = "${local.github_oidc_host}:sub"
-      values   = ["repo:${var.github_repository}:environment:${var.github_deploy_environment}"]
+      values   = [local.github_deploy_subject]
     }
   }
 }

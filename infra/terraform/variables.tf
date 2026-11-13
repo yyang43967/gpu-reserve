@@ -72,7 +72,7 @@ variable "allow_data_destroy" {
 }
 
 variable "github_deploy_role_enabled" {
-  description = "Create GitHub's OIDC provider and the CI deploy role. Off while the account refuses OIDC providers."
+  description = "Create GitHub's OIDC provider and the CI deploy role. Turn on once the GitHub environment exists with deployment limited to main."
   type        = bool
   default     = false
 }
@@ -81,6 +81,28 @@ variable "github_repository" {
   description = "owner/name of the repository whose workflows may deploy."
   type        = string
   default     = "yyang43967/gpu-reserve"
+}
+
+variable "github_owner_id" {
+  description = "Numeric ID of the repository's owner (gh api repos/<owner>/<name> --jq .owner.id), part of the OIDC subject."
+  type        = string
+  default     = "130431992"
+
+  validation {
+    condition     = can(regex("^[0-9]+$", var.github_owner_id))
+    error_message = "github_owner_id must be a numeric GitHub ID."
+  }
+}
+
+variable "github_repository_id" {
+  description = "Numeric ID of the repository (gh api repos/<owner>/<name> --jq .id), part of the OIDC subject."
+  type        = string
+  default     = "1446540597"
+
+  validation {
+    condition     = can(regex("^[0-9]+$", var.github_repository_id))
+    error_message = "github_repository_id must be a numeric GitHub ID."
+  }
 }
 
 variable "github_deploy_environment" {
