@@ -120,5 +120,6 @@ class WorkerSettings:
     on_job_start = job_start
     on_shutdown = shutdown
     redis_settings = RedisSettings.from_dsn(str(get_settings().redis_url))
-    # Lets `arq --check` (the container healthcheck) see a recent heartbeat.
+    # The heartbeat the container health check reads (arq's `<queue>:health-check` key,
+    # expiring one second after the interval).
     health_check_interval = HEALTH_CHECK_INTERVAL_SECONDS
