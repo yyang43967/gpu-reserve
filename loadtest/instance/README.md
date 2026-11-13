@@ -30,7 +30,7 @@ All from the repository root on a laptop, with `export AWS_PROFILE=gpu-reserve A
 | `keepalive-a` | `-- --base-url http://TWIN:80 --configs cache-on --scripts slot_search,booking_race --skip-hit-rate` (production as it is) | 18 min |
 | `keepalive-b` | `API_UPSTREAM_KEEPALIVE=60s API_KEEP_ALIVE_SECONDS=75 -- ` and the same options | 18 min |
 | `keepalive-c` | `-- --base-url http://TWIN:8000 ...` and the same options (k6 straight to uvicorn, as on the laptop) | 18 min |
-| `soak` | `-- --base-url http://TWIN:80 --soak 30m --soak-rates browse_servers=…,availability=…,slot_search=… --settle 10m` (rates: about half of each script's burst peak, together within the API's CPU) | 45 min |
+| `soak` | `-- --base-url http://TWIN:80 --soak 30m --soak-rates browse_servers=…,availability=…,slot_search=… --settle 10m` (rates: about a sixth of each script's clean capacity, about half the API's vCPU in all) | 45 min |
 | `baseline` | `-- --base-url http://TWIN:80 --compose-file loadtest/compose.baseline.yml --configs cache-on --capacity-only --repeats 1` | 15 min |
 
 7. **Results:** `aws s3 sync s3://<bucket>/out/ loadtest/out/` and `aws s3 sync s3://<bucket>/logs/ loadtest/out/instance-<date>/logs/`, then `python3 loadtest/report.py loadtest/out/<run>` per phase.
