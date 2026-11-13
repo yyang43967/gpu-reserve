@@ -28,7 +28,8 @@ x-backend-env: &backend-env
   SES_REGION: ${AWS_REGION:?}
   EMAIL_FROM: ${EMAIL_FROM:?}
   OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-  ASSISTANT_MODEL: ${ASSISTANT_MODEL:-openai:gpt-5.4-mini-2026-03-17}
+  # Production's model, chosen from the agent evaluation. OpenAI stays for embeddings.
+  ASSISTANT_MODEL: ${ASSISTANT_MODEL:-anthropic:claude-haiku-5-5}
   ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
   LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
   LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}

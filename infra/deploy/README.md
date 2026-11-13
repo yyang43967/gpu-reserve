@@ -22,10 +22,10 @@ These files are copied into the backend image at `/app/deploy`. A deploy extract
 |---|---|---|
 | `POSTGRES_PASSWORD` | yes | `openssl rand -hex 32` (hex only: it goes into a connection URL) |
 | `JWT_SECRET` | yes | `openssl rand -hex 32` (at least 32 bytes) |
-| `OPENAI_API_KEY` | for the assistant | Embeddings for policy search, and the default model. Without it the assistant is off. |
-| `ANTHROPIC_API_KEY` | no | Only for an `anthropic:` model |
+| `OPENAI_API_KEY` | for the assistant | Embeddings for policy search. Without it the assistant cannot search the policies. |
+| `ANTHROPIC_API_KEY` | for the assistant | The default model (`anthropic:claude-haiku-5-5`). Without it the assistant is unavailable. |
 | `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY` | no | Tracing; also set `LANGFUSE_HOST` (String) |
-| `ASSISTANT_MODEL`, `LOG_LEVEL` | no | String; defaults `openai:gpt-5.4-mini-2026-03-17` and `INFO` |
+| `ASSISTANT_MODEL`, `LOG_LEVEL` | no | String; defaults `anthropic:claude-haiku-5-5` (set in `compose.yml`, so it ships with the release) and `INFO` |
 | `DEMO_LOGIN_EMAIL`, `DEMO_LOGIN_PASSWORD` | for the public demo | String; a seeded student (`ada.lovelace@example.edu`) and the password the sign-in page shows. Both or neither. |
 | `ASSISTANT_GLOBAL_DAY_LIMIT` | no | String; assistant messages from all users per UTC day, default 300 |
 | `EMAIL_SUPPRESSED_DOMAINS` | no | String; comma-separated domains never mailed, default `example.edu` (the seeded accounts) |
@@ -38,6 +38,7 @@ put() { aws ssm put-parameter --name "/gpu-reserve/prod/$1" --type SecureString 
 put POSTGRES_PASSWORD "$(openssl rand -hex 32)"
 put JWT_SECRET "$(openssl rand -hex 32)"
 read -rs KEY && put OPENAI_API_KEY "$KEY"; unset KEY   # paste the key, then Enter
+read -rs KEY && put ANTHROPIC_API_KEY "$KEY"; unset KEY
 ```
 
 `POSTGRES_PASSWORD` is used when Postgres first creates its data directory. Changing the parameter later does not change the database's password.
