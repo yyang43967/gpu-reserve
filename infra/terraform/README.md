@@ -25,8 +25,8 @@ Terraform's AWS provider reads the same profile. If a plan fails with an expired
 ## Account notes
 
 - **Region.** The account was created with AWS's newer sign-up flow, which starts it in a single region (`us-east-2`). Everything is deployed there.
-- **Plan.** The account is on AWS's Free plan and is applied as such. Upgrade to the Paid plan (console, "Upgrade plan") only if an apply fails on an operation the plan blocks, spend approaches the spend limit, or before the free period ends on 2027-05-11; a Free-plan account is closed when it ends. Known block: IAM OpenID Connect providers are denied, so `github_deploy_role_enabled` stays `false` and deploys run from a laptop until the account is upgraded.
-- **Spend limit.** If the account's project has a monthly spend limit, reaching it pauses the project: new resources are blocked first, then idle resources are paused, and at the limit the whole project stops. Data is kept, but nothing restarts on its own. After raising the limit or reactivating the project:
+- **Plan.** The account is on AWS's Free plan and is applied as such. Upgrade to the Paid plan (console, "Upgrade plan") only if an apply fails on an operation the plan blocks, or before the free period ends on 2027-05-11; a Free-plan account is closed when it ends. Credits carry over and expire on 2027-11-11. Known block: IAM OpenID Connect providers are denied, so `github_deploy_role_enabled` stays `false` and deploys run from a laptop until the account is upgraded.
+- **No spend limit.** Spend limits exist only on the Paid plan, and activating advanced features removes them and allows no new ones, so the account has none. The budgets alert; they stop nothing. If the instance is stopped (by hand, or by AWS):
   1. Start the EC2 instance (console or `aws ec2 start-instances --instance-ids <id>`).
   2. Docker starts the containers (`restart: unless-stopped`). Check `https://api.gpu.yiyangdev.com/api/v1/ready`.
   3. If a deploy was interrupted, run the deploy again for the current image tag.
