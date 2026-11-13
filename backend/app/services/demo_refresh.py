@@ -17,6 +17,18 @@ What it never touches: users the seed did not create, their reservations, and an
 reservation not flagged `seeded`. A plan entry that breaks a rule against current data
 (a real booking in its slot, a server in maintenance or removed, a seeded account that
 was deactivated) is skipped and reported, never forced: real bookings always win.
+
+Lock order. Every path in the application takes its locks in the order user lock,
+then reservation rows, then server row (bookings: user, server; deactivation: user,
+reservations; approval: reservation, server). The refresh follows it: it takes the
+user lock of every seeded owner first, then the seeded reservation rows (the delete),
+and each entry then takes its server row inside create_reservation. Taking the rows
+first and the user locks per entry could deadlock with deactivating a seeded student.
+
+Transient failures. Each entry runs in a savepoint. A deadlock or serialization
+failure inside one rolls back to that savepoint, keeps every earlier lock and entry,
+and is reported as a skip; the next night tries again. Any other database error fails
+the whole refresh, which rolls back and leaves yesterday's demo data in place.
 """
 
 import logging
@@ -24,16 +36,26 @@ import uuid
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Final
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import delete, select
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import DomainError
 from app.models import Lab, Notification, Reservation, Server, User, UserRole
-from app.services import audit, demo_plan, jobs
+from app.services import audit, demo_plan, jobs, locks
 from app.services.availability_cache import mark_changed
 from app.services.demo_plan import ADMIN, PLAN, SERVERS, STUDENTS
+from app.services.reservations import sqlstate
+
+# Lock conflicts between concurrent transactions: worth a skip and a retry tomorrow,
+# not a failed refresh.
+TRANSIENT_SQLSTATES: Final = {
+    "40P01": "deadlock detected",
+    "40001": "serialization failure",
+}
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +132,10 @@ async def refresh_seeded_reservations(
     if not students:
         raise NothingSeeded("No seeded students: this database has no demo data to refresh.")
     demo_admin = await demo_plan.ensure_demo_admin(session)
+    # User locks before the reservation rows; see "Lock order" above. Sorted, so two
+    # refreshes would queue in the same order (the job lock already prevents that).
+    for owner_id in sorted({user.id for user in students.values()} | {demo_admin.id}):
+        await locks.lock_user_bookings(session, owner_id)
     hosts = await _plan_servers(session)
     deleted = await _delete_seeded(session)
 
@@ -138,6 +164,12 @@ async def refresh_seeded_reservations(
                 )
         except DomainError as error:
             skipped.append(SkippedEntry(booking.purpose, str(error)))
+            continue
+        except DBAPIError as error:
+            transient = TRANSIENT_SQLSTATES.get(sqlstate(error) or "")
+            if transient is None:
+                raise
+            skipped.append(SkippedEntry(booking.purpose, f"{transient}; retried next run"))
             continue
         created.append(reservation.id)
 

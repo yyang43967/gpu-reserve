@@ -1,15 +1,17 @@
 """The nightly replay of the demo plan: it keeps the demo current at any moment, never
 touches data the seed did not create, and lets real bookings win."""
 
+import asyncio
 from collections.abc import Callable
 from datetime import UTC, datetime, time, timedelta
-from typing import Final
+from typing import Any, Final
 from zoneinfo import ZoneInfo
 
 import pytest
 from redis.asyncio import Redis
 from sqlalchemy import func, select, text, update
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.exc import DBAPIError
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from app.cli import CommandError, refresh_demo
 from app.core.config import Settings
@@ -25,8 +27,8 @@ from app.models import (
     UserRole,
 )
 from app.seed import seed
-from app.services import passwords, reservations
-from app.services.demo_plan import DEMO_ADMIN_EMAIL, PLAN
+from app.services import demo_plan, locks, passwords, reservations
+from app.services.demo_plan import DEMO_ADMIN_EMAIL, PLAN, Booking
 from app.services.demo_refresh import NothingSeeded, refresh_seeded_reservations
 from app.services.reservations import NewReservation
 from tests.integration.reservation_helpers import QUOTA_ZONE, add_user
@@ -278,3 +280,101 @@ async def test_the_command_reports_an_unseeded_database(
 ) -> None:
     with pytest.raises(CommandError, match="No seeded students"):
         await refresh_demo(make_settings(), dry_run=True, now=LATER)
+
+
+# --- transient failures and lock order ---
+
+FAILING_ENTRY: Final = "Evaluating quantized 70B models"
+
+
+def _fail_one_entry(monkeypatch: pytest.MonkeyPatch, code: str) -> None:
+    """Make one plan entry fail with a real Postgres error carrying `code`, after its
+    booking was written, as a deadlock found late in the entry would."""
+    original = demo_plan.book
+
+    async def book(session: AsyncSession, booking: Booking, **kwargs: Any) -> Reservation:
+        reservation = await original(session, booking, **kwargs)
+        if booking.purpose == FAILING_ENTRY:
+            await session.execute(
+                text(f"DO $$ BEGIN RAISE EXCEPTION 'injected' USING ERRCODE = '{code}'; END $$")
+            )
+        return reservation
+
+    monkeypatch.setattr(demo_plan, "book", book)
+
+
+@pytest.mark.parametrize(
+    ("code", "reason"), [("40P01", "deadlock detected"), ("40001", "serialization failure")]
+)
+async def test_a_transient_failure_skips_only_that_entry(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, code: str, reason: str
+) -> None:
+    await _seed(db_session)
+    _fail_one_entry(monkeypatch, code)
+
+    result = await _refresh(db_session, LATER)
+
+    assert [(s.purpose, s.reason) for s in result.skipped] == [
+        (FAILING_ENTRY, f"{reason}; retried next run")
+    ]
+    assert result.created == len(PLAN) - 1
+    purposes = list(await db_session.scalars(select(Reservation.purpose)))
+    assert FAILING_ENTRY not in purposes
+    assert len(purposes) == len(PLAN) - 1
+    assert await _overlaps(db_session) == 0
+
+
+async def test_any_other_database_error_fails_the_whole_refresh(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await _seed(db_session)
+    before = set(await db_session.scalars(select(Reservation.id)))
+    _fail_one_entry(monkeypatch, "23503")
+
+    with pytest.raises(DBAPIError):
+        await refresh_seeded_reservations(db_session, now=LATER, quota_zone=QUOTA_ZONE)
+    await db_session.rollback()
+
+    assert set(await db_session.scalars(select(Reservation.id))) == before
+
+
+async def _waiting_for_advisory_lock(engine: AsyncEngine) -> bool:
+    async with engine.connect() as conn:
+        waiting = await conn.scalar(
+            text("SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND NOT granted")
+        )
+    return bool(waiting)
+
+
+async def test_user_locks_come_before_any_reservation_row(
+    db_session: AsyncSession, engine: AsyncEngine
+) -> None:
+    """Deactivating a seeded student takes the user lock, then that user's rows. The
+    refresh must take the user lock first too, or the two could deadlock."""
+    await _seed(db_session)
+    ada = await db_session.scalar(select(User).where(User.email == "ada.lovelace@example.edu"))
+    assert ada is not None
+    sessions = async_sessionmaker(engine)
+
+    async with sessions() as holder, sessions() as refreshing:
+        # Autobegins a transaction that holds Ada's user lock until the commit below.
+        await locks.lock_user_bookings(holder, ada.id)
+        task = asyncio.create_task(_refresh(refreshing, LATER))
+        for _ in range(200):
+            if await _waiting_for_advisory_lock(engine):
+                break
+            await asyncio.sleep(0.05)
+        else:
+            pytest.fail("the refresh never waited for the user lock")
+        # Blocked on a user lock, the refresh holds no reservation row yet.
+        async with sessions() as probe, probe.begin():
+            locked = await probe.execute(
+                select(Reservation.id).where(Reservation.seeded).with_for_update(nowait=True)
+            )
+            assert len(locked.all()) == len(PLAN)
+        assert not task.done()
+
+        await holder.commit()
+        result = await asyncio.wait_for(task, timeout=30)
+
+    assert result.created == len(PLAN)
