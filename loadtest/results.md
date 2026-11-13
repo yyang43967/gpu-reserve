@@ -237,7 +237,7 @@ Runs from 2026-11-12 and 13 on a second t4g.small built like production, with k6
 
 ### Instance summary
 
-- **The twin's burst capacity is 55–65% of the laptop's,** with the same bottleneck: one uvicorn process at 100% of one of the two vCPUs, while Postgres used 6–33% of a vCPU and Caddy at most 11%. The whole instance used 118–143% of its 200% at saturation, so most of a vCPU sat idle. See [Finding: one API process uses one of two vCPUs](#finding-one-api-process-uses-one-of-two-vcpus).
+- **The twin's burst capacity is 55–65% of the laptop's,** with the same bottleneck: one uvicorn process at 100% of one of the two vCPUs, while Postgres used 6–33% of a vCPU and Caddy at most 11%. The whole instance used 118–144% of its 200% at saturation, so most of a vCPU sat idle. See [Finding: one API process uses one of two vCPUs](#finding-one-api-process-uses-one-of-two-vcpus).
 - **Past saturation, successful throughput falls instead of levelling off.** Requests wait out the pool's 3 s checkout timeout and fail as 503, and the requests that succeed drop by up to 28% from the best step (availability without the cache: 112 → 81 req/s). See [Finding: throughput collapses on the pool timeout](#finding-throughput-collapses-on-the-pool-timeout).
 - **The cache:** the same conclusion as on the laptop. Postgres CPU fell 75% for availability and 47% for slot search at a fixed rate. Here latency also improved, with ranges that don't overlap: availability p95 23 → 15 ms, slot search 320 → 231 ms.
 - **Keep-alive:** every 502 (13 in all) came from slot search, a POST, through Caddy with production's timeouts, in an overloaded step. With Caddy's idle timeout below uvicorn's (arm B), there were none. Nobody got a response with status 0, including k6 straight to uvicorn (arm C). The evidence points to the predicted race, but the counts are small. See [Keep-alive experiment](#keep-alive-experiment).
@@ -276,7 +276,7 @@ Runs from 2026-11-12 and 13 on a second t4g.small built like production, with k6
 | baseline | `20261113T001352Z-baseline` | Capacity at 0.4 vCPU (simulated), cache on, 1 repeat | **Failed before any load**: the worker's health check. Kept as the record of the bug. |
 | baseline-2 | `20261113T004137Z-baseline-2` | The same, with the health-check fix | Passed |
 
-The results directories are not in Git (`loadtest/out/` is ignored); the tables here come from `python3 loadtest/report.py loadtest/out/<dir>` and from the samples for the soak and the per-step status counts.
+The results directories are not in Git (`loadtest/out/` is ignored). Every figure in this section comes from `python3 loadtest/report.py loadtest/out/<dir>`, which also writes `report.md` into the directory: the capacity tables (including the best successful throughput and CPU per container at saturation), successful throughput and status codes per step (the 502 counts and the overload tables), fixed-rate runs with one configuration (the keep-alive arms), and, for the soak, memory and CPU per five minutes, spikes, and moments with the pool fully busy.
 
 ### Calibration and ramp ceilings
 
@@ -300,7 +300,7 @@ Burst phase, ramps of 10 steps of 12 s, medians of three repeats. "Peak" counts 
 **Reading it:**
 - **The twin reaches 55–65% of the laptop's peak.** The laptop's API had 0.75 of an Apple M1 core, and a Graviton2 core is slower per request. The twin also routes every request through Caddy, and runs the worker.
 - **The sustained rates are 40–55% of the laptop's.** At the twin's coarser steps (20 req/s for availability), one step is a large share of the result. Availability with the cache on scored 120 req/s on the median step, but 80 in two of three runs, so the cache's capacity gain is again small and uncertain.
-- **The same bottleneck as on the laptop:** the API at one full vCPU, Postgres at 6–33%. At saturation the containers added up to 118–143% of the instance's 200%: API 91–102%, Postgres 6–33%, Caddy 2–11%, worker 7–8%, Redis 1–3%.
+- **The same bottleneck as on the laptop:** the API at one full vCPU, Postgres at 6–33%. At saturation the containers added up to 118–144% of the instance's 200%: API 92–102%, Postgres 6–33%, Caddy 2–11%, worker 7–10%, Redis 1–3%.
 - **The cache's value is again in Postgres:** 33% → 9% of a vCPU for availability at saturation. The best successful throughput rose 112 → 136 req/s for availability and 15 → 17 for slot search.
 
 ### Fixed rate on the twin, cache off vs on
@@ -390,7 +390,7 @@ The three read scripts at fixed rates for 30 minutes without restarting anything
 
 **Verdict: no sign of a leak in the API.**
 - **The API's memory was flat** at 188–190 MiB, as one-minute means, for the first 25 minutes. Then it rose about 3 MiB in two minutes, and stayed flat at 192–193 MiB until the load ended and through the 10 idle minutes. A leak would grow with the requests served: steadily, through the second half. The 2.3 MiB per 10 minutes in the table is that single step, not a trend.
-- **The step came with a stall** at minute 26: for about 3 s every pool connection was busy and the API's CPU read above 100%. The two 503s most likely came from it, though k6 doesn't record when each request ended. The cause isn't visible in these samples.
+- **The step came with a stall** at minute 26: every pool connection was busy for about 2.5 s, against half a second at most at any other minute, and the API's CPU read above 100%. The two 503s most likely came from it, though k6 doesn't record when each request ended. The cause isn't visible in these samples.
 - **An upper bound:** the whole 30 minutes added 4–5 MiB over 73,795 requests. So if these read paths leak at all, it is under about 60 bytes per request.
 - **Production's growth isn't explained by this.** Production's API went from 208 MiB after a deploy to 318 MiB after a day that included assistant use. The soak exercised only the read paths: no assistant, logins, refreshes, or uploads. Something in those paths, or a one-off rise such as loading the assistant's clients, could account for it; this run can't tell which.
 - **Postgres, Redis, and Caddy** stayed level. Caddy released about half its memory after the load stopped.
@@ -415,11 +415,11 @@ The three read scripts at fixed rates for 30 minutes without restarting anything
 
 ### Finding: one API process uses one of two vCPUs
 
-In every burst capacity run the API sat at 91–102% of a vCPU, the most a single uvicorn process can use, while the instance as a whole used 118–143% of 200%. Postgres (6–33%) and Caddy (2–11%) had headroom, and so did the instance. The first trial runs showed the same thing (API 95–100%, Postgres 5–37%, Caddy under 15%).
+In every burst capacity run the API sat at 92–102% of a vCPU, the most a single uvicorn process can use, while the instance as a whole used 118–144% of 200%. Postgres (6–33%) and Caddy (2–11%) had headroom, and so did the instance. The first trial runs showed the same thing (API 95–100%, Postgres 5–37%, Caddy under 15%).
 
 **What to evaluate:** two uvicorn workers. Against it:
 - **Memory.** One API process used 188–205 MiB in these runs and 219–318 MiB in production, against the API container's 448 MiB limit. Two would need about 400–650 MiB. That means raising the limit within the instance's 2 GiB, which also holds Postgres, the worker, Redis, and Caddy, or making each process smaller.
-- **A smaller gain than 2×.** Postgres and Caddy already use 11–43% of a vCPU at the API's saturation, and they would use more with two processes.
+- **A smaller gain than 2×.** Postgres and Caddy already use 8–43% of a vCPU at the API's saturation, and they would use more with two processes.
 - **Nothing without credits.** In the simulated baseline every container shared 0.4 of a vCPU, so a second process would only compete for it. The gain applies only while the instance has credits.
 - **Two pools.** Each process would have its own pool of 5 + 5 connections. Twice the connections is still well within Postgres's limit, but it also doubles the work Postgres can be asked to do at once, which is where the cache helps (see the laptop summary).
 

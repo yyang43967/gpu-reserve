@@ -56,6 +56,8 @@ def steps(
                 "achieved_rps": metric(summary, f"http_reqs{{{tag}}}", "count") / hold,
                 "p95": metric(summary, f"http_req_duration{{{tag}}}", "p(95)"),
                 "failed": metric(summary, f"http_req_failed{{{tag}}}", "rate"),
+                # 200 responses only: the throughput users get, without fast failures.
+                "successful_rps": statuses(summary, tag).get("200", 0) / hold,
             }
         )
     return rows
