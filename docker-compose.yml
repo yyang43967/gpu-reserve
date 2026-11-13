@@ -114,8 +114,13 @@ services:
       api:
         condition: service_started
     mem_limit: 256m
+    # The worker's Redis heartbeat; see infra/deploy/compose.yml.
     healthcheck:
-      test: ["CMD", "arq", "--check", "app.workers.settings.WorkerSettings"]
+      test:
+        - CMD
+        - python
+        - -c
+        - "import os, sys, redis; sys.exit(0 if redis.Redis.from_url(os.environ['REDIS_URL'], socket_timeout=3).exists('arq:queue:health-check') else 1)"
       interval: 30s
       timeout: 5s
       retries: 3

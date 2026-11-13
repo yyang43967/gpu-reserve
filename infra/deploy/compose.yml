@@ -116,8 +116,17 @@ services:
         condition: service_healthy
     mem_limit: 256m
     memswap_limit: 256m
+    # Reads the heartbeat the worker writes to Redis every 30 s (it expires after 31 s),
+    # which is what `arq --check` reads too. `arq --check` imports the whole app first,
+    # which took longer than the timeout with the instance's CPU at its baseline, so a
+    # deploy (`up --wait`) on a credit-exhausted instance would fail; importing the
+    # Redis client alone is about a fifth of the work.
     healthcheck:
-      test: ["CMD", "arq", "--check", "app.workers.settings.WorkerSettings"]
+      test:
+        - CMD
+        - python
+        - -c
+        - "import os, sys, redis; sys.exit(0 if redis.Redis.from_url(os.environ['REDIS_URL'], socket_timeout=3).exists('arq:queue:health-check') else 1)"
       interval: 30s
       timeout: 5s
       retries: 3
