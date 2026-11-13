@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from app.db.base import CHECKPOINT_TABLES, Base, include_name
 from app.seed import STUDENTS, seed
 from app.services import passwords
+from app.services.demo_plan import DEMO_ADMIN_EMAIL
 from tests.integration.db_utils import alembic_config, create_database
 from tests.integration.reservation_helpers import QUOTA_ZONE
 
@@ -154,12 +155,16 @@ def test_backfill_marks_only_seeded_students_and_their_bookings(
     command.upgrade(config, "head")
 
     users, bookings = asyncio.run(_flags(url))
+    # The backfill never marks an admin. (Production was seeded before the demo admin
+    # existed; the refresh creates it.)
     assert users == {
         ("admin@example.edu", "admin", False),
+        (DEMO_ADMIN_EMAIL, "admin", False),
         ("late@example.org", "student", False),
         *((email, "student", True) for _, email in STUDENTS),
     }
+    admins = {"admin@example.edu", DEMO_ADMIN_EMAIL}
     for email, purpose, seeded in bookings:
-        expected = email != "admin@example.edu" and purpose != "Booked after seeding"
+        expected = email not in admins and purpose != "Booked after seeding"
         assert seeded is expected, (email, purpose)
     assert ("ada.lovelace@example.edu", "Booked after seeding", False) in bookings

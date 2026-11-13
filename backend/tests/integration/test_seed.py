@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.cli import CommandError
 from app.core.config import Environment, Settings
+from app.core.security import UNUSABLE_PASSWORD_HASH
 from app.models import (
     Lab,
     Notification,
@@ -20,7 +21,8 @@ from app.models import (
     UserRole,
 )
 from app.seed import DatabaseNotEmpty, run, seed
-from app.services import passwords
+from app.services import demo_plan, passwords, users
+from app.services.demo_plan import DEMO_ADMIN_EMAIL, DemoAdminConflict
 from tests.integration.reservation_helpers import QUOTA_ZONE
 
 pytestmark = pytest.mark.integration
@@ -70,10 +72,13 @@ async def test_seed_creates_the_described_data(db_session: AsyncSession) -> None
     assert set(summary.by_status) == {status.value for status in ReservationStatus}
     assert summary.reservations == 31
 
-    admins = list(await db_session.scalars(select(User).where(User.role == UserRole.ADMIN)))
-    assert [a.email for a in admins] == ["admin@example.edu"]
-    assert await passwords.verify_password(admins[0].password_hash, PASSWORD)
-    assert await db_session.scalar(select(func.count()).select_from(User)) == 9
+    admins = {
+        admin.email: admin
+        for admin in await db_session.scalars(select(User).where(User.role == UserRole.ADMIN))
+    }
+    assert set(admins) == {"admin@example.edu", DEMO_ADMIN_EMAIL}
+    assert await passwords.verify_password(admins["admin@example.edu"].password_hash, PASSWORD)
+    assert await db_session.scalar(select(func.count()).select_from(User)) == 10
     timezones = set(await db_session.scalars(select(Lab.timezone)))
     assert timezones == {"America/Los_Angeles", "America/New_York", "America/Chicago"}
     restricted = set(
@@ -114,25 +119,55 @@ async def test_seed_has_running_pending_and_imminent_bookings(db_session: AsyncS
     assert early == 1
 
 
-async def test_seed_marks_students_and_their_bookings_but_not_the_admin(
+async def test_seed_marks_its_people_and_bookings_but_not_the_deployment_admin(
     db_session: AsyncSession,
 ) -> None:
     await _seed(db_session)
 
-    users = (await db_session.execute(select(User.role, User.seeded))).all()
-    assert {(role, seeded) for role, seeded in users} == {
-        (UserRole.STUDENT, True),
-        (UserRole.ADMIN, False),
+    users = (await db_session.execute(select(User.email, User.role, User.seeded))).all()
+    assert {(email, seeded) for email, role, seeded in users if role is UserRole.ADMIN} == {
+        ("admin@example.edu", False),
+        (DEMO_ADMIN_EMAIL, True),
     }
-    rows = (
-        await db_session.execute(
-            select(User.role, Reservation.seeded).join(User, User.id == Reservation.user_id)
+    assert all(seeded for _, role, seeded in users if role is UserRole.STUDENT)
+    owners = set(
+        await db_session.scalars(
+            select(User.email).join(Reservation, Reservation.user_id == User.id)
         )
-    ).all()
-    assert {(role, seeded) for role, seeded in rows} == {
-        (UserRole.STUDENT, True),
-        (UserRole.ADMIN, False),
-    }
+    )
+    assert "admin@example.edu" not in owners
+    assert set(await db_session.scalars(select(Reservation.seeded))) == {True}
+    # Every decision on a seeded request was made by the demo admin.
+    deciders = set(
+        await db_session.scalars(
+            select(User.email).join(Reservation, Reservation.decided_by == User.id).distinct()
+        )
+    )
+    assert deciders == {DEMO_ADMIN_EMAIL}
+
+
+async def test_nobody_can_sign_in_as_the_demo_admin(db_session: AsyncSession) -> None:
+    await _seed(db_session)
+
+    demo_admin = await db_session.scalar(select(User).where(User.email == DEMO_ADMIN_EMAIL))
+    assert demo_admin is not None
+    assert demo_admin.password_hash == UNUSABLE_PASSWORD_HASH
+    for guess in ("", "!", PASSWORD, UNUSABLE_PASSWORD_HASH):
+        assert not await passwords.verify_password(demo_admin.password_hash, guess)
+
+
+async def test_the_demo_admin_never_takes_over_an_existing_account(
+    db_session: AsyncSession,
+) -> None:
+    await users.create_user(
+        db_session, email=DEMO_ADMIN_EMAIL, password=PASSWORD, full_name="Someone Else"
+    )
+
+    with pytest.raises(DemoAdminConflict):
+        await demo_plan.ensure_demo_admin(db_session)
+    account = await db_session.scalar(select(User).where(User.email == DEMO_ADMIN_EMAIL))
+    assert account is not None
+    assert (account.role, account.seeded) == (UserRole.STUDENT, False)
 
 
 async def test_seeding_sends_no_email(db_session: AsyncSession) -> None:
@@ -211,7 +246,7 @@ async def test_refuses_a_database_with_users_unless_reset(
     )
     assert summary.reservations == 31
     emails = set(await db_session.scalars(select(User.email).where(User.role == UserRole.ADMIN)))
-    assert emails == {"other-admin@example.edu"}
+    assert emails == {"other-admin@example.edu", DEMO_ADMIN_EMAIL}
 
 
 async def test_refuses_production(make_settings) -> None:
@@ -260,6 +295,7 @@ async def test_production_needs_allow_production_and_gives_only_the_demo_a_passw
     # cheap_hashing stores "plain:<password>".
     assert hashes.pop(DEMO_EMAIL) == f"plain:{DEMO_PASSWORD}"
     assert hashes.pop("admin@example.edu") == f"plain:{PASSWORD}"
+    assert hashes.pop(DEMO_ADMIN_EMAIL) == UNUSABLE_PASSWORD_HASH
     assert len(hashes) == 7
     # The other students got random passwords: none shared, none known.
     assert len(set(hashes.values())) == 7
