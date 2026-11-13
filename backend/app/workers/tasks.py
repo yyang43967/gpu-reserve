@@ -3,6 +3,7 @@ the current time, and commits. All the logic lives in the service."""
 
 import logging
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
@@ -11,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.core.config import Settings
 from app.rag.embeddings import Embedder, EmbeddingError
 from app.rag.ingest import IngestReport, format_report, ingest
-from app.services import demo, jobs
+from app.services import demo, demo_refresh, jobs
 from app.services.email import EmailSender
 from app.services.rate_limit import RateLimiter
 
@@ -69,17 +70,50 @@ async def reindex_kb(ctx: dict[str, Any]) -> IngestReport:
     return report
 
 
-async def reset_demo(ctx: dict[str, Any]) -> demo.DemoReset:
-    """Return the shared demo account to its seeded state (app.services.demo), then
-    clear its rate-limit counters. Counters are cleared after the commit: if the
-    transaction fails, the account keeps its limits until the next run."""
+@dataclass(frozen=True)
+class DemoMaintenance:
+    reset: demo.DemoReset
+    # None when there is no demo account, or another refresh was running.
+    refresh: demo_refresh.DemoRefresh | None
+
+
+async def reset_and_refresh_demo(ctx: dict[str, Any]) -> DemoMaintenance:
+    """The demo's nightly maintenance, in two transactions.
+
+    1. Return the shared demo account to its seeded state (app.services.demo), then
+       clear its rate-limit counters. Counters are cleared after the commit: if the
+       transaction fails, the account keeps its limits until the next run.
+    2. Replace the seeded reservations with the demo plan placed around now
+       (app.services.demo_refresh). The reset goes first so the bookings visitors made
+       no longer count against the demo account's quota and limits when its seeded
+       bookings are made again. If the refresh fails, the reset still holds and the
+       previous demo data stays.
+
+    Only deployments with a demo account run the refresh."""
     settings: Settings = ctx["settings"]
     factory: async_sessionmaker[AsyncSession] = ctx["session_factory"]
+    now = datetime.now(UTC)
     async with factory() as session, session.begin():
-        user_ids, report = await demo.reset_demo_accounts(session, now=datetime.now(UTC))
+        user_ids, report = await demo.reset_demo_accounts(session, now=now)
     limiter = RateLimiter(ctx["cache_redis"], settings)
     for user_id in user_ids:
         await limiter.clear_user_limits(user_id)
-    if report.accounts:
-        logger.info("reset_demo: %s", report)
-    return report
+    if not report.accounts:
+        return DemoMaintenance(reset=report, refresh=None)
+    logger.info("reset_demo: %s", report)
+
+    try:
+        async with factory() as session, session.begin():
+            refreshed = await demo_refresh.refresh_seeded_reservations(
+                session, now=datetime.now(UTC), quota_zone=settings.quota_zone
+            )
+    except demo_refresh.RefreshInProgress:
+        logger.info("refresh_demo skipped: another refresh is running")
+        return DemoMaintenance(reset=report, refresh=None)
+    logger.info(
+        "refresh_demo: deleted %d, created %d, skipped %d",
+        refreshed.deleted,
+        refreshed.created,
+        len(refreshed.skipped),
+    )
+    return DemoMaintenance(reset=report, refresh=refreshed)

@@ -37,6 +37,11 @@ _password_hasher = PasswordHasher(
 )
 
 
+# Stored instead of a hash for accounts nobody may sign in to. It is not an argon2 hash,
+# so verify_password returns False for every password.
+UNUSABLE_PASSWORD_HASH: Final = "!"  # noqa: S105 - a marker that matches no password
+
+
 def hash_password(password: str) -> str:
     return _password_hasher.hash(password)
 

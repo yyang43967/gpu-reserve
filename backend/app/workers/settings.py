@@ -71,6 +71,7 @@ EVERY_MINUTE: Final = set(range(60))
 EVERY_FIVE_MINUTES: Final = set(range(0, 60, 5))
 # A tick that runs longer than this is cancelled; the next tick picks up the rest.
 JOB_TIMEOUT_SECONDS: Final = 50
+DEMO_MAINTENANCE_HOUR_UTC: Final = 10
 
 # unique=True (the default, made explicit) gives each tick one job id, so several
 # workers enqueue a tick only once. Overlap between consecutive ticks is prevented
@@ -94,10 +95,11 @@ CRON_JOBS: Final = [
         unique=True,
         timeout=JOB_TIMEOUT_SECONDS,
     ),
-    # Midnight UTC, when the assistant's global daily count also starts over.
+    # 10:00 UTC is 02:00 in California in winter and 03:00 in summer: the middle of
+    # the night for US visitors, so one rarely loses a booking mid-session.
     cron(
-        with_job_name(tasks.reset_demo),
-        hour={0},
+        with_job_name(tasks.reset_and_refresh_demo),
+        hour={DEMO_MAINTENANCE_HOUR_UTC},
         minute={0},
         unique=True,
         timeout=JOB_TIMEOUT_SECONDS,

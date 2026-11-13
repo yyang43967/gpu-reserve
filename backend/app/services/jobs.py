@@ -10,15 +10,21 @@ holds it. The lock uses the two-key form with JOB_LOCK_NAMESPACE, a key space se
 from the single-key locks on users, so a job can never collide with a user's lock.
 The sweeping statements are idempotent anyway; the lock keeps two runs from doing the
 same work twice and from blocking each other on the same rows.
+
+Expiry and completion also take `only`, a set of reservation ids, for the demo data
+refresh: it applies them to the reservations it just made and to nothing else. Such a
+call skips the lock, which is about whole sweeps; the statements stay idempotent.
 """
 
 import logging
+import uuid
+from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import StrEnum
 from typing import Final
 
-from sqlalchemy import BindParameter, DateTime, bindparam, select, text, update
+from sqlalchemy import ARRAY, BindParameter, DateTime, Uuid, bindparam, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -50,6 +56,7 @@ class Job(StrEnum):
     COMPLETE_FINISHED = "complete_finished"
     QUEUE_REMINDERS = "queue_reminders"
     DISPATCH_NOTIFICATIONS = "dispatch_notifications"
+    REFRESH_DEMO = "refresh_demo"
 
 
 async def try_job_lock(session: AsyncSession, job: Job) -> bool:
@@ -69,7 +76,9 @@ def _at(name: str) -> BindParameter[datetime]:
 # --- expiring pending reservations ---
 
 
-async def expire_pending(session: AsyncSession, *, now: datetime) -> int | None:
+async def expire_pending(
+    session: AsyncSession, *, now: datetime, only: Collection[uuid.UUID] | None = None
+) -> int | None:
     """Mark pending reservations whose start has passed as expired.
 
     In one transaction, for every reservation with status pending and starts_at <= now:
@@ -84,8 +93,12 @@ async def expire_pending(session: AsyncSession, *, now: datetime) -> int | None:
     A concurrent approval must never leave an approved reservation without active
     allocations, or an expired one with active allocations.
     """
-    if not await try_job_lock(session, Job.EXPIRE_PENDING):
+    if only is not None:
+        if not only:
+            return 0
+    elif not await try_job_lock(session, Job.EXPIRE_PENDING):
         return None
+    scope = [Reservation.id.in_(only)] if only is not None else []
 
     # The UPDATE locks each row it changes. A row an approval holds is waited for and
     # then re-checked against the WHERE clause (READ COMMITTED), so a reservation
@@ -96,6 +109,7 @@ async def expire_pending(session: AsyncSession, *, now: datetime) -> int | None:
             .where(
                 Reservation.status == ReservationStatus.PENDING,
                 Reservation.starts_at <= now,
+                *scope,
             )
             .values(status=ReservationStatus.EXPIRED)
             .returning(Reservation.id, Reservation.user_id, Reservation.server_id)
@@ -149,11 +163,11 @@ async def expire_pending(session: AsyncSession, *, now: datetime) -> int | None:
 
 # --- completing finished reservations ---
 
-_COMPLETE_FINISHED = text("""
+_COMPLETE_FINISHED_TEMPLATE = """
 WITH finished AS (
     UPDATE reservations
     SET status = 'completed', updated_at = now()
-    WHERE status = 'approved' AND ends_at <= :now
+    WHERE status = 'approved' AND ends_at <= :now /* scope */
     RETURNING id, server_id
 ), released AS (
     UPDATE gpu_allocations
@@ -168,10 +182,16 @@ WITH finished AS (
     RETURNING 1
 )
 SELECT server_id FROM finished
-""").bindparams(_at("now"))
+"""
+_COMPLETE_FINISHED = text(_COMPLETE_FINISHED_TEMPLATE).bindparams(_at("now"))
+_COMPLETE_FINISHED_ONLY = text(
+    _COMPLETE_FINISHED_TEMPLATE.replace("/* scope */", "AND id = ANY(:only)")
+).bindparams(_at("now"), bindparam("only", type_=ARRAY(Uuid())))
 
 
-async def complete_finished(session: AsyncSession, *, now: datetime) -> int | None:
+async def complete_finished(
+    session: AsyncSession, *, now: datetime, only: Collection[uuid.UUID] | None = None
+) -> int | None:
     """Mark approved reservations whose end has passed as completed, release their
     allocations, and audit each, in one statement.
 
@@ -183,10 +203,16 @@ async def complete_finished(session: AsyncSession, *, now: datetime) -> int | No
 
     Returns how many were completed, or None when another run holds the job's lock.
     """
-    if not await try_job_lock(session, Job.COMPLETE_FINISHED):
+    if only is not None:
+        if not only:
+            return 0
+        statement, params = _COMPLETE_FINISHED_ONLY, {"now": now, "only": list(only)}
+    elif not await try_job_lock(session, Job.COMPLETE_FINISHED):
         return None
+    else:
+        statement, params = _COMPLETE_FINISHED, {"now": now}
     # One row per completed reservation, naming its server.
-    server_ids = list(await session.scalars(_COMPLETE_FINISHED, {"now": now}))
+    server_ids = list(await session.scalars(statement, params))
     for server_id in set(server_ids):
         availability_cache.mark_changed(session, server_id)
     return len(server_ids)

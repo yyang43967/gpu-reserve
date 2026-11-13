@@ -9,10 +9,19 @@ from app.api import problem_responses
 from app.api.deps import AdminUser, CurrentUser, SessionDep, SettingsDep
 from app.models import ReservationStatus
 from app.schemas.pagination import Page, PageParamsDep
-from app.schemas.reservation import ReservationCreate, ReservationRead, ReservationReject
+from app.schemas.reservation import (
+    AdminReservationRead,
+    ReservationCreate,
+    ReservationRead,
+    ReservationReject,
+    read_reservation,
+)
 from app.services import calendar, reservations
 
 CALENDAR_MEDIA_TYPE = "text/calendar; charset=utf-8"
+
+# Admins also get `seeded`; the union lets each response keep the shape it was built as.
+ReservationOut = AdminReservationRead | ReservationRead
 
 router = APIRouter(
     prefix="/reservations",
@@ -33,7 +42,7 @@ _INVALID = problem_responses(status.HTTP_422_UNPROCESSABLE_CONTENT)
 )
 async def create_reservation(
     body: ReservationCreate, user: CurrentUser, session: SessionDep, settings: SettingsDep
-) -> ReservationRead:
+) -> ReservationOut:
     """Book GPUs on a server. Reservations on servers that require approval start as
     `pending`; others are `approved` immediately. Rule violations that depend only on
     the request and the server's settings return 422; conflicts with other bookings,
@@ -45,7 +54,7 @@ async def create_reservation(
         now=datetime.now(UTC),
         quota_zone=settings.quota_zone,
     )
-    return ReservationRead.build(reservation)
+    return read_reservation(reservation, user)
 
 
 @router.get("", responses=_INVALID)
@@ -80,7 +89,7 @@ async def list_reservations(
             ),
         ),
     ] = None,
-) -> Page[ReservationRead]:
+) -> Page[ReservationOut]:
     """Reservations by start time. Students see their own; admins see all."""
     listing = await reservations.list_reservations(
         session,
@@ -96,8 +105,8 @@ async def list_reservations(
         offset=paging.offset,
         limit=paging.page_size,
     )
-    return Page[ReservationRead](
-        items=[ReservationRead.build(r) for r in listing.items],
+    return Page[ReservationOut](
+        items=[read_reservation(r, user) for r in listing.items],
         total=listing.total,
         page=paging.page,
         page_size=paging.page_size,
@@ -131,33 +140,33 @@ async def get_reservation_calendar(
 @router.get("/{reservation_id}", responses=_NOT_FOUND)
 async def get_reservation(
     reservation_id: uuid.UUID, user: CurrentUser, session: SessionDep
-) -> ReservationRead:
+) -> ReservationOut:
     """The owner's or any reservation for admins; others get 404."""
-    return ReservationRead.build(await reservations.get_reservation(session, user, reservation_id))
+    return read_reservation(await reservations.get_reservation(session, user, reservation_id), user)
 
 
 @router.post("/{reservation_id}/cancel", responses={**_NOT_FOUND, **_CONFLICT})
 async def cancel_reservation(
     reservation_id: uuid.UUID, user: CurrentUser, session: SessionDep
-) -> ReservationRead:
+) -> ReservationOut:
     """Cancel a pending reservation, or an approved one that has not started. A running
     reservation ends early instead: its end moves to the next half hour and it becomes
     `completed`. Owners and admins."""
     reservation = await reservations.cancel_reservation(
         session, user, reservation_id, now=datetime.now(UTC)
     )
-    return ReservationRead.build(reservation)
+    return read_reservation(reservation, user)
 
 
 @router.post("/{reservation_id}/approve", responses={**_ADMIN, **_NOT_FOUND, **_CONFLICT})
 async def approve_reservation(
     reservation_id: uuid.UUID, admin: AdminUser, session: SessionDep
-) -> ReservationRead:
+) -> ReservationOut:
     """Approve a pending reservation that has not started."""
     reservation = await reservations.approve_reservation(
         session, admin, reservation_id, now=datetime.now(UTC)
     )
-    return ReservationRead.build(reservation)
+    return read_reservation(reservation, admin)
 
 
 @router.post(
@@ -166,9 +175,9 @@ async def approve_reservation(
 )
 async def reject_reservation(
     reservation_id: uuid.UUID, body: ReservationReject, admin: AdminUser, session: SessionDep
-) -> ReservationRead:
+) -> ReservationOut:
     """Reject a pending reservation with a reason, releasing its GPUs."""
     reservation = await reservations.reject_reservation(
         session, admin, reservation_id, reason=body.reason, now=datetime.now(UTC)
     )
-    return ReservationRead.build(reservation)
+    return read_reservation(reservation, admin)

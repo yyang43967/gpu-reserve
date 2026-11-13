@@ -13,9 +13,8 @@ rate limits, and one conversation list. A daily job returns it to its seeded sta
 
 The caller clears the account's rate-limit counters after the commit.
 
-Seeded and visitor bookings are told apart by time: the seed creates the account and
-its bookings in one transaction, where now() does not change, so seeded bookings have
-exactly the account's created_at and everything a visitor makes is later.
+Seeded and visitor bookings are told apart by `reservations.seeded`, which only the seed
+and its nightly replay set.
 """
 
 import uuid
@@ -45,14 +44,10 @@ class DemoReset:
     threads_deleted: int = 0
 
 
-def is_seeded(owner: User, reservation: Reservation) -> bool:
-    return reservation.created_at <= owner.created_at
-
-
 def ensure_may_cancel(actor: User, reservation: Reservation) -> None:
     """The demo account may cancel the bookings visitors made, not its seeded ones,
     which every later visitor should still see."""
-    if actor.is_demo and reservation.user_id == actor.id and is_seeded(actor, reservation):
+    if actor.is_demo and reservation.user_id == actor.id and reservation.seeded:
         raise DemoAccountReadOnly(
             "This booking is part of the demo account's history and cannot be cancelled. "
             "Bookings you make can be."
@@ -70,7 +65,7 @@ async def reset_demo_accounts(
         rows = (
             await session.execute(
                 select(Reservation.id, Reservation.server_id)
-                .where(Reservation.user_id == user.id, Reservation.created_at > user.created_at)
+                .where(Reservation.user_id == user.id, Reservation.seeded.is_(False))
                 .with_for_update()
             )
         ).all()

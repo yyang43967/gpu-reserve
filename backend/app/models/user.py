@@ -43,4 +43,7 @@ class User(TimestampMixin, Base):
     # change its profile or cancel the bookings it was seeded with, and a daily job
     # removes what visitors added.
     is_demo: Mapped[bool] = mapped_column(default=False, server_default=false())
+    # A student the demo seed created. A nightly job books their seeded plan again
+    # relative to the current day; accounts people registered are never seeded.
+    seeded: Mapped[bool] = mapped_column(default=False, server_default=false())
     avatar_key: Mapped[str | None] = mapped_column(String(OBJECT_KEY_MAX_LENGTH))

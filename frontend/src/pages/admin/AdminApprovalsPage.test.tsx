@@ -95,6 +95,16 @@ describe("approval queue", () => {
     expect(query?.get("order")).toBe("starts_at");
   });
 
+  it("marks demo requests, which are replaced every night", async () => {
+    queueApi([pending({ seeded: true }), later]);
+    renderRoute("/admin/approvals");
+
+    const demo = await screen.findByRole("listitem", { name: "Ada Lovelace, h100-node-01" });
+    expect(within(demo).getByText("Demo")).toBeInTheDocument();
+    const real = screen.getByRole("listitem", { name: "Alan Turing, h100-tokyo-01" });
+    expect(within(real).queryByText("Demo")).not.toBeInTheDocument();
+  });
+
   it("is reached from the admin hub", async () => {
     queueApi([]);
     const { router } = renderRoute("/admin");

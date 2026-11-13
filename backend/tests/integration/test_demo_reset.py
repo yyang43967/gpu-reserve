@@ -15,13 +15,23 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from app.core.config import Settings
 from app.core.exceptions import DemoAccountReadOnly
 from app.db.session import create_session_factory
-from app.models import AuditLog, ChatMessage, ChatThread, Reservation, Server, User
+from app.models import (
+    AuditLog,
+    ChatMessage,
+    ChatThread,
+    Reservation,
+    ReservationStatus,
+    Server,
+    User,
+)
 from app.models.chat import ChatRole
 from app.seed import run
 from app.services import passwords, reservations
 from app.services.availability_cache import build_availability_cache
+from app.services.demo_plan import PLAN
 from app.services.reservations import NewReservation
 from app.workers import tasks
+from app.workers.settings import CRON_JOBS, WorkerSettings
 from tests.integration.reservation_helpers import QUOTA_ZONE, add_lab, add_server, next_saturday
 
 pytestmark = pytest.mark.integration
@@ -87,6 +97,11 @@ async def _count_reservations(factory: async_sessionmaker[AsyncSession], email: 
             )
             or 0
         )
+
+
+async def _reservation_ids(factory: async_sessionmaker[AsyncSession]) -> set[uuid.UUID]:
+    async with factory() as db:
+        return set(await db.scalars(select(Reservation.id).where(Reservation.seeded)))
 
 
 async def _visitor_booking(factory: async_sessionmaker[AsyncSession], email: str) -> Server:
@@ -159,11 +174,17 @@ async def test_reset_removes_what_visitors_added_and_keeps_the_seeded_history(
     generation_key = f"availability:v1:{server.id}:generation"
     generation_before = int(await redis.get(generation_key) or 0)
 
-    report = await tasks.reset_demo(seeded)
+    seeded_ids = await _reservation_ids(factory)
+    result = await tasks.reset_and_refresh_demo(seeded)
+    report = result.reset
 
     assert report.accounts == 1
     assert report.reservations_deleted == 1
     assert report.threads_deleted == 1
+    # Then the seeded plan was booked again around now, as new rows.
+    assert result.refresh is not None
+    assert (result.refresh.created, result.refresh.skipped) == (len(PLAN), ())
+    assert not seeded_ids & await _reservation_ids(factory)
     assert await _count_reservations(factory, DEMO_EMAIL) == seeded_demo
     assert await _count_reservations(factory, OTHER_EMAIL) == seeded_other + 1
     async with factory() as db:
@@ -183,9 +204,11 @@ async def test_reset_removes_what_visitors_added_and_keeps_the_seeded_history(
         assert await redis.get(f"{prefix}:user:{other_id}") is not None
 
     # Nothing left to do on a second run.
-    again = await tasks.reset_demo(seeded)
-    assert again.reservations_deleted == 0
-    assert again.threads_deleted == 0
+    again = await tasks.reset_and_refresh_demo(seeded)
+    assert again.reset.reservations_deleted == 0
+    assert again.reset.threads_deleted == 0
+    # The replayed bookings are seeded, so the reset keeps them.
+    assert await _count_reservations(factory, DEMO_EMAIL) == seeded_demo
 
 
 async def test_the_demo_account_cannot_cancel_its_seeded_bookings(
@@ -197,13 +220,13 @@ async def test_the_demo_account_cannot_cancel_its_seeded_bookings(
         demo = await _user(db, DEMO_EMAIL)
         rows = (
             await db.execute(
-                select(Reservation.id, Reservation.created_at)
+                select(Reservation.id, Reservation.seeded)
                 .where(Reservation.user_id == demo.id)
                 .order_by(Reservation.created_at)
             )
         ).all()
         seeded_id, visitor_id = rows[0].id, rows[-1].id
-        assert rows[0].created_at == demo.created_at < rows[-1].created_at
+        assert rows[0].seeded and not rows[-1].seeded
 
         with pytest.raises(DemoAccountReadOnly):
             await reservations.cancel_reservation(db, demo, seeded_id, now=datetime.now(UTC))
@@ -213,13 +236,41 @@ async def test_the_demo_account_cannot_cancel_its_seeded_bookings(
         assert cancelled.status.value == "cancelled"
 
 
+async def test_the_demo_account_cannot_cancel_bookings_replayed_overnight(
+    seeded: dict[str, Any],
+) -> None:
+    factory: async_sessionmaker[AsyncSession] = seeded["session_factory"]
+    await tasks.reset_and_refresh_demo(seeded)
+    async with factory() as db, db.begin():
+        demo = await _user(db, DEMO_EMAIL)
+        replayed = await db.scalar(
+            select(Reservation.id).where(
+                Reservation.user_id == demo.id,
+                Reservation.seeded,
+                Reservation.status == ReservationStatus.APPROVED,
+                Reservation.starts_at > datetime.now(UTC),
+            )
+        )
+        assert replayed is not None
+        with pytest.raises(DemoAccountReadOnly):
+            await reservations.cancel_reservation(db, demo, replayed, now=datetime.now(UTC))
+
+
+def test_the_demo_maintenance_runs_daily_at_ten_utc() -> None:
+    [job] = [job for job in CRON_JOBS if job.name.endswith("reset_and_refresh_demo")]
+    assert (job.hour, job.minute) == ({10}, {0})
+    assert WorkerSettings.timezone is UTC
+
+
 async def test_reset_does_nothing_without_a_demo_account(seeded: dict[str, Any]) -> None:
     factory: async_sessionmaker[AsyncSession] = seeded["session_factory"]
     async with factory() as db, db.begin():
         await db.execute(update(User).values(is_demo=False))
     await _visitor_booking(factory, DEMO_EMAIL)
 
-    report = await tasks.reset_demo(seeded)
+    result = await tasks.reset_and_refresh_demo(seeded)
 
-    assert report.accounts == 0
-    assert report.reservations_deleted == 0
+    assert result.reset.accounts == 0
+    assert result.reset.reservations_deleted == 0
+    # Without a demo account there is no demo to refresh.
+    assert result.refresh is None
