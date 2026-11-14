@@ -6,7 +6,7 @@ A booking platform for shared GPU servers in university labs: students reserve G
 
 **Live demo: [gpu.yiyangdev.com](https://gpu.yiyangdev.com).** The sign-in page has a one-click demo student login. Demo data is replayed around the current date every night.
 
-<!-- Demo GIF: docs/media/demo.gif -->
+![Booking two GPUs through the assistant: it shows a confirmation card, the booking is made only after Confirm booking, and the new reservation appears in My reservations](docs/media/demo.gif)
 
 ## Highlights
 
