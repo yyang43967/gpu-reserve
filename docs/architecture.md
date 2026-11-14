@@ -282,11 +282,11 @@ sequenceDiagram
     Note over B: card: Confirm booking / Don't book
     B->>A: POST /threads/{id}/resume {confirm}
     A->>D: claim pending_action
-    A->>D: dry run again; compare with what the user saw
+    A->>D: dry run again, compare with what the user saw
     alt unchanged
         A->>D: create_reservation + assistant_actions row + audit (one transaction)
     else changed or declined
-        A->>D: no reservation; outcome recorded
+        A->>D: no reservation, outcome recorded
     end
     A->>M: tool result
     M-->>A: answer
