@@ -7,8 +7,11 @@ name: Deploy
 # AWS access comes from GitHub's OIDC token and the deploy role; there are no AWS keys
 # in GitHub. The job runs only when the repository variable DEPLOY_ENABLED is "true",
 # which is set once the deploy role exists (see "Turning on the CI deploy role" in
-# infra/terraform/README.md). Repository variables: DEPLOY_ENABLED, AWS_REGION,
-# AWS_DEPLOY_ROLE_ARN (terraform output github_deploy_role_arn).
+# infra/terraform/README.md). Repository variables: DEPLOY_ENABLED, AWS_REGION. Secret
+# of the production environment: AWS_DEPLOY_ROLE_ARN (terraform output
+# github_deploy_role_arn). The ARN is not secret, but it contains the account ID, and a
+# secret is the only way to keep it out of the log: GitHub prints a step's inputs in
+# its header, before any step could mask them.
 
 on:
   workflow_run:
@@ -73,9 +76,18 @@ jobs:
 
       - uses: aws-actions/configure-aws-credentials@v6
         with:
-          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
           role-session-name: deploy-${{ github.run_id }}
           aws-region: ${{ vars.AWS_REGION }}
+          mask-aws-account-id: true
+
+      # The account ID is in the ECR registry, the backups bucket name, and the role ARN,
+      # and the build and deploy steps print all three. Masked explicitly as well, so the
+      # log stays clean even if the action's own masking changes.
+      - name: Mask the account ID
+        run: |
+          account="$(aws sts get-caller-identity --query Account --output text)"
+          echo "::add-mask::$account"
 
       - name: Build and push the image
         if: steps.target.outputs.build == 'true'
