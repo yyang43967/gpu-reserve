@@ -158,3 +158,7 @@ Infrastructure is Terraform in `us-east-2` ([infra/terraform](infra/terraform/RE
 | `serving/` | vLLM deployment of Qwen3.6 on Modal, for evaluation |
 | `infra/` | Terraform, production Compose file, and deploy scripts |
 | `docs/` | Architecture, design decisions, and development guide |
+
+## License
+
+[MIT](LICENSE)
