@@ -76,8 +76,8 @@ MAX_ALLOCATION_RETRIES: Final = 3
 
 # exclusion_violation: another transaction took one of the chosen GPUs.
 EXCLUSION_VIOLATION: Final = "23P01"
-# deadlock_detected: not expected, because allocations are inserted in GPU order (see
-# _insert_allocations), but retrying is the right response if it ever happens.
+# deadlock_detected: not expected between bookings, which the server row lock serializes
+# (see the module docstring), but retrying is the right response if it ever happens.
 DEADLOCK_DETECTED: Final = "40P01"
 RETRYABLE_SQLSTATES: Final = frozenset({EXCLUSION_VIOLATION, DEADLOCK_DETECTED})
 
@@ -228,10 +228,11 @@ def _insert_allocations(
 ) -> None:
     """Add one active allocation per GPU, in ascending GPU number.
 
-    The order matters. An insert that conflicts with an uncommitted allocation waits
-    for that transaction. If every transaction inserts in the same order, a transaction
-    can only wait for one that is already past that GPU, so waits can never form a
-    cycle. The unit of work keeps the order in which objects were added.
+    A fixed order keeps inserts predictable, but it does not prevent deadlocks: two
+    transactions inserting the same GPU at the same moment can each wait for the
+    other's row while the exclusion constraint is checked. Bookings are serialized by
+    the server row lock instead; see the module docstring. The unit of work keeps the
+    order in which objects were added.
     """
     for gpu in sorted(gpus, key=lambda g: g.index):
         session.add(

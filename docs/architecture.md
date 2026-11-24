@@ -129,7 +129,7 @@ sequenceDiagram
     A->>A: check request shape (aware times, end after start)
     A->>D: pg_advisory_xact_lock(user)
     A->>D: re-read is_active and quota
-    A->>D: SELECT server, lab ... FOR SHARE OF servers
+    A->>D: SELECT server, lab ... FOR NO KEY UPDATE OF servers
     A->>A: grid, horizon, duration, GPU count, peak hours, server open
     A->>D: count active reservations, load this user's bookings in the quota weeks
     loop first attempt + up to 3 retries, each in a savepoint
@@ -146,10 +146,12 @@ sequenceDiagram
 
 | Path | Takes, in order |
 |---|---|
-| Booking | user advisory lock, then server row `FOR SHARE` |
+| Booking | user advisory lock, then server row `FOR NO KEY UPDATE` |
 | Server change or delete | server row `FOR UPDATE` |
 | Quota change, deactivation | user advisory lock (deactivation then locks the user's reservation rows) |
 | Approve, reject, cancel | reservation row `FOR UPDATE` |
+
+Bookings on one server take turns on the server row, because two bookings inserting the same GPU at the same moment can each wait for the other's uncommitted row while the exclusion constraint is checked, and deadlock; the load test found this, and inserting GPUs in a fixed order does not prevent it.
 
 Reasoning, alternatives, and the concurrency tests are in [decisions.md](decisions.md#phase-4--reservations).
 
